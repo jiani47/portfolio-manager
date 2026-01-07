@@ -1,0 +1,414 @@
+import { useState, useCallback } from 'react';
+import type {
+  Account,
+  Security,
+  Position,
+  Transaction,
+  TaxLot,
+  TransactionFilters,
+  TaxLotFilters,
+  PortfolioSummary,
+  AssetAllocation,
+  AppSettings,
+  AIInsight,
+  BackupInfo,
+  BackupResult,
+  ExcelImportResult,
+  BackupConfig,
+} from '../../shared/types';
+
+// Type declaration for the electron API exposed via preload
+declare global {
+  interface Window {
+    electronAPI: {
+      // Account operations
+      getAccounts: () => Promise<Account[]>;
+      createAccount: (account: Omit<Account, 'id' | 'createdAt' | 'updatedAt'>) => Promise<Account>;
+      updateAccount: (id: string, account: Partial<Account>) => Promise<Account>;
+      deleteAccount: (id: string) => Promise<void>;
+
+      // Security operations
+      getSecurities: () => Promise<Security[]>;
+      createSecurity: (security: Omit<Security, 'id' | 'createdAt'>) => Promise<Security>;
+      findSecurityBySymbol: (symbol: string) => Promise<Security | null>;
+
+      // Position operations
+      getPositions: (accountId?: string) => Promise<Position[]>;
+      createPosition: (position: Omit<Position, 'id'>) => Promise<Position>;
+      updatePosition: (id: string, position: Partial<Position>) => Promise<Position>;
+      deletePosition: (id: string) => Promise<void>;
+
+      // Transaction operations
+      getTransactions: (filters?: TransactionFilters) => Promise<Transaction[]>;
+      createTransaction: (transaction: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>) => Promise<Transaction>;
+      updateTransaction: (id: string, transaction: Partial<Transaction>) => Promise<Transaction>;
+      deleteTransaction: (id: string) => Promise<void>;
+      importTransactions: (transactions: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[]) => Promise<number>;
+
+      // Tax lot operations
+      getTaxLots: (filters?: TaxLotFilters) => Promise<TaxLot[]>;
+      createTaxLot: (taxLot: Omit<TaxLot, 'id' | 'createdAt' | 'updatedAt'>) => Promise<TaxLot>;
+      updateTaxLot: (id: string, taxLot: Partial<TaxLot>) => Promise<TaxLot>;
+
+      // File operations
+      importExcel: () => Promise<ExcelImportResult | null>;
+      exportData: (data: unknown, filename: string) => Promise<boolean>;
+
+      // Backup operations
+      createBackup: () => Promise<BackupResult>;
+      restoreBackup: (path: string) => Promise<boolean>;
+      listBackups: () => Promise<BackupInfo[]>;
+      configureBackup: (config: BackupConfig) => Promise<void>;
+
+      // Settings operations
+      getSettings: () => Promise<AppSettings>;
+      updateSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>;
+
+      // AI operations
+      generateInsights: () => Promise<AIInsight[]>;
+      analyzePortfolio: () => Promise<string>;
+
+      // Portfolio summary
+      getPortfolioSummary: () => Promise<PortfolioSummary>;
+      getAssetAllocation: () => Promise<AssetAllocation[]>;
+    };
+  }
+}
+
+export function useAccounts() {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchAccounts = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getAccounts();
+      setAccounts(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createAccount = useCallback(async (account: Omit<Account, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const newAccount = await window.electronAPI.createAccount(account);
+    setAccounts(prev => [...prev, newAccount]);
+    return newAccount;
+  }, []);
+
+  const updateAccount = useCallback(async (id: string, account: Partial<Account>) => {
+    const updated = await window.electronAPI.updateAccount(id, account);
+    setAccounts(prev => prev.map(a => a.id === id ? updated : a));
+    return updated;
+  }, []);
+
+  const deleteAccount = useCallback(async (id: string) => {
+    await window.electronAPI.deleteAccount(id);
+    setAccounts(prev => prev.filter(a => a.id !== id));
+  }, []);
+
+  return { accounts, loading, error, fetchAccounts, createAccount, updateAccount, deleteAccount };
+}
+
+export function useSecurities() {
+  const [securities, setSecurities] = useState<Security[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchSecurities = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getSecurities();
+      setSecurities(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createSecurity = useCallback(async (security: Omit<Security, 'id' | 'createdAt'>) => {
+    const newSecurity = await window.electronAPI.createSecurity(security);
+    setSecurities(prev => [...prev, newSecurity]);
+    return newSecurity;
+  }, []);
+
+  const findBySymbol = useCallback(async (symbol: string) => {
+    return window.electronAPI.findSecurityBySymbol(symbol);
+  }, []);
+
+  return { securities, loading, error, fetchSecurities, createSecurity, findBySymbol };
+}
+
+export function usePositions() {
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchPositions = useCallback(async (accountId?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getPositions(accountId);
+      setPositions(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createPosition = useCallback(async (position: Omit<Position, 'id'>) => {
+    const newPosition = await window.electronAPI.createPosition(position);
+    setPositions(prev => [...prev, newPosition]);
+    return newPosition;
+  }, []);
+
+  const updatePosition = useCallback(async (id: string, position: Partial<Position>) => {
+    const updated = await window.electronAPI.updatePosition(id, position);
+    setPositions(prev => prev.map(p => p.id === id ? updated : p));
+    return updated;
+  }, []);
+
+  const deletePosition = useCallback(async (id: string) => {
+    await window.electronAPI.deletePosition(id);
+    setPositions(prev => prev.filter(p => p.id !== id));
+  }, []);
+
+  return { positions, loading, error, fetchPositions, createPosition, updatePosition, deletePosition };
+}
+
+export function useTransactions() {
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchTransactions = useCallback(async (filters?: TransactionFilters) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getTransactions(filters);
+      setTransactions(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createTransaction = useCallback(async (transaction: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const newTransaction = await window.electronAPI.createTransaction(transaction);
+    setTransactions(prev => [newTransaction, ...prev]);
+    return newTransaction;
+  }, []);
+
+  const updateTransaction = useCallback(async (id: string, transaction: Partial<Transaction>) => {
+    const updated = await window.electronAPI.updateTransaction(id, transaction);
+    setTransactions(prev => prev.map(t => t.id === id ? updated : t));
+    return updated;
+  }, []);
+
+  const deleteTransaction = useCallback(async (id: string) => {
+    await window.electronAPI.deleteTransaction(id);
+    setTransactions(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  const importTransactions = useCallback(async (transactions: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>[]) => {
+    const count = await window.electronAPI.importTransactions(transactions);
+    await fetchTransactions();
+    return count;
+  }, [fetchTransactions]);
+
+  return { transactions, loading, error, fetchTransactions, createTransaction, updateTransaction, deleteTransaction, importTransactions };
+}
+
+export function useTaxLots() {
+  const [taxLots, setTaxLots] = useState<TaxLot[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchTaxLots = useCallback(async (filters?: TaxLotFilters) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getTaxLots(filters);
+      setTaxLots(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createTaxLot = useCallback(async (taxLot: Omit<TaxLot, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const newTaxLot = await window.electronAPI.createTaxLot(taxLot);
+    setTaxLots(prev => [...prev, newTaxLot]);
+    return newTaxLot;
+  }, []);
+
+  const updateTaxLot = useCallback(async (id: string, taxLot: Partial<TaxLot>) => {
+    const updated = await window.electronAPI.updateTaxLot(id, taxLot);
+    setTaxLots(prev => prev.map(t => t.id === id ? updated : t));
+    return updated;
+  }, []);
+
+  return { taxLots, loading, error, fetchTaxLots, createTaxLot, updateTaxLot };
+}
+
+export function usePortfolio() {
+  const [summary, setSummary] = useState<PortfolioSummary | null>(null);
+  const [allocation, setAllocation] = useState<AssetAllocation[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchSummary = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [summaryData, allocationData] = await Promise.all([
+        window.electronAPI.getPortfolioSummary(),
+        window.electronAPI.getAssetAllocation(),
+      ]);
+      setSummary(summaryData);
+      setAllocation(allocationData);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { summary, allocation, loading, error, fetchSummary };
+}
+
+export function useSettings() {
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchSettings = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getSettings();
+      setSettings(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const updateSettings = useCallback(async (newSettings: Partial<AppSettings>) => {
+    const updated = await window.electronAPI.updateSettings(newSettings);
+    setSettings(updated);
+    return updated;
+  }, []);
+
+  return { settings, loading, error, fetchSettings, updateSettings };
+}
+
+export function useBackup() {
+  const [backups, setBackups] = useState<BackupInfo[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchBackups = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.listBackups();
+      setBackups(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createBackup = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI.createBackup();
+      if (result.success) {
+        await fetchBackups();
+      }
+      return result;
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchBackups]);
+
+  const restoreBackup = useCallback(async (path: string) => {
+    setLoading(true);
+    try {
+      return await window.electronAPI.restoreBackup(path);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const configureBackup = useCallback(async (config: BackupConfig) => {
+    await window.electronAPI.configureBackup(config);
+  }, []);
+
+  return { backups, loading, error, fetchBackups, createBackup, restoreBackup, configureBackup };
+}
+
+export function useAI() {
+  const [insights, setInsights] = useState<AIInsight[]>([]);
+  const [analysis, setAnalysis] = useState<string>('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const generateInsights = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.generateInsights();
+      setInsights(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const analyzePortfolio = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.analyzePortfolio();
+      setAnalysis(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { insights, analysis, loading, error, generateInsights, analyzePortfolio };
+}
+
+export function useFileImport() {
+  const [importing, setImporting] = useState(false);
+
+  const importExcel = useCallback(async () => {
+    setImporting(true);
+    try {
+      return await window.electronAPI.importExcel();
+    } finally {
+      setImporting(false);
+    }
+  }, []);
+
+  const exportData = useCallback(async (data: unknown, filename: string) => {
+    return await window.electronAPI.exportData(data, filename);
+  }, []);
+
+  return { importing, importExcel, exportData };
+}
