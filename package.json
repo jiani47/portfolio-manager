@@ -2,7 +2,7 @@
   "name": "portfolio-manager",
   "version": "1.0.0",
   "description": "Personal Portfolio Management Desktop Application",
-  "main": "dist/main/main.js",
+  "main": "dist/main/main/main.js",
   "scripts": {
     "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\"",
     "dev:main": "tsc -p tsconfig.main.json && electron .",
@@ -15,15 +15,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.20.0",
     "better-sqlite3": "^9.4.3",
-    "electron-store": "^8.1.0",
-    "xlsx": "^0.18.5",
-    "uuid": "^9.0.1",
     "date-fns": "^3.3.1",
+    "electron-store": "^8.1.0",
     "openai": "^4.28.0",
-    "@anthropic-ai/sdk": "^0.20.0"
+    "uuid": "^9.0.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.2",
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^20.11.17",
     "@types/react": "^18.2.55",
@@ -62,5 +63,11 @@
     "linux": {
       "target": "AppImage"
     }
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "better-sqlite3"
+    ]
   }
 }
