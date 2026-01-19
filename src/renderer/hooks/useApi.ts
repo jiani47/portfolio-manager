@@ -15,6 +15,8 @@ import type {
   BackupResult,
   ExcelImportResult,
   BackupConfig,
+  BrokerageParserInfo,
+  BrokerageParseResult,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -71,6 +73,11 @@ declare global {
       // Portfolio summary
       getPortfolioSummary: () => Promise<PortfolioSummary>;
       getAssetAllocation: () => Promise<AssetAllocation[]>;
+
+      // Brokerage import operations
+      listBrokerageParsers: () => Promise<BrokerageParserInfo[]>;
+      selectBrokerageFile: () => Promise<string | null>;
+      parseBrokerageFile: (parserId: string, filePath: string) => Promise<BrokerageParseResult>;
     };
   }
 }
@@ -411,4 +418,73 @@ export function useFileImport() {
   }, []);
 
   return { importing, importExcel, exportData };
+}
+
+export function useBrokerageImport() {
+  const [parsers, setParsers] = useState<BrokerageParserInfo[]>([]);
+  const [parseResult, setParseResult] = useState<BrokerageParseResult | null>(null);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchParsers = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.listBrokerageParsers();
+      setParsers(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const selectFile = useCallback(async () => {
+    setError(null);
+    try {
+      const filePath = await window.electronAPI.selectBrokerageFile();
+      setSelectedFile(filePath);
+      return filePath;
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    }
+  }, []);
+
+  const parseFile = useCallback(async (parserId: string, filePath: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.parseBrokerageFile(parserId, filePath);
+      setParseResult(result);
+      if (!result.success && result.errors.length > 0) {
+        setError(result.errors.join(', '));
+      }
+      return result;
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const clearResult = useCallback(() => {
+    setParseResult(null);
+    setSelectedFile(null);
+    setError(null);
+  }, []);
+
+  return {
+    parsers,
+    parseResult,
+    selectedFile,
+    loading,
+    error,
+    fetchParsers,
+    selectFile,
+    parseFile,
+    clearResult,
+  };
 }

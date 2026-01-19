@@ -52,4 +52,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Portfolio summary
   getPortfolioSummary: () => ipcRenderer.invoke('db:portfolio:summary'),
   getAssetAllocation: () => ipcRenderer.invoke('db:portfolio:allocation'),
+
+  // Brokerage import operations
+  listBrokerageParsers: () => ipcRenderer.invoke('parsers:list'),
+  selectBrokerageFile: () => ipcRenderer.invoke('file:select-brokerage-file'),
+  parseBrokerageFile: (parserId: string, filePath: string) => ipcRenderer.invoke('file:parse-brokerage', parserId, filePath),
 });

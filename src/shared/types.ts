@@ -156,6 +156,11 @@ export interface IPCChannels {
   // AI insights
   'ai:generate-insights': () => AIInsight[];
   'ai:analyze-portfolio': () => string;
+
+  // Brokerage import
+  'parsers:list': () => BrokerageParserInfo[];
+  'file:select-brokerage-file': () => string | null;
+  'file:parse-brokerage': (parserId: string, filePath: string) => BrokerageParseResult;
 }
 
 export interface TransactionFilters {
@@ -191,4 +196,37 @@ export interface BackupInfo {
   path: string;
   timestamp: string;
   size: number;
+}
+
+// Brokerage import types
+export interface ParsedPosition {
+  symbol: string;
+  name: string;
+  quantity: number;
+  costBasis: number;
+  currentPrice: number;
+  marketValue: number;
+  unrealizedGain: number;
+  unrealizedGainPercent: number;
+  securityType: 'stock' | 'etf' | 'mutual_fund' | 'bond' | 'option' | 'crypto' | 'other';
+}
+
+export interface BrokerageParseResult {
+  success: boolean;
+  broker: string;
+  accounts: BrokerageAccountData[];
+  errors: string[];
+}
+
+export interface BrokerageAccountData {
+  accountIdentifier: string;
+  positions: ParsedPosition[];
+}
+
+export interface BrokerageParserInfo {
+  id: string;
+  name: string;
+  description: string;
+  fileTypes: string[];
+  sampleFormat?: string;
 }

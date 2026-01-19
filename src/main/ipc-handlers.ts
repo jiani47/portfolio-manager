@@ -1,9 +1,11 @@
 import { IpcMain, dialog } from 'electron';
 import * as XLSX from 'xlsx';
+import * as fs from 'fs';
 import Store from 'electron-store';
 import { Database } from './database';
 import { BackupService } from './backup-service';
 import { AIService } from './ai-service';
+import { parserRegistry } from './parsers';
 import { AppSettings, ExcelImportResult } from '../shared/types';
 
 export function setupIpcHandlers(
@@ -165,5 +167,49 @@ export function setupIpcHandlers(
       allocation,
       securities,
     });
+  });
+
+  // Brokerage import handlers
+  ipcMain.handle('parsers:list', () => parserRegistry.listParsers());
+
+  ipcMain.handle('file:select-brokerage-file', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [
+        { name: 'CSV Files', extensions: ['csv'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null;
+    }
+
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle('file:parse-brokerage', async (_, parserId: string, filePath: string) => {
+    const parser = parserRegistry.getParser(parserId);
+    if (!parser) {
+      return {
+        success: false,
+        broker: parserId,
+        accounts: [],
+        errors: [`Parser not found: ${parserId}`],
+      };
+    }
+
+    // Read file content for canParse check
+    const content = fs.readFileSync(filePath, 'utf-8');
+    if (!parser.canParse(filePath, content)) {
+      return {
+        success: false,
+        broker: parserId,
+        accounts: [],
+        errors: ['File format not recognized by this parser'],
+      };
+    }
+
+    return parser.parse(filePath);
   });
 }

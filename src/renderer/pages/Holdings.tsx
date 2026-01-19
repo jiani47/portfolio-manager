@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { usePositions, useAccounts, useSecurities } from '../hooks/useApi';
+import BrokerageImportModal from '../components/BrokerageImportModal';
 import type { Position, Security } from '../../shared/types';
 
 export default function Holdings() {
@@ -7,6 +8,7 @@ export default function Holdings() {
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities, createSecurity, findBySymbol } = useSecurities();
   const [showModal, setShowModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [editingPosition, setEditingPosition] = useState<Position | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<string>('');
   const [formData, setFormData] = useState({
@@ -153,6 +155,9 @@ export default function Holdings() {
               </option>
             ))}
           </select>
+          <button onClick={() => setShowImportModal(true)} className="btn-secondary">
+            Import from Brokerage
+          </button>
           <button onClick={() => handleOpenModal()} className="btn-primary">
             Add Position
           </button>
@@ -361,6 +366,16 @@ export default function Holdings() {
           </div>
         </div>
       )}
+
+      {/* Brokerage Import Modal */}
+      <BrokerageImportModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onSuccess={() => {
+          fetchPositions();
+          fetchSecurities();
+        }}
+      />
     </div>
   );
 }
