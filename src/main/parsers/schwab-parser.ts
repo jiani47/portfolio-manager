@@ -116,17 +116,34 @@ export class SchwabParser implements BrokerageParser {
   }
 
   private shouldSkipRow(line: string): boolean {
-    return line.startsWith('"Cash & Cash Investments"') ||
-           line.startsWith('"Account Total"');
+    return line.startsWith('"Account Total"');
   }
 
   private parseDataRow(line: string, headerMap: Map<string, number>): ParsedPosition | null {
     const values = this.parseCSVLine(line);
 
-    const symbol = this.getValue(values, headerMap, 'Symbol');
-    if (!symbol || symbol === '--') return null;
+    const rawSymbol = this.getValue(values, headerMap, 'Symbol');
+    if (!rawSymbol || rawSymbol === '--') return null;
 
-    const name = this.getValue(values, headerMap, 'Description') || symbol;
+    // Handle cash positions specially
+    if (rawSymbol === 'Cash & Cash Investments') {
+      const marketValue = this.parsePrice(this.getValue(values, headerMap, 'Mkt Val'));
+      if (marketValue === 0) return null;
+
+      return {
+        symbol: 'USD',
+        name: 'US Dollar',
+        quantity: marketValue,
+        costBasis: marketValue,
+        currentPrice: 1,
+        marketValue: marketValue,
+        unrealizedGain: 0,
+        unrealizedGainPercent: 0,
+        securityType: 'cash',
+      };
+    }
+
+    const name = this.getValue(values, headerMap, 'Description') || rawSymbol;
     const quantity = this.parseNumber(this.getValue(values, headerMap, 'Qty'));
     const currentPrice = this.parsePrice(this.getValue(values, headerMap, 'Price'));
     const costBasis = this.parsePrice(this.getValue(values, headerMap, 'Cost Basis'));
@@ -138,7 +155,7 @@ export class SchwabParser implements BrokerageParser {
     if (quantity === 0) return null;
 
     return {
-      symbol,
+      symbol: rawSymbol,
       name,
       quantity,
       costBasis,

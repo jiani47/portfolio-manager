@@ -1,14 +1,20 @@
-import { useEffect } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { usePortfolio, usePositions, useAccounts, useSecurities } from '../hooks/useApi';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip } from 'recharts';
+import type { Position } from '../../shared/types';
 
 const COLORS = ['#0ea5e9', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#6366f1', '#ec4899', '#14b8a6'];
+
+type SortColumn = 'symbol' | 'account' | 'quantity' | 'costBasis' | 'marketValue' | 'gainLoss' | 'percentChange';
+type SortDirection = 'asc' | 'desc';
 
 export default function Dashboard() {
   const { summary, allocation, loading: portfolioLoading, fetchSummary } = usePortfolio();
   const { positions, loading: positionsLoading, fetchPositions } = usePositions();
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities } = useSecurities();
+  const [sortColumn, setSortColumn] = useState<SortColumn>('marketValue');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
 
   useEffect(() => {
     fetchSummary();
@@ -22,6 +28,74 @@ export default function Dashboard() {
   const securityMap = new Map(securities.map(s => [s.id, s]));
   const accountMap = new Map(accounts.map(a => [a.id, a]));
 
+  const handleSort = (column: SortColumn) => {
+    if (sortColumn === column) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortColumn(column);
+      setSortDirection('desc');
+    }
+  };
+
+  const sortedPositions = useMemo(() => {
+    const sorted = [...positions].sort((a, b) => {
+      let aVal: string | number;
+      let bVal: string | number;
+
+      switch (sortColumn) {
+        case 'symbol':
+          aVal = securityMap.get(a.securityId)?.symbol || '';
+          bVal = securityMap.get(b.securityId)?.symbol || '';
+          break;
+        case 'account':
+          aVal = accountMap.get(a.accountId)?.name || '';
+          bVal = accountMap.get(b.accountId)?.name || '';
+          break;
+        case 'quantity':
+          aVal = a.quantity;
+          bVal = b.quantity;
+          break;
+        case 'costBasis':
+          aVal = a.costBasis;
+          bVal = b.costBasis;
+          break;
+        case 'marketValue':
+          aVal = a.marketValue || 0;
+          bVal = b.marketValue || 0;
+          break;
+        case 'gainLoss':
+          aVal = a.unrealizedGain || 0;
+          bVal = b.unrealizedGain || 0;
+          break;
+        case 'percentChange':
+          aVal = a.unrealizedGainPercent || 0;
+          bVal = b.unrealizedGainPercent || 0;
+          break;
+        default:
+          return 0;
+      }
+
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        return sortDirection === 'asc'
+          ? aVal.localeCompare(bVal)
+          : bVal.localeCompare(aVal);
+      }
+
+      return sortDirection === 'asc'
+        ? (aVal as number) - (bVal as number)
+        : (bVal as number) - (aVal as number);
+    });
+
+    return sorted;
+  }, [positions, sortColumn, sortDirection, securityMap, accountMap]);
+
+  const SortIcon = ({ column }: { column: SortColumn }) => {
+    if (sortColumn !== column) {
+      return <span className="ml-1 text-gray-300">↕</span>;
+    }
+    return <span className="ml-1">{sortDirection === 'asc' ? '↑' : '↓'}</span>;
+  };
+
   const topPositions = positions
     .sort((a, b) => (b.marketValue || 0) - (a.marketValue || 0))
     .slice(0, 5);
@@ -30,8 +104,8 @@ export default function Dashboard() {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     }).format(value);
   };
 
@@ -149,17 +223,52 @@ export default function Dashboard() {
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="table-header">Symbol</th>
-                      <th className="table-header">Account</th>
-                      <th className="table-header text-right">Quantity</th>
-                      <th className="table-header text-right">Cost Basis</th>
-                      <th className="table-header text-right">Market Value</th>
-                      <th className="table-header text-right">Gain/Loss</th>
-                      <th className="table-header text-right">% Change</th>
+                      <th
+                        className="table-header cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('symbol')}
+                      >
+                        Symbol<SortIcon column="symbol" />
+                      </th>
+                      <th
+                        className="table-header cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('account')}
+                      >
+                        Account<SortIcon column="account" />
+                      </th>
+                      <th
+                        className="table-header text-right cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('quantity')}
+                      >
+                        Quantity<SortIcon column="quantity" />
+                      </th>
+                      <th
+                        className="table-header text-right cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('costBasis')}
+                      >
+                        Cost Basis<SortIcon column="costBasis" />
+                      </th>
+                      <th
+                        className="table-header text-right cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('marketValue')}
+                      >
+                        Market Value<SortIcon column="marketValue" />
+                      </th>
+                      <th
+                        className="table-header text-right cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('gainLoss')}
+                      >
+                        Gain/Loss<SortIcon column="gainLoss" />
+                      </th>
+                      <th
+                        className="table-header text-right cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('percentChange')}
+                      >
+                        % Change<SortIcon column="percentChange" />
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {positions.map((position) => {
+                    {sortedPositions.map((position) => {
                       const security = securityMap.get(position.securityId);
                       const account = accountMap.get(position.accountId);
                       return (

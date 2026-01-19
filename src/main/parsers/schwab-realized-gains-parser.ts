@@ -157,12 +157,6 @@ export class SchwabRealizedGainsParser implements TransactionParser {
 
     const holdingPeriod: 'short' | 'long' = termStr.toLowerCase().includes('long') ? 'long' : 'short';
 
-    // Build notes for wash sale info
-    let notes: string | undefined;
-    if (washSale) {
-      notes = `Wash Sale - Disallowed Loss: $${disallowedLoss.toFixed(2)}`;
-    }
-
     const transaction: ParsedTransaction = {
       symbol,
       name,
@@ -171,7 +165,8 @@ export class SchwabRealizedGainsParser implements TransactionParser {
       quantity,
       price: proceedsPerShare,
       amount: proceeds,
-      notes,
+      washSale: washSale || undefined,
+      disallowedLoss: disallowedLoss > 0 ? disallowedLoss : undefined,
     };
 
     const taxLot: ParsedTaxLot = {

@@ -62,6 +62,20 @@ export default function Holdings() {
     setShowModal(true);
   };
 
+  const handleAddCash = () => {
+    setEditingPosition(null);
+    setFormData({
+      accountId: accounts[0]?.id || '',
+      symbol: 'USD',
+      name: 'US Dollar',
+      type: 'cash',
+      quantity: '',
+      costBasis: '',
+      currentPrice: '1',
+    });
+    setShowModal(true);
+  };
+
   const handleCloseModal = () => {
     setShowModal(false);
     setEditingPosition(null);
@@ -83,10 +97,13 @@ export default function Holdings() {
 
       const quantity = parseFloat(formData.quantity);
       const costBasis = parseFloat(formData.costBasis);
-      const currentPrice = formData.currentPrice ? parseFloat(formData.currentPrice) : undefined;
-      const marketValue = currentPrice ? quantity * currentPrice : undefined;
-      const unrealizedGain = marketValue ? marketValue - costBasis : undefined;
-      const unrealizedGainPercent = unrealizedGain && costBasis > 0 ? (unrealizedGain / costBasis) * 100 : undefined;
+
+      // For cash positions, always use price of 1
+      const isCash = formData.type === 'cash';
+      const currentPrice = isCash ? 1 : (formData.currentPrice ? parseFloat(formData.currentPrice) : undefined);
+      const marketValue = isCash ? quantity : (currentPrice ? quantity * currentPrice : undefined);
+      const unrealizedGain = marketValue !== undefined ? marketValue - costBasis : undefined;
+      const unrealizedGainPercent = unrealizedGain !== undefined && costBasis > 0 ? (unrealizedGain / costBasis) * 100 : undefined;
 
       if (editingPosition) {
         await updatePosition(editingPosition.id, {
@@ -131,6 +148,8 @@ export default function Holdings() {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     }).format(value);
   };
 
@@ -157,6 +176,9 @@ export default function Holdings() {
           </select>
           <button onClick={() => setShowImportModal(true)} className="btn-secondary">
             Import from Brokerage
+          </button>
+          <button onClick={handleAddCash} className="btn-secondary">
+            Add Cash
           </button>
           <button onClick={() => handleOpenModal()} className="btn-primary">
             Add Position
@@ -277,83 +299,114 @@ export default function Holdings() {
                   ))}
                 </select>
               </div>
-              <div>
-                <label className="label">Symbol</label>
-                <input
-                  type="text"
-                  className="input"
-                  value={formData.symbol}
-                  onChange={(e) => setFormData({ ...formData, symbol: e.target.value.toUpperCase() })}
-                  placeholder="e.g., AAPL"
-                  required
-                  disabled={!!editingPosition}
-                />
-              </div>
-              {!editingPosition && (
+              {formData.type === 'cash' ? (
+                <div className="bg-gray-50 p-3 rounded-lg">
+                  <div className="text-sm text-gray-600">Adding cash position</div>
+                  <div className="font-medium">USD - US Dollar</div>
+                </div>
+              ) : (
                 <>
                   <div>
-                    <label className="label">Name</label>
+                    <label className="label">Symbol</label>
                     <input
                       type="text"
                       className="input"
-                      value={formData.name}
-                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                      placeholder="e.g., Apple Inc."
+                      value={formData.symbol}
+                      onChange={(e) => setFormData({ ...formData, symbol: e.target.value.toUpperCase() })}
+                      placeholder="e.g., AAPL"
+                      required
+                      disabled={!!editingPosition}
                     />
                   </div>
-                  <div>
-                    <label className="label">Type</label>
-                    <select
-                      className="select"
-                      value={formData.type}
-                      onChange={(e) => setFormData({ ...formData, type: e.target.value as Security['type'] })}
-                    >
-                      <option value="stock">Stock</option>
-                      <option value="etf">ETF</option>
-                      <option value="mutual_fund">Mutual Fund</option>
-                      <option value="bond">Bond</option>
-                      <option value="option">Option</option>
-                      <option value="crypto">Crypto</option>
-                      <option value="other">Other</option>
-                    </select>
-                  </div>
+                  {!editingPosition && (
+                    <>
+                      <div>
+                        <label className="label">Name (optional)</label>
+                        <input
+                          type="text"
+                          className="input"
+                          value={formData.name}
+                          onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                          placeholder="e.g., Apple Inc."
+                        />
+                      </div>
+                      <div>
+                        <label className="label">Type</label>
+                        <select
+                          className="select"
+                          value={formData.type}
+                          onChange={(e) => setFormData({ ...formData, type: e.target.value as Security['type'] })}
+                        >
+                          <option value="stock">Stock</option>
+                          <option value="etf">ETF</option>
+                          <option value="mutual_fund">Mutual Fund</option>
+                          <option value="bond">Bond</option>
+                          <option value="option">Option</option>
+                          <option value="crypto">Crypto</option>
+                          <option value="cash">Cash</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </div>
+                    </>
+                  )}
                 </>
               )}
-              <div className="grid grid-cols-2 gap-4">
+              {formData.type === 'cash' ? (
                 <div>
-                  <label className="label">Quantity</label>
-                  <input
-                    type="number"
-                    step="any"
-                    className="input"
-                    value={formData.quantity}
-                    onChange={(e) => setFormData({ ...formData, quantity: e.target.value })}
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="label">Cost Basis ($)</label>
+                  <label className="label">Amount ($)</label>
                   <input
                     type="number"
                     step="0.01"
                     className="input"
-                    value={formData.costBasis}
-                    onChange={(e) => setFormData({ ...formData, costBasis: e.target.value })}
+                    value={formData.quantity}
+                    onChange={(e) => setFormData({
+                      ...formData,
+                      quantity: e.target.value,
+                      costBasis: e.target.value
+                    })}
+                    placeholder="e.g., 10000.00"
                     required
                   />
                 </div>
-              </div>
-              <div>
-                <label className="label">Current Price ($ per share, optional)</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  className="input"
-                  value={formData.currentPrice}
-                  onChange={(e) => setFormData({ ...formData, currentPrice: e.target.value })}
-                  placeholder="Leave blank if unknown"
-                />
-              </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="label">Quantity</label>
+                      <input
+                        type="number"
+                        step="any"
+                        className="input"
+                        value={formData.quantity}
+                        onChange={(e) => setFormData({ ...formData, quantity: e.target.value })}
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Cost Basis ($)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        className="input"
+                        value={formData.costBasis}
+                        onChange={(e) => setFormData({ ...formData, costBasis: e.target.value })}
+                        required
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="label">Current Price ($ per share, optional)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      className="input"
+                      value={formData.currentPrice}
+                      onChange={(e) => setFormData({ ...formData, currentPrice: e.target.value })}
+                      placeholder="Leave blank if unknown"
+                    />
+                  </div>
+                </>
+              )}
               <div className="flex justify-end gap-3 pt-4">
                 <button type="button" onClick={handleCloseModal} className="btn-secondary">
                   Cancel

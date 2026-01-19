@@ -113,6 +113,8 @@ export default function TransactionImportModal({ isOpen, onClose, onImportComple
             price: txData.price,
             amount: txData.amount,
             notes: txData.notes,
+            washSale: txData.washSale,
+            disallowedLoss: txData.disallowedLoss,
           });
 
           // Create tax lots for this transaction

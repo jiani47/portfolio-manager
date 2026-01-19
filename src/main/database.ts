@@ -88,12 +88,26 @@ export class Database {
         amount REAL NOT NULL,
         fees REAL DEFAULT 0,
         notes TEXT,
+        wash_sale INTEGER DEFAULT 0,
+        disallowed_loss REAL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
         FOREIGN KEY (security_id) REFERENCES securities(id)
       )
     `);
+
+    // Migration: add wash_sale and disallowed_loss columns if they don't exist
+    try {
+      this.db.exec(`ALTER TABLE transactions ADD COLUMN wash_sale INTEGER DEFAULT 0`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.db.exec(`ALTER TABLE transactions ADD COLUMN disallowed_loss REAL`);
+    } catch {
+      // Column already exists
+    }
 
     // Tax lots table
     this.db.exec(`
@@ -346,8 +360,8 @@ export class Database {
     const id = uuidv4();
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO transactions (id, account_id, security_id, type, date, quantity, price, amount, fees, notes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO transactions (id, account_id, security_id, type, date, quantity, price, amount, fees, notes, wash_sale, disallowed_loss, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       id,
@@ -360,6 +374,8 @@ export class Database {
       transaction.amount,
       transaction.fees || 0,
       transaction.notes || null,
+      transaction.washSale ? 1 : 0,
+      transaction.disallowedLoss || null,
       now,
       now
     );
@@ -386,6 +402,8 @@ export class Database {
     if (transaction.amount !== undefined) { fields.push('amount = ?'); values.push(transaction.amount); }
     if (transaction.fees !== undefined) { fields.push('fees = ?'); values.push(transaction.fees); }
     if (transaction.notes !== undefined) { fields.push('notes = ?'); values.push(transaction.notes); }
+    if (transaction.washSale !== undefined) { fields.push('wash_sale = ?'); values.push(transaction.washSale ? 1 : 0); }
+    if (transaction.disallowedLoss !== undefined) { fields.push('disallowed_loss = ?'); values.push(transaction.disallowedLoss); }
 
     values.push(id);
     const stmt = this.db.prepare(`UPDATE transactions SET ${fields.join(', ')} WHERE id = ?`);
@@ -403,8 +421,8 @@ export class Database {
     if (!this.db) throw new Error('Database not initialized');
     const now = new Date().toISOString();
     const stmt = this.db.prepare(`
-      INSERT INTO transactions (id, account_id, security_id, type, date, quantity, price, amount, fees, notes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO transactions (id, account_id, security_id, type, date, quantity, price, amount, fees, notes, wash_sale, disallowed_loss, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const insertMany = this.db.transaction((txns: typeof transactions) => {
@@ -421,6 +439,8 @@ export class Database {
           txn.amount,
           txn.fees || 0,
           txn.notes || null,
+          txn.washSale ? 1 : 0,
+          txn.disallowedLoss || null,
           now,
           now
         );
@@ -616,6 +636,8 @@ export class Database {
       amount: r.amount as number,
       fees: r.fees as number | undefined,
       notes: r.notes as string | undefined,
+      washSale: r.wash_sale === 1 ? true : undefined,
+      disallowedLoss: r.disallowed_loss as number | undefined,
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,
     };

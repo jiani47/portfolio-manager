@@ -15,7 +15,7 @@ export interface Security {
   id: string;
   symbol: string;
   name: string;
-  type: 'stock' | 'etf' | 'mutual_fund' | 'bond' | 'option' | 'crypto' | 'other';
+  type: 'stock' | 'etf' | 'mutual_fund' | 'bond' | 'option' | 'crypto' | 'cash' | 'other';
   currency: string;
   exchange?: string;
   createdAt: string;
@@ -45,6 +45,8 @@ export interface Transaction {
   amount: number;
   fees?: number;
   notes?: string;
+  washSale?: boolean;
+  disallowedLoss?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -212,7 +214,7 @@ export interface ParsedPosition {
   marketValue: number;
   unrealizedGain: number;
   unrealizedGainPercent: number;
-  securityType: 'stock' | 'etf' | 'mutual_fund' | 'bond' | 'option' | 'crypto' | 'other';
+  securityType: 'stock' | 'etf' | 'mutual_fund' | 'bond' | 'option' | 'crypto' | 'cash' | 'other';
 }
 
 export interface BrokerageParseResult {
@@ -244,7 +246,9 @@ export interface ParsedTransaction {
   quantity: number;
   price: number;  // Proceeds Per Share
   amount: number;  // Proceeds
-  notes?: string;  // Wash sale info
+  notes?: string;
+  washSale?: boolean;
+  disallowedLoss?: number;
 }
 
 export interface ParsedTaxLot {
