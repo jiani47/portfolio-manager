@@ -17,6 +17,8 @@ import type {
   BackupConfig,
   BrokerageParserInfo,
   BrokerageParseResult,
+  TransactionParserInfo,
+  TransactionParseResult,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -78,6 +80,10 @@ declare global {
       listBrokerageParsers: () => Promise<BrokerageParserInfo[]>;
       selectBrokerageFile: () => Promise<string | null>;
       parseBrokerageFile: (parserId: string, filePath: string) => Promise<BrokerageParseResult>;
+
+      // Transaction import operations
+      listTransactionParsers: () => Promise<TransactionParserInfo[]>;
+      parseTransactionFile: (parserId: string, filePath: string) => Promise<TransactionParseResult>;
     };
   }
 }
@@ -457,6 +463,75 @@ export function useBrokerageImport() {
     setError(null);
     try {
       const result = await window.electronAPI.parseBrokerageFile(parserId, filePath);
+      setParseResult(result);
+      if (!result.success && result.errors.length > 0) {
+        setError(result.errors.join(', '));
+      }
+      return result;
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const clearResult = useCallback(() => {
+    setParseResult(null);
+    setSelectedFile(null);
+    setError(null);
+  }, []);
+
+  return {
+    parsers,
+    parseResult,
+    selectedFile,
+    loading,
+    error,
+    fetchParsers,
+    selectFile,
+    parseFile,
+    clearResult,
+  };
+}
+
+export function useTransactionImport() {
+  const [parsers, setParsers] = useState<TransactionParserInfo[]>([]);
+  const [parseResult, setParseResult] = useState<TransactionParseResult | null>(null);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchParsers = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.listTransactionParsers();
+      setParsers(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const selectFile = useCallback(async () => {
+    setError(null);
+    try {
+      const filePath = await window.electronAPI.selectBrokerageFile();
+      setSelectedFile(filePath);
+      return filePath;
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    }
+  }, []);
+
+  const parseFile = useCallback(async (parserId: string, filePath: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.parseTransactionFile(parserId, filePath);
       setParseResult(result);
       if (!result.success && result.errors.length > 0) {
         setError(result.errors.join(', '));

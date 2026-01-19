@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useTransactions, useAccounts, useSecurities } from '../hooks/useApi';
 import type { Transaction, Security } from '../../shared/types';
 import { format } from 'date-fns';
+import TransactionImportModal from '../components/TransactionImportModal';
 
 const transactionTypes = [
   { value: 'buy', label: 'Buy' },
@@ -20,6 +21,7 @@ export default function Transactions() {
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities, createSecurity, findBySymbol } = useSecurities();
   const [showModal, setShowModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
   const [filterAccount, setFilterAccount] = useState<string>('');
   const [filterType, setFilterType] = useState<string>('');
   const [formData, setFormData] = useState({
@@ -145,9 +147,14 @@ export default function Transactions() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-gray-900">Transactions</h1>
-        <button onClick={handleOpenModal} className="btn-primary">
-          Add Transaction
-        </button>
+        <div className="flex gap-3">
+          <button onClick={() => setShowImportModal(true)} className="btn-secondary">
+            Import from Brokerage
+          </button>
+          <button onClick={handleOpenModal} className="btn-primary">
+            Add Transaction
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -251,7 +258,17 @@ export default function Transactions() {
         </div>
       )}
 
-      {/* Modal */}
+      {/* Import Modal */}
+      <TransactionImportModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onImportComplete={() => {
+          fetchTransactions();
+          fetchSecurities();
+        }}
+      />
+
+      {/* Add Transaction Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">

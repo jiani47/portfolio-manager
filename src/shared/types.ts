@@ -161,6 +161,10 @@ export interface IPCChannels {
   'parsers:list': () => BrokerageParserInfo[];
   'file:select-brokerage-file': () => string | null;
   'file:parse-brokerage': (parserId: string, filePath: string) => BrokerageParseResult;
+
+  // Transaction import
+  'transaction-parsers:list': () => TransactionParserInfo[];
+  'file:parse-transactions': (parserId: string, filePath: string) => TransactionParseResult;
 }
 
 export interface TransactionFilters {
@@ -229,4 +233,52 @@ export interface BrokerageParserInfo {
   description: string;
   fileTypes: string[];
   sampleFormat?: string;
+}
+
+// Transaction import types
+export interface ParsedTransaction {
+  symbol: string;
+  name: string;
+  type: 'sell';  // Realized gains are always sells
+  date: string;  // Closed Date
+  quantity: number;
+  price: number;  // Proceeds Per Share
+  amount: number;  // Proceeds
+  notes?: string;  // Wash sale info
+}
+
+export interface ParsedTaxLot {
+  symbol: string;
+  acquisitionDate: string;  // Opened Date
+  closedDate: string;  // Closed Date
+  quantity: number;
+  costBasis: number;
+  costPerShare: number;
+  proceedsPerShare: number;
+  proceeds: number;
+  realizedGain: number;
+  realizedGainPercent: number;
+  holdingPeriod: 'short' | 'long';
+  washSale?: boolean;
+  disallowedLoss?: number;
+}
+
+export interface TransactionParseResult {
+  success: boolean;
+  broker: string;
+  accounts: TransactionAccountData[];
+  errors: string[];
+}
+
+export interface TransactionAccountData {
+  accountIdentifier: string;
+  transactions: ParsedTransaction[];
+  taxLots: ParsedTaxLot[];
+}
+
+export interface TransactionParserInfo {
+  id: string;
+  name: string;
+  description: string;
+  fileTypes: string[];
 }

@@ -57,4 +57,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listBrokerageParsers: () => ipcRenderer.invoke('parsers:list'),
   selectBrokerageFile: () => ipcRenderer.invoke('file:select-brokerage-file'),
   parseBrokerageFile: (parserId: string, filePath: string) => ipcRenderer.invoke('file:parse-brokerage', parserId, filePath),
+
+  // Transaction import operations
+  listTransactionParsers: () => ipcRenderer.invoke('transaction-parsers:list'),
+  parseTransactionFile: (parserId: string, filePath: string) => ipcRenderer.invoke('file:parse-transactions', parserId, filePath),
 });

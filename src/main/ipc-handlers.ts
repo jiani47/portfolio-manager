@@ -5,7 +5,7 @@ import Store from 'electron-store';
 import { Database } from './database';
 import { BackupService } from './backup-service';
 import { AIService } from './ai-service';
-import { parserRegistry } from './parsers';
+import { parserRegistry, transactionParserRegistry } from './parsers';
 import { AppSettings, ExcelImportResult } from '../shared/types';
 
 export function setupIpcHandlers(
@@ -196,6 +196,34 @@ export function setupIpcHandlers(
         broker: parserId,
         accounts: [],
         errors: [`Parser not found: ${parserId}`],
+      };
+    }
+
+    // Read file content for canParse check
+    const content = fs.readFileSync(filePath, 'utf-8');
+    if (!parser.canParse(filePath, content)) {
+      return {
+        success: false,
+        broker: parserId,
+        accounts: [],
+        errors: ['File format not recognized by this parser'],
+      };
+    }
+
+    return parser.parse(filePath);
+  });
+
+  // Transaction import handlers
+  ipcMain.handle('transaction-parsers:list', () => transactionParserRegistry.listParsers());
+
+  ipcMain.handle('file:parse-transactions', async (_, parserId: string, filePath: string) => {
+    const parser = transactionParserRegistry.getParser(parserId);
+    if (!parser) {
+      return {
+        success: false,
+        broker: parserId,
+        accounts: [],
+        errors: [`Transaction parser not found: ${parserId}`],
       };
     }
 
