@@ -27,6 +27,10 @@ import type {
   TradingRuleFilters,
   DecisionLog,
   DecisionLogFilters,
+  CompanyProfile,
+  StockQuote,
+  PriceHistory,
+  RefreshPricesResult,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -126,6 +130,14 @@ declare global {
       getDecisionLog: (id: string) => Promise<DecisionLog | null>;
       updateDecisionLog: (id: string, log: Partial<DecisionLog>) => Promise<DecisionLog>;
       deleteDecisionLog: (id: string) => Promise<void>;
+
+      // FMP data provider operations
+      fmpTestConnection: () => Promise<{ success: boolean; message: string }>;
+      fmpGetQuote: (symbol: string) => Promise<StockQuote | null>;
+      fmpGetCompanyProfile: (symbol: string) => Promise<CompanyProfile | null>;
+      fmpGetPriceHistory: (securityId: string, startDate?: string, endDate?: string) => Promise<PriceHistory[]>;
+      fmpRefreshPrices: () => Promise<RefreshPricesResult>;
+      fmpFetchHistorical: (symbol: string, days?: number) => Promise<{ success: boolean; count?: number; error?: string }>;
     };
   }
 }
@@ -877,5 +889,112 @@ export function useDecisionLogs() {
     createLog,
     updateLog,
     deleteLog,
+  };
+}
+
+export function useFMP() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const testConnection = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.fmpTestConnection();
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, message };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const getQuote = useCallback(async (symbol: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.fmpGetQuote(symbol);
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const getCompanyProfile = useCallback(async (symbol: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.fmpGetCompanyProfile(symbol);
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const getPriceHistory = useCallback(async (securityId: string, startDate?: string, endDate?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.fmpGetPriceHistory(securityId, startDate, endDate);
+    } catch (err) {
+      setError((err as Error).message);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const refreshPrices = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.fmpRefreshPrices();
+      if (!result.success && result.errors.length > 0) {
+        setError(result.errors.join('; '));
+      }
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return {
+        success: false,
+        updated: 0,
+        failed: 0,
+        errors: [message],
+        prices: {},
+      } as RefreshPricesResult;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchHistorical = useCallback(async (symbol: string, days: number = 30) => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.fmpFetchHistorical(symbol, days);
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, error: message };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return {
+    loading,
+    error,
+    testConnection,
+    getQuote,
+    getCompanyProfile,
+    getPriceHistory,
+    refreshPrices,
+    fetchHistorical,
   };
 }

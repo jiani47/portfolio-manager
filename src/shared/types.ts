@@ -18,6 +18,14 @@ export interface Security {
   type: 'stock' | 'etf' | 'mutual_fund' | 'bond' | 'option' | 'crypto' | 'cash' | 'other';
   currency: string;
   exchange?: string;
+  // Company profile data from FMP
+  sector?: string;
+  industry?: string;
+  description?: string;
+  website?: string;
+  ceo?: string;
+  marketCap?: number;
+  profileUpdatedAt?: string;
   createdAt: string;
 }
 
@@ -105,6 +113,8 @@ export interface AppSettings {
   backup: BackupConfig;
   aiProvider: 'openai' | 'anthropic' | 'none';
   aiApiKey?: string;
+  dataProvider: 'fmp' | 'none';
+  dataProviderApiKey?: string;
 }
 
 export interface AIInsight {
@@ -116,6 +126,50 @@ export interface AIInsight {
   severity: 'info' | 'warning' | 'critical';
   createdAt: string;
   dismissed: boolean;
+}
+
+// Price history type for storing historical prices
+export interface PriceHistory {
+  id: string;
+  securityId: string;
+  date: string;           // YYYY-MM-DD
+  openPrice?: number;
+  highPrice?: number;
+  lowPrice?: number;
+  closePrice: number;
+  volume?: number;
+  fetchedAt: string;      // When we fetched this data
+}
+
+// Company profile from FMP API
+export interface CompanyProfile {
+  symbol: string;
+  companyName: string;
+  sector?: string;
+  industry?: string;
+  description?: string;
+  website?: string;
+  ceo?: string;
+  marketCap?: number;
+}
+
+// Quote data from FMP API
+export interface StockQuote {
+  symbol: string;
+  price: number;
+  change: number;
+  changePercent: number;
+  volume?: number;
+  previousClose?: number;
+}
+
+// Refresh prices result
+export interface RefreshPricesResult {
+  success: boolean;
+  updated: number;
+  failed: number;
+  errors: string[];
+  prices: Map<string, number> | Record<string, number>;
 }
 
 // IPC channel types

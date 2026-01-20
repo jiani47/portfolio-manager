@@ -95,4 +95,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDecisionLog: (id: string) => ipcRenderer.invoke('db:decision-logs:get', id),
   updateDecisionLog: (id: string, log: unknown) => ipcRenderer.invoke('db:decision-logs:update', id, log),
   deleteDecisionLog: (id: string) => ipcRenderer.invoke('db:decision-logs:delete', id),
+
+  // FMP data provider operations
+  fmpTestConnection: () => ipcRenderer.invoke('fmp:test-connection'),
+  fmpGetQuote: (symbol: string) => ipcRenderer.invoke('fmp:get-quote', symbol),
+  fmpGetCompanyProfile: (symbol: string) => ipcRenderer.invoke('fmp:get-company-profile', symbol),
+  fmpGetPriceHistory: (securityId: string, startDate?: string, endDate?: string) =>
+    ipcRenderer.invoke('fmp:get-price-history', securityId, startDate, endDate),
+  fmpRefreshPrices: () => ipcRenderer.invoke('fmp:refresh-prices'),
+  fmpFetchHistorical: (symbol: string, days?: number) =>
+    ipcRenderer.invoke('fmp:fetch-historical', symbol, days),
 });

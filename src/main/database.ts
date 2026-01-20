@@ -16,6 +16,7 @@ import {
   DecisionLog,
   TradingRuleFilters,
   DecisionLogFilters,
+  PriceHistory,
 } from '../shared/types';
 
 export class Database {
@@ -272,6 +273,39 @@ export class Database {
       CREATE INDEX IF NOT EXISTS idx_decision_logs_security ON decision_logs(security_id);
       CREATE INDEX IF NOT EXISTS idx_decision_logs_date ON decision_logs(decision_date);
     `);
+
+    // Price history table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS price_history (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        date TEXT NOT NULL,
+        open_price REAL,
+        high_price REAL,
+        low_price REAL,
+        close_price REAL NOT NULL,
+        volume INTEGER,
+        fetched_at TEXT NOT NULL,
+        FOREIGN KEY (security_id) REFERENCES securities(id) ON DELETE CASCADE,
+        UNIQUE(security_id, date)
+      )
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_price_history_security ON price_history(security_id);
+      CREATE INDEX IF NOT EXISTS idx_price_history_date ON price_history(date);
+    `);
+
+    // Migration: add company profile columns to securities table
+    const secCols = ['sector', 'industry', 'description', 'website', 'ceo', 'market_cap', 'profile_updated_at'];
+    for (const col of secCols) {
+      try {
+        const type = col === 'market_cap' ? 'REAL' : 'TEXT';
+        this.db.exec(`ALTER TABLE securities ADD COLUMN ${col} ${type}`);
+      } catch {
+        // Column already exists
+      }
+    }
   }
 
   close(): void {
@@ -367,6 +401,131 @@ export class Database {
     const row = stmt.get(symbol.toUpperCase());
     return row ? this.mapRowToSecurity(row) : null;
   }
+
+  updateSecurityProfile(id: string, profile: {
+    sector?: string;
+    industry?: string;
+    description?: string;
+    website?: string;
+    ceo?: string;
+    marketCap?: number;
+  }): Security {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const fields: string[] = ['profile_updated_at = ?'];
+    const values: unknown[] = [now];
+
+    if (profile.sector !== undefined) { fields.push('sector = ?'); values.push(profile.sector); }
+    if (profile.industry !== undefined) { fields.push('industry = ?'); values.push(profile.industry); }
+    if (profile.description !== undefined) { fields.push('description = ?'); values.push(profile.description); }
+    if (profile.website !== undefined) { fields.push('website = ?'); values.push(profile.website); }
+    if (profile.ceo !== undefined) { fields.push('ceo = ?'); values.push(profile.ceo); }
+    if (profile.marketCap !== undefined) { fields.push('market_cap = ?'); values.push(profile.marketCap); }
+
+    values.push(id);
+    const stmt = this.db.prepare(`UPDATE securities SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+    return this.getSecurityById(id)!;
+  }
+
+  // Price history operations
+  getPriceHistory(securityId: string, startDate?: string, endDate?: string): PriceHistory[] {
+    if (!this.db) throw new Error('Database not initialized');
+    let sql = 'SELECT * FROM price_history WHERE security_id = ?';
+    const params: unknown[] = [securityId];
+
+    if (startDate) {
+      sql += ' AND date >= ?';
+      params.push(startDate);
+    }
+    if (endDate) {
+      sql += ' AND date <= ?';
+      params.push(endDate);
+    }
+
+    sql += ' ORDER BY date DESC';
+    const stmt = this.db.prepare(sql);
+    return stmt.all(...params).map(this.mapRowToPriceHistory);
+  }
+
+  getLatestPrice(securityId: string): PriceHistory | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM price_history WHERE security_id = ? ORDER BY date DESC LIMIT 1');
+    const row = stmt.get(securityId);
+    return row ? this.mapRowToPriceHistory(row) : null;
+  }
+
+  getPriceForDate(securityId: string, date: string): PriceHistory | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM price_history WHERE security_id = ? AND date = ?');
+    const row = stmt.get(securityId, date);
+    return row ? this.mapRowToPriceHistory(row) : null;
+  }
+
+  savePriceHistory(price: Omit<PriceHistory, 'id'>): PriceHistory {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO price_history (id, security_id, date, open_price, high_price, low_price, close_price, volume, fetched_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      id,
+      price.securityId,
+      price.date,
+      price.openPrice || null,
+      price.highPrice || null,
+      price.lowPrice || null,
+      price.closePrice,
+      price.volume || null,
+      price.fetchedAt
+    );
+    return { id, ...price };
+  }
+
+  savePriceHistoryBatch(prices: Omit<PriceHistory, 'id'>[]): number {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO price_history (id, security_id, date, open_price, high_price, low_price, close_price, volume, fetched_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertMany = this.db.transaction((priceList: typeof prices) => {
+      let count = 0;
+      for (const price of priceList) {
+        stmt.run(
+          uuidv4(),
+          price.securityId,
+          price.date,
+          price.openPrice || null,
+          price.highPrice || null,
+          price.lowPrice || null,
+          price.closePrice,
+          price.volume || null,
+          price.fetchedAt
+        );
+        count++;
+      }
+      return count;
+    });
+
+    return insertMany(prices);
+  }
+
+  private mapRowToPriceHistory = (row: unknown): PriceHistory => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      securityId: r.security_id as string,
+      date: r.date as string,
+      openPrice: r.open_price as number | undefined,
+      highPrice: r.high_price as number | undefined,
+      lowPrice: r.low_price as number | undefined,
+      closePrice: r.close_price as number,
+      volume: r.volume as number | undefined,
+      fetchedAt: r.fetched_at as string,
+    };
+  };
 
   // Position operations
   listPositions(accountId?: string): Position[] {
@@ -1037,6 +1196,13 @@ export class Database {
       type: r.type as Security['type'],
       currency: r.currency as string,
       exchange: r.exchange as string | undefined,
+      sector: r.sector as string | undefined,
+      industry: r.industry as string | undefined,
+      description: r.description as string | undefined,
+      website: r.website as string | undefined,
+      ceo: r.ceo as string | undefined,
+      marketCap: r.market_cap as number | undefined,
+      profileUpdatedAt: r.profile_updated_at as string | undefined,
       createdAt: r.created_at as string,
     };
   };

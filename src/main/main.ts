@@ -4,6 +4,7 @@ import { Database } from './database';
 import { setupIpcHandlers } from './ipc-handlers';
 import { BackupService } from './backup-service';
 import { AIService } from './ai-service';
+import { FMPService } from './fmp-service';
 import Store from 'electron-store';
 import { AppSettings } from '../shared/types';
 
@@ -13,6 +14,7 @@ let mainWindow: BrowserWindow | null = null;
 let database: Database | null = null;
 let backupService: BackupService | null = null;
 let aiService: AIService | null = null;
+let fmpService: FMPService | null = null;
 
 const defaultSettings: AppSettings = {
   theme: 'system',
@@ -24,6 +26,7 @@ const defaultSettings: AppSettings = {
     frequency: 'weekly',
   },
   aiProvider: 'none',
+  dataProvider: 'none',
 };
 
 function createWindow() {
@@ -78,8 +81,12 @@ async function initializeApp() {
   // Initialize AI service
   aiService = new AIService(settings);
 
+  // Initialize FMP service
+  fmpService = new FMPService();
+  fmpService.configure(settings);
+
   // Setup IPC handlers
-  setupIpcHandlers(ipcMain, database, backupService, aiService, store);
+  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, store);
 }
 
 app.whenReady().then(async () => {

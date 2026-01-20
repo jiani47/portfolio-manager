@@ -5,14 +5,16 @@ import Store from 'electron-store';
 import { Database } from './database';
 import { BackupService } from './backup-service';
 import { AIService } from './ai-service';
+import { FMPService } from './fmp-service';
 import { parserRegistry, transactionParserRegistry, lotDetailsParserRegistry } from './parsers';
-import { AppSettings, ExcelImportResult } from '../shared/types';
+import { AppSettings, ExcelImportResult, RefreshPricesResult } from '../shared/types';
 
 export function setupIpcHandlers(
   ipcMain: IpcMain,
   db: Database,
   backupService: BackupService,
   aiService: AIService,
+  fmpService: FMPService,
   store: Store<{ settings: AppSettings }>
 ): void {
   // Account handlers
@@ -134,6 +136,11 @@ export function setupIpcHandlers(
     // Update AI service if API settings changed
     if (newSettings.aiProvider || newSettings.aiApiKey) {
       aiService.configure(updated);
+    }
+
+    // Update FMP service if data provider settings changed
+    if (newSettings.dataProvider !== undefined || newSettings.dataProviderApiKey !== undefined) {
+      fmpService.configure(updated);
     }
 
     return updated;
@@ -317,4 +324,160 @@ export function setupIpcHandlers(
   ipcMain.handle('db:decision-logs:get', (_, id) => db.getDecisionLogById(id));
   ipcMain.handle('db:decision-logs:update', (_, id, log) => db.updateDecisionLog(id, log));
   ipcMain.handle('db:decision-logs:delete', (_, id) => db.deleteDecisionLog(id));
+
+  // FMP data provider handlers
+  ipcMain.handle('fmp:test-connection', async () => {
+    return fmpService.testConnection();
+  });
+
+  ipcMain.handle('fmp:get-quote', async (_, symbol: string) => {
+    return fmpService.getQuote(symbol);
+  });
+
+  ipcMain.handle('fmp:get-company-profile', async (_, symbol: string) => {
+    const profile = await fmpService.getCompanyProfile(symbol);
+    if (profile) {
+      // Also update the security in the database if it exists
+      const security = db.findSecurityBySymbol(symbol);
+      if (security) {
+        db.updateSecurityProfile(security.id, {
+          sector: profile.sector,
+          industry: profile.industry,
+          description: profile.description,
+          website: profile.website,
+          ceo: profile.ceo,
+          marketCap: profile.marketCap,
+        });
+      }
+    }
+    return profile;
+  });
+
+  ipcMain.handle('fmp:get-price-history', async (_, securityId: string, startDate?: string, endDate?: string) => {
+    return db.getPriceHistory(securityId, startDate, endDate);
+  });
+
+  ipcMain.handle('fmp:refresh-prices', async (): Promise<RefreshPricesResult> => {
+    // Get all positions with their securities
+    const positions = db.listPositions();
+    const securities = db.listSecurities();
+    const securityMap = new Map(securities.map(s => [s.id, s]));
+
+    // Build symbol -> securityId map for non-cash positions
+    const symbolSecurityMap = new Map<string, string>();
+    for (const pos of positions) {
+      const security = securityMap.get(pos.securityId);
+      if (security && security.type !== 'cash') {
+        symbolSecurityMap.set(security.symbol, security.id);
+      }
+    }
+
+    if (symbolSecurityMap.size === 0) {
+      return {
+        success: true,
+        updated: 0,
+        failed: 0,
+        errors: [],
+        prices: {},
+      };
+    }
+
+    // Check if we already have today's prices cached
+    const today = new Date().toISOString().split('T')[0];
+    const symbolsNeedingUpdate: Map<string, string> = new Map();
+
+    for (const [symbol, securityId] of symbolSecurityMap) {
+      const cachedPrice = db.getPriceForDate(securityId, today);
+      if (!cachedPrice) {
+        symbolsNeedingUpdate.set(symbol, securityId);
+      }
+    }
+
+    // If all prices are cached, return early
+    if (symbolsNeedingUpdate.size === 0) {
+      const pricesObj: Record<string, number> = {};
+      for (const [symbol, securityId] of symbolSecurityMap) {
+        const price = db.getLatestPrice(securityId);
+        if (price) {
+          pricesObj[symbol] = price.closePrice;
+        }
+      }
+      return {
+        success: true,
+        updated: 0,
+        failed: 0,
+        errors: ['Prices already up to date for today'],
+        prices: pricesObj,
+      };
+    }
+
+    // Fetch new prices from FMP
+    const { prices, priceHistory, errors } = await fmpService.refreshPrices(symbolsNeedingUpdate);
+
+    // Save price history to database
+    if (priceHistory.length > 0) {
+      db.savePriceHistoryBatch(priceHistory);
+    }
+
+    // Update positions with new prices
+    let updated = 0;
+    let failed = 0;
+
+    for (const pos of positions) {
+      const security = securityMap.get(pos.securityId);
+      if (!security || security.type === 'cash') continue;
+
+      const newPrice = prices.get(security.symbol);
+      if (newPrice !== undefined && newPrice > 0) {
+        const marketValue = pos.quantity * newPrice;
+        const unrealizedGain = marketValue - pos.costBasis;
+        const unrealizedGainPercent = pos.costBasis > 0 ? (unrealizedGain / pos.costBasis) * 100 : 0;
+
+        db.updatePosition(pos.id, {
+          currentPrice: newPrice,
+          marketValue,
+          unrealizedGain,
+          unrealizedGainPercent,
+        });
+        updated++;
+      } else {
+        failed++;
+      }
+    }
+
+    // Convert Map to plain object for serialization
+    const pricesObj: Record<string, number> = {};
+    for (const [symbol, price] of prices) {
+      pricesObj[symbol] = price;
+    }
+
+    return {
+      success: errors.length === 0,
+      updated,
+      failed,
+      errors,
+      prices: pricesObj,
+    };
+  });
+
+  ipcMain.handle('fmp:fetch-historical', async (_, symbol: string, days: number = 30) => {
+    const security = db.findSecurityBySymbol(symbol);
+    if (!security) {
+      return { success: false, error: `Security not found: ${symbol}` };
+    }
+
+    const prices = await fmpService.getHistoricalPrices(symbol, days);
+    if (prices.length === 0) {
+      return { success: false, error: `No historical data for ${symbol}` };
+    }
+
+    // Add securityId to each price record
+    const pricesWithSecurityId = prices.map(p => ({
+      ...p,
+      securityId: security.id,
+    }));
+
+    const count = db.savePriceHistoryBatch(pricesWithSecurityId);
+    return { success: true, count };
+  });
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useSettings, useBackup, useSecurityTags } from '../hooks/useApi';
+import { useSettings, useBackup, useSecurityTags, useFMP } from '../hooks/useApi';
 import type { AppSettings, BackupConfig, SecurityTag } from '../../shared/types';
 import { format } from 'date-fns';
 
@@ -16,12 +16,14 @@ export default function Settings() {
   const { settings, loading, error, fetchSettings, updateSettings } = useSettings();
   const { backups, loading: backupsLoading, fetchBackups, createBackup, restoreBackup } = useBackup();
   const { tags, fetchTags, createTag, updateTag, deleteTag } = useSecurityTags();
+  const { testConnection, loading: testingConnection } = useFMP();
   const [saving, setSaving] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showTagModal, setShowTagModal] = useState(false);
   const [editingTag, setEditingTag] = useState<SecurityTag | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<{ success: boolean; message: string } | null>(null);
   const [tagFormData, setTagFormData] = useState({
     name: '',
     displayName: '',
@@ -35,6 +37,8 @@ export default function Settings() {
     dateFormat: 'MM/dd/yyyy',
     aiProvider: 'none',
     aiApiKey: '',
+    dataProvider: 'none',
+    dataProviderApiKey: '',
     backup: {
       provider: 'local',
       enabled: false,
@@ -56,6 +60,8 @@ export default function Settings() {
         dateFormat: settings.dateFormat,
         aiProvider: settings.aiProvider,
         aiApiKey: settings.aiApiKey || '',
+        dataProvider: settings.dataProvider || 'none',
+        dataProviderApiKey: settings.dataProviderApiKey || '',
         backup: settings.backup,
       });
     }
@@ -300,6 +306,85 @@ export default function Settings() {
                   : 'Get your API key from console.anthropic.com'}
               </p>
             </div>
+          )}
+        </div>
+      </div>
+
+      {/* Market Data Settings */}
+      <div className="card">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Market Data</h2>
+        <p className="text-sm text-gray-600 mb-4">
+          Configure a data provider to fetch real-time prices and company information for your holdings.
+          Your API key is stored locally.
+        </p>
+        <div className="space-y-4">
+          <div>
+            <label className="label">Data Provider</label>
+            <select
+              className="select w-64"
+              value={formData.dataProvider}
+              onChange={(e) => {
+                setFormData({ ...formData, dataProvider: e.target.value as AppSettings['dataProvider'] });
+                setConnectionStatus(null);
+              }}
+            >
+              <option value="none">None</option>
+              <option value="fmp">FMP (Financial Modeling Prep)</option>
+            </select>
+          </div>
+          {formData.dataProvider === 'fmp' && (
+            <>
+              <div>
+                <label className="label">API Key</label>
+                <input
+                  type="password"
+                  className="input w-full max-w-md"
+                  value={formData.dataProviderApiKey}
+                  onChange={(e) => {
+                    setFormData({ ...formData, dataProviderApiKey: e.target.value });
+                    setConnectionStatus(null);
+                  }}
+                  placeholder="Your FMP API key"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Get your free API key from{' '}
+                  <a
+                    href="https://financialmodelingprep.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary-600 hover:underline"
+                  >
+                    financialmodelingprep.com
+                  </a>
+                </p>
+              </div>
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={async () => {
+                    // Save settings first so the API key is configured
+                    await updateSettings({
+                      dataProvider: formData.dataProvider,
+                      dataProviderApiKey: formData.dataProviderApiKey,
+                    });
+                    const result = await testConnection();
+                    setConnectionStatus(result);
+                  }}
+                  disabled={testingConnection || !formData.dataProviderApiKey}
+                  className="btn-secondary"
+                >
+                  {testingConnection ? 'Testing...' : 'Test Connection'}
+                </button>
+                {connectionStatus && (
+                  <span
+                    className={`text-sm ${
+                      connectionStatus.success ? 'text-green-600' : 'text-red-600'
+                    }`}
+                  >
+                    {connectionStatus.message}
+                  </span>
+                )}
+              </div>
+            </>
           )}
         </div>
       </div>

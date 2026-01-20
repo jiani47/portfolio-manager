@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePositions, useAccounts, useSecurities, useSecurityTags } from '../hooks/useApi';
+import { usePositions, useAccounts, useSecurities, useSecurityTags, useFMP, useSettings } from '../hooks/useApi';
 import BrokerageImportModal from '../components/BrokerageImportModal';
 import type { Position, Security, SecurityTag } from '../../shared/types';
 
@@ -24,6 +24,8 @@ export default function Holdings() {
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities, createSecurity, findBySymbol } = useSecurities();
   const { tags, assignments, fetchTags, fetchAssignments, assignTag, removeTag } = useSecurityTags();
+  const { refreshPrices, loading: refreshingPrices, error: refreshError } = useFMP();
+  const { settings, fetchSettings } = useSettings();
   const [showModal, setShowModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTagModal, setShowTagModal] = useState(false);
@@ -32,6 +34,7 @@ export default function Holdings() {
   const [selectedAccount, setSelectedAccount] = useState<string>('');
   const [selectedTagFilter, setSelectedTagFilter] = useState<string>('');
   const [showWatchlist, setShowWatchlist] = useState(false);
+  const [refreshMessage, setRefreshMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [formData, setFormData] = useState({
     accountId: '',
     symbol: '',
@@ -48,7 +51,37 @@ export default function Holdings() {
     fetchSecurities();
     fetchTags();
     fetchAssignments();
-  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments]);
+    fetchSettings();
+  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments, fetchSettings]);
+
+  const handleRefreshPrices = useCallback(async () => {
+    setRefreshMessage(null);
+    const result = await refreshPrices();
+    if (result.success && result.updated > 0) {
+      setRefreshMessage({
+        type: 'success',
+        text: `Updated prices for ${result.updated} positions`,
+      });
+      fetchPositions(); // Refresh positions to show new prices
+    } else if (result.errors.includes('Prices already up to date for today')) {
+      setRefreshMessage({
+        type: 'info',
+        text: 'Prices already up to date for today',
+      });
+    } else if (result.errors.length > 0) {
+      setRefreshMessage({
+        type: 'error',
+        text: result.errors[0],
+      });
+    } else if (result.updated === 0 && result.failed === 0) {
+      setRefreshMessage({
+        type: 'info',
+        text: 'No positions to update',
+      });
+    }
+  }, [refreshPrices, fetchPositions]);
+
+  const isDataProviderConfigured = settings?.dataProvider === 'fmp' && settings?.dataProviderApiKey;
 
   // Create a map of security ID to tags
   const securityTagsMap = useMemo(() => {
@@ -311,6 +344,16 @@ export default function Holdings() {
               </option>
             ))}
           </select>
+          {isDataProviderConfigured && (
+            <button
+              onClick={handleRefreshPrices}
+              disabled={refreshingPrices}
+              className="btn-secondary"
+              title="Fetch latest prices from FMP"
+            >
+              {refreshingPrices ? 'Refreshing...' : 'Refresh Prices'}
+            </button>
+          )}
           <button onClick={() => setShowImportModal(true)} className="btn-secondary">
             Import from Brokerage
           </button>
@@ -326,6 +369,20 @@ export default function Holdings() {
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
           {error}
+        </div>
+      )}
+
+      {refreshMessage && (
+        <div
+          className={`px-4 py-3 rounded-lg ${
+            refreshMessage.type === 'success'
+              ? 'bg-green-50 border border-green-200 text-green-700'
+              : refreshMessage.type === 'error'
+              ? 'bg-red-50 border border-red-200 text-red-700'
+              : 'bg-blue-50 border border-blue-200 text-blue-700'
+          }`}
+        >
+          {refreshMessage.text}
         </div>
       )}
 
