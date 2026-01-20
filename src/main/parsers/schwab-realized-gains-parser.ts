@@ -26,12 +26,23 @@ export class SchwabRealizedGainsParser implements TransactionParser {
 
       let currentAccount: TransactionAccountData | null = null;
       let headerMap: Map<string, number> = new Map();
+      let titleAccountName: string | null = null;
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
 
-        // Skip the first line (header with date)
+        // Check the first line (title with date) - may contain account name for single-account exports
         if (line.startsWith('"Realized Gain/Loss')) {
+          // Extract account name from title like "Realized Gain/Loss - Lot Details for Monica as of..."
+          // or "Realized Gain/Loss - Lot Details for All_Accounts as of..."
+          const titleMatch = line.match(/Lot Details for ([^"]+?) as of/);
+          if (titleMatch) {
+            const extractedName = titleMatch[1].trim();
+            // If it's not "All_Accounts", store it as a potential single-account name
+            if (!extractedName.toLowerCase().includes('all_accounts')) {
+              titleAccountName = extractedName;
+            }
+          }
           continue;
         }
 
@@ -52,6 +63,16 @@ export class SchwabRealizedGainsParser implements TransactionParser {
         // Check if this is a header row
         if (line.startsWith('"Symbol"')) {
           headerMap = this.parseHeaderRow(line);
+
+          // If we encounter a header row but don't have an account yet,
+          // this is a single-account export - create an account from the title
+          if (!currentAccount && titleAccountName) {
+            currentAccount = {
+              accountIdentifier: titleAccountName,
+              transactions: [],
+              taxLots: [],
+            };
+          }
           continue;
         }
 

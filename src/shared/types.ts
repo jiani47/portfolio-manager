@@ -167,6 +167,10 @@ export interface IPCChannels {
   // Transaction import
   'transaction-parsers:list': () => TransactionParserInfo[];
   'file:parse-transactions': (parserId: string, filePath: string) => TransactionParseResult;
+
+  // Lot details import (direct from brokerage)
+  'lot-details-parsers:list': () => LotDetailsParserInfo[];
+  'file:parse-lot-details': (parserId: string, filePath: string) => LotDetailsParseResult;
 }
 
 export interface TransactionFilters {
@@ -281,6 +285,34 @@ export interface TransactionAccountData {
 }
 
 export interface TransactionParserInfo {
+  id: string;
+  name: string;
+  description: string;
+  fileTypes: string[];
+}
+
+// Lot details import types (direct import from brokerage)
+export interface ParsedOpenLot {
+  symbol: string;
+  accountIdentifier: string;
+  openDate: string;         // acquisition date (ISO format)
+  quantity: number;
+  costPerShare: number;
+  costBasis: number;
+  holdingPeriod: 'short' | 'long';
+  disallowedLoss?: number;  // wash sale adjustment
+}
+
+export interface LotDetailsParseResult {
+  success: boolean;
+  broker: string;
+  symbol: string;
+  accountIdentifier: string;
+  lots: ParsedOpenLot[];
+  errors: string[];
+}
+
+export interface LotDetailsParserInfo {
   id: string;
   name: string;
   description: string;

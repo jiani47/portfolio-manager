@@ -1,5 +1,6 @@
 import { BrokerageParser, TransactionParser } from './parser-interface';
-import { BrokerageParserInfo, TransactionParserInfo } from '../../shared/types';
+import { BrokerageParserInfo, TransactionParserInfo, LotDetailsParserInfo } from '../../shared/types';
+import { LotDetailsParser } from './schwab-lot-details-parser';
 
 class ParserRegistry {
   private parsers: Map<string, BrokerageParser> = new Map();
@@ -35,5 +36,23 @@ class TransactionParserRegistry {
   }
 }
 
+class LotDetailsParserRegistry {
+  private parsers: Map<string, LotDetailsParser> = new Map();
+
+  register(parser: LotDetailsParser): void {
+    const info = parser.getInfo();
+    this.parsers.set(info.id, parser);
+  }
+
+  getParser(id: string): LotDetailsParser | undefined {
+    return this.parsers.get(id);
+  }
+
+  listParsers(): LotDetailsParserInfo[] {
+    return Array.from(this.parsers.values()).map(p => p.getInfo());
+  }
+}
+
 export const parserRegistry = new ParserRegistry();
 export const transactionParserRegistry = new TransactionParserRegistry();
+export const lotDetailsParserRegistry = new LotDetailsParserRegistry();

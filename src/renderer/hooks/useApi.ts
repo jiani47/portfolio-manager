@@ -19,6 +19,8 @@ import type {
   BrokerageParseResult,
   TransactionParserInfo,
   TransactionParseResult,
+  LotDetailsParserInfo,
+  LotDetailsParseResult,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -53,6 +55,9 @@ declare global {
       getTaxLots: (filters?: TaxLotFilters) => Promise<TaxLot[]>;
       createTaxLot: (taxLot: Omit<TaxLot, 'id' | 'createdAt' | 'updatedAt'>) => Promise<TaxLot>;
       updateTaxLot: (id: string, taxLot: Partial<TaxLot>) => Promise<TaxLot>;
+      deleteTaxLot: (id: string) => Promise<void>;
+      deleteAllTaxLots: (accountId: string) => Promise<number>;
+      deleteTaxLotsBySymbol: (accountId: string, securityId: string) => Promise<number>;
 
       // File operations
       importExcel: () => Promise<ExcelImportResult | null>;
@@ -79,11 +84,16 @@ declare global {
       // Brokerage import operations
       listBrokerageParsers: () => Promise<BrokerageParserInfo[]>;
       selectBrokerageFile: () => Promise<string | null>;
+      selectBrokerageFiles: () => Promise<string[]>;
       parseBrokerageFile: (parserId: string, filePath: string) => Promise<BrokerageParseResult>;
 
       // Transaction import operations
       listTransactionParsers: () => Promise<TransactionParserInfo[]>;
       parseTransactionFile: (parserId: string, filePath: string) => Promise<TransactionParseResult>;
+
+      // Lot details import operations
+      listLotDetailsParsers: () => Promise<LotDetailsParserInfo[]>;
+      parseLotDetailsFile: (parserId: string, filePath: string) => Promise<LotDetailsParseResult>;
     };
   }
 }
@@ -269,7 +279,24 @@ export function useTaxLots() {
     return updated;
   }, []);
 
-  return { taxLots, loading, error, fetchTaxLots, createTaxLot, updateTaxLot };
+  const deleteTaxLot = useCallback(async (id: string) => {
+    await window.electronAPI.deleteTaxLot(id);
+    setTaxLots(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  const deleteAllTaxLots = useCallback(async (accountId: string) => {
+    const count = await window.electronAPI.deleteAllTaxLots(accountId);
+    setTaxLots(prev => prev.filter(t => t.accountId !== accountId));
+    return count;
+  }, []);
+
+  const deleteTaxLotsBySymbol = useCallback(async (accountId: string, securityId: string) => {
+    const count = await window.electronAPI.deleteTaxLotsBySymbol(accountId, securityId);
+    setTaxLots(prev => prev.filter(t => !(t.accountId === accountId && t.securityId === securityId)));
+    return count;
+  }, []);
+
+  return { taxLots, loading, error, fetchTaxLots, createTaxLot, updateTaxLot, deleteTaxLot, deleteAllTaxLots, deleteTaxLotsBySymbol };
 }
 
 export function usePortfolio() {
@@ -561,5 +588,85 @@ export function useTransactionImport() {
     selectFile,
     parseFile,
     clearResult,
+  };
+}
+
+export function useLotDetailsImport() {
+  const [parsers, setParsers] = useState<LotDetailsParserInfo[]>([]);
+  const [parseResults, setParseResults] = useState<LotDetailsParseResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchParsers = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.listLotDetailsParsers();
+      setParsers(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const selectFiles = useCallback(async () => {
+    setError(null);
+    try {
+      const filePaths = await window.electronAPI.selectBrokerageFiles();
+      return filePaths;
+    } catch (err) {
+      setError((err as Error).message);
+      return [];
+    }
+  }, []);
+
+  const parseLotDetailsFiles = useCallback(async (parserId: string, filePaths: string[]) => {
+    setLoading(true);
+    setError(null);
+    const results: LotDetailsParseResult[] = [];
+    const errors: string[] = [];
+
+    try {
+      for (const filePath of filePaths) {
+        const result = await window.electronAPI.parseLotDetailsFile(parserId, filePath);
+        if (!result.success && result.errors.length > 0) {
+          errors.push(`${result.symbol || filePath}: ${result.errors.join(', ')}`);
+        } else {
+          results.push(result);
+        }
+      }
+
+      if (results.length > 0) {
+        setParseResults(prev => [...prev, ...results]);
+      }
+
+      if (errors.length > 0) {
+        setError(errors.join('; '));
+      }
+
+      return results;
+    } catch (err) {
+      setError((err as Error).message);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const clearResults = useCallback(() => {
+    setParseResults([]);
+    setError(null);
+  }, []);
+
+  return {
+    parsers,
+    parseResults,
+    loading,
+    error,
+    fetchParsers,
+    selectFiles,
+    parseLotDetailsFiles,
+    clearResults,
   };
 }

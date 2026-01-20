@@ -109,30 +109,65 @@ export class Database {
       // Column already exists
     }
 
-    // Tax lots table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS tax_lots (
-        id TEXT PRIMARY KEY,
-        account_id TEXT NOT NULL,
-        security_id TEXT NOT NULL,
-        transaction_id TEXT NOT NULL,
-        acquisition_date TEXT NOT NULL,
-        quantity REAL NOT NULL,
-        cost_basis REAL NOT NULL,
-        cost_per_share REAL NOT NULL,
-        remaining_quantity REAL NOT NULL,
-        is_open INTEGER NOT NULL DEFAULT 1,
-        closed_date TEXT,
-        closed_transaction_id TEXT,
-        realized_gain REAL,
-        holding_period TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
-        FOREIGN KEY (security_id) REFERENCES securities(id),
-        FOREIGN KEY (transaction_id) REFERENCES transactions(id)
-      )
-    `);
+    // Tax lots table - migrate to make transaction_id nullable
+    // Check if we need to migrate the old schema
+    const tableInfo = this.db.prepare("PRAGMA table_info(tax_lots)").all() as { name: string; notnull: number }[];
+    const txnIdCol = tableInfo.find(col => col.name === 'transaction_id');
+
+    if (txnIdCol && txnIdCol.notnull === 1) {
+      // Old schema with NOT NULL - need to migrate
+      this.db.exec(`
+        CREATE TABLE tax_lots_new (
+          id TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL,
+          security_id TEXT NOT NULL,
+          transaction_id TEXT,
+          acquisition_date TEXT NOT NULL,
+          quantity REAL NOT NULL,
+          cost_basis REAL NOT NULL,
+          cost_per_share REAL NOT NULL,
+          remaining_quantity REAL NOT NULL,
+          is_open INTEGER NOT NULL DEFAULT 1,
+          closed_date TEXT,
+          closed_transaction_id TEXT,
+          realized_gain REAL,
+          holding_period TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+          FOREIGN KEY (security_id) REFERENCES securities(id),
+          FOREIGN KEY (transaction_id) REFERENCES transactions(id)
+        )
+      `);
+      this.db.exec(`INSERT INTO tax_lots_new SELECT * FROM tax_lots`);
+      this.db.exec(`DROP TABLE tax_lots`);
+      this.db.exec(`ALTER TABLE tax_lots_new RENAME TO tax_lots`);
+    } else if (tableInfo.length === 0) {
+      // Table doesn't exist - create it
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS tax_lots (
+          id TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL,
+          security_id TEXT NOT NULL,
+          transaction_id TEXT,
+          acquisition_date TEXT NOT NULL,
+          quantity REAL NOT NULL,
+          cost_basis REAL NOT NULL,
+          cost_per_share REAL NOT NULL,
+          remaining_quantity REAL NOT NULL,
+          is_open INTEGER NOT NULL DEFAULT 1,
+          closed_date TEXT,
+          closed_transaction_id TEXT,
+          realized_gain REAL,
+          holding_period TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+          FOREIGN KEY (security_id) REFERENCES securities(id),
+          FOREIGN KEY (transaction_id) REFERENCES transactions(id)
+        )
+      `);
+    }
 
     // Create indexes for better query performance
     this.db.exec(`
@@ -530,6 +565,26 @@ export class Database {
     const stmt = this.db.prepare(`UPDATE tax_lots SET ${fields.join(', ')} WHERE id = ?`);
     stmt.run(...values);
     return this.getTaxLotById(id)!;
+  }
+
+  deleteTaxLot(id: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('DELETE FROM tax_lots WHERE id = ?');
+    stmt.run(id);
+  }
+
+  deleteAllTaxLots(accountId: string): number {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('DELETE FROM tax_lots WHERE account_id = ?');
+    const result = stmt.run(accountId);
+    return result.changes;
+  }
+
+  deleteTaxLotsBySymbol(accountId: string, securityId: string): number {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('DELETE FROM tax_lots WHERE account_id = ? AND security_id = ?');
+    const result = stmt.run(accountId, securityId);
+    return result.changes;
   }
 
   // Portfolio summary

@@ -5,7 +5,7 @@ import Store from 'electron-store';
 import { Database } from './database';
 import { BackupService } from './backup-service';
 import { AIService } from './ai-service';
-import { parserRegistry, transactionParserRegistry } from './parsers';
+import { parserRegistry, transactionParserRegistry, lotDetailsParserRegistry } from './parsers';
 import { AppSettings, ExcelImportResult } from '../shared/types';
 
 export function setupIpcHandlers(
@@ -43,6 +43,9 @@ export function setupIpcHandlers(
   ipcMain.handle('db:taxlots:list', (_, filters) => db.listTaxLots(filters));
   ipcMain.handle('db:taxlots:create', (_, taxLot) => db.createTaxLot(taxLot));
   ipcMain.handle('db:taxlots:update', (_, id, taxLot) => db.updateTaxLot(id, taxLot));
+  ipcMain.handle('db:taxlots:delete', (_, id) => db.deleteTaxLot(id));
+  ipcMain.handle('db:taxlots:deleteAll', (_, accountId) => db.deleteAllTaxLots(accountId));
+  ipcMain.handle('db:taxlots:deleteBySymbol', (_, accountId, securityId) => db.deleteTaxLotsBySymbol(accountId, securityId));
 
   // Portfolio handlers
   ipcMain.handle('db:portfolio:summary', () => db.getPortfolioSummary());
@@ -188,6 +191,22 @@ export function setupIpcHandlers(
     return result.filePaths[0];
   });
 
+  ipcMain.handle('file:select-brokerage-files', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'CSV Files', extensions: ['csv'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return [];
+    }
+
+    return result.filePaths;
+  });
+
   ipcMain.handle('file:parse-brokerage', async (_, parserId: string, filePath: string) => {
     const parser = parserRegistry.getParser(parserId);
     if (!parser) {
@@ -234,6 +253,38 @@ export function setupIpcHandlers(
         success: false,
         broker: parserId,
         accounts: [],
+        errors: ['File format not recognized by this parser'],
+      };
+    }
+
+    return parser.parse(filePath);
+  });
+
+  // Lot details import handlers
+  ipcMain.handle('lot-details-parsers:list', () => lotDetailsParserRegistry.listParsers());
+
+  ipcMain.handle('file:parse-lot-details', async (_, parserId: string, filePath: string) => {
+    const parser = lotDetailsParserRegistry.getParser(parserId);
+    if (!parser) {
+      return {
+        success: false,
+        broker: parserId,
+        symbol: '',
+        accountIdentifier: '',
+        lots: [],
+        errors: [`Lot details parser not found: ${parserId}`],
+      };
+    }
+
+    // Read file content for canParse check
+    const content = fs.readFileSync(filePath, 'utf-8');
+    if (!parser.canParse(filePath, content)) {
+      return {
+        success: false,
+        broker: parserId,
+        symbol: '',
+        accountIdentifier: '',
+        lots: [],
         errors: ['File format not recognized by this parser'],
       };
     }

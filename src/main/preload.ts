@@ -30,6 +30,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTaxLots: (filters?: unknown) => ipcRenderer.invoke('db:taxlots:list', filters),
   createTaxLot: (taxLot: unknown) => ipcRenderer.invoke('db:taxlots:create', taxLot),
   updateTaxLot: (id: string, taxLot: unknown) => ipcRenderer.invoke('db:taxlots:update', id, taxLot),
+  deleteTaxLot: (id: string) => ipcRenderer.invoke('db:taxlots:delete', id),
+  deleteAllTaxLots: (accountId: string) => ipcRenderer.invoke('db:taxlots:deleteAll', accountId),
+  deleteTaxLotsBySymbol: (accountId: string, securityId: string) => ipcRenderer.invoke('db:taxlots:deleteBySymbol', accountId, securityId),
 
   // File operations
   importExcel: () => ipcRenderer.invoke('file:import-excel'),
@@ -56,9 +59,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Brokerage import operations
   listBrokerageParsers: () => ipcRenderer.invoke('parsers:list'),
   selectBrokerageFile: () => ipcRenderer.invoke('file:select-brokerage-file'),
+  selectBrokerageFiles: () => ipcRenderer.invoke('file:select-brokerage-files'),
   parseBrokerageFile: (parserId: string, filePath: string) => ipcRenderer.invoke('file:parse-brokerage', parserId, filePath),
 
   // Transaction import operations
   listTransactionParsers: () => ipcRenderer.invoke('transaction-parsers:list'),
   parseTransactionFile: (parserId: string, filePath: string) => ipcRenderer.invoke('file:parse-transactions', parserId, filePath),
+
+  // Lot details import operations
+  listLotDetailsParsers: () => ipcRenderer.invoke('lot-details-parsers:list'),
+  parseLotDetailsFile: (parserId: string, filePath: string) => ipcRenderer.invoke('file:parse-lot-details', parserId, filePath),
 });
