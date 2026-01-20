@@ -12,7 +12,9 @@
     "build:renderer": "vite build",
     "start": "electron .",
     "package": "npm run build && electron-builder",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
@@ -42,7 +44,8 @@
     "recharts": "^2.12.0",
     "tailwindcss": "^3.4.1",
     "typescript": "^5.3.3",
-    "vite": "^5.1.1"
+    "vite": "^5.1.1",
+    "vitest": "^4.0.17"
   },
   "build": {
     "appId": "com.portfolio.manager",
