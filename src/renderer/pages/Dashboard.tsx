@@ -1,7 +1,8 @@
-import { useEffect, useState, useMemo } from 'react';
-import { usePortfolio, usePositions, useAccounts, useSecurities } from '../hooks/useApi';
+import { useEffect, useState, useMemo, useCallback } from 'react';
+import { usePortfolio, usePositions, useAccounts, useSecurities, useEarnings, useSettings } from '../hooks/useApi';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip } from 'recharts';
-import type { Position } from '../../shared/types';
+import type { Position, EarningsEvent } from '../../shared/types';
+import { format, addDays, parseISO } from 'date-fns';
 
 const COLORS = ['#0ea5e9', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#6366f1', '#ec4899', '#14b8a6'];
 
@@ -13,15 +14,35 @@ export default function Dashboard() {
   const { positions, loading: positionsLoading, fetchPositions } = usePositions();
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities } = useSecurities();
+  const { earnings, loading: earningsLoading, fetchPortfolioEarnings } = useEarnings();
+  const { settings, fetchSettings } = useSettings();
   const [sortColumn, setSortColumn] = useState<SortColumn>('marketValue');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+
+  const isDataProviderConfigured = settings?.dataProvider === 'fmp' && settings?.dataProviderApiKey;
+
+  const fetchEarnings = useCallback(() => {
+    if (!isDataProviderConfigured) return;
+    // Fetch earnings from yesterday (to ensure today is included) through next 30 days
+    const fromDate = format(addDays(new Date(), -1), 'yyyy-MM-dd');
+    const endDate = format(addDays(new Date(), 30), 'yyyy-MM-dd');
+    fetchPortfolioEarnings(fromDate, endDate);
+  }, [isDataProviderConfigured, fetchPortfolioEarnings]);
 
   useEffect(() => {
     fetchSummary();
     fetchPositions();
     fetchAccounts();
     fetchSecurities();
-  }, [fetchSummary, fetchPositions, fetchAccounts, fetchSecurities]);
+    fetchSettings();
+  }, [fetchSummary, fetchPositions, fetchAccounts, fetchSecurities, fetchSettings]);
+
+  // Fetch earnings when data provider is configured and positions are loaded
+  useEffect(() => {
+    if (isDataProviderConfigured && positions.length > 0) {
+      fetchEarnings();
+    }
+  }, [isDataProviderConfigured, positions.length, fetchEarnings]);
 
   const loading = portfolioLoading || positionsLoading;
 
@@ -214,6 +235,97 @@ export default function Dashboard() {
               )}
             </div>
           </div>
+
+          {/* Upcoming Earnings */}
+          {isDataProviderConfigured && (
+            <div className="card">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-gray-900">Upcoming Earnings</h2>
+                <button
+                  onClick={fetchEarnings}
+                  disabled={earningsLoading}
+                  className="btn-secondary text-sm"
+                >
+                  {earningsLoading ? 'Loading...' : 'Refresh'}
+                </button>
+              </div>
+              {earningsLoading ? (
+                <div className="text-center py-8 text-gray-500">Loading earnings...</div>
+              ) : earnings.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="table-header">Symbol</th>
+                        <th className="table-header">Date</th>
+                        <th className="table-header">Time</th>
+                        <th className="table-header text-right">EPS Est.</th>
+                        <th className="table-header text-right">EPS Actual</th>
+                        <th className="table-header text-right">Revenue Est.</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {earnings
+                        .filter(e => e.date >= format(new Date(), 'yyyy-MM-dd')) // Today and future only
+                        .sort((a, b) => a.date.localeCompare(b.date))
+                        .slice(0, 10)
+                        .map((event, idx) => {
+                          const eventDate = parseISO(event.date);
+                          const isToday = format(new Date(), 'yyyy-MM-dd') === event.date;
+                          return (
+                            <tr
+                              key={`${event.symbol}-${event.date}-${idx}`}
+                              className={`hover:bg-gray-50 ${isToday ? 'bg-yellow-50' : ''}`}
+                            >
+                              <td className="table-cell font-medium">{event.symbol}</td>
+                              <td className="table-cell">
+                                <span className={isToday ? 'font-semibold text-yellow-700' : ''}>
+                                  {format(eventDate, 'MMM d, yyyy')}
+                                  {isToday && ' (Today)'}
+                                </span>
+                              </td>
+                              <td className="table-cell text-gray-500">
+                                {event.time === 'bmo' && 'Before Open'}
+                                {event.time === 'amc' && 'After Close'}
+                                {event.time === 'dmh' && 'During Hours'}
+                                {!event.time && '-'}
+                              </td>
+                              <td className="table-cell text-right">
+                                {event.epsEstimated !== undefined ? `$${event.epsEstimated.toFixed(2)}` : '-'}
+                              </td>
+                              <td className="table-cell text-right">
+                                {event.epsActual !== undefined ? (
+                                  <span className={event.epsActual >= (event.epsEstimated || 0) ? 'text-green-600' : 'text-red-600'}>
+                                    ${event.epsActual.toFixed(2)}
+                                  </span>
+                                ) : '-'}
+                              </td>
+                              <td className="table-cell text-right">
+                                {event.revenueEstimated !== undefined
+                                  ? `$${(event.revenueEstimated / 1e9).toFixed(2)}B`
+                                  : '-'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                  {(() => {
+                    const filteredCount = earnings.filter(e => e.date >= format(new Date(), 'yyyy-MM-dd')).length;
+                    return filteredCount > 10 ? (
+                      <div className="text-center py-2 text-sm text-gray-500">
+                        Showing 10 of {filteredCount} upcoming earnings
+                      </div>
+                    ) : null;
+                  })()}
+                </div>
+              ) : (
+                <div className="text-center py-8 text-gray-500">
+                  No upcoming earnings for your holdings in the next 30 days
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Holdings Table */}
           <div className="card">

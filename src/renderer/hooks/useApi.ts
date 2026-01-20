@@ -31,6 +31,7 @@ import type {
   StockQuote,
   PriceHistory,
   RefreshPricesResult,
+  EarningsEvent,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -138,6 +139,8 @@ declare global {
       fmpGetPriceHistory: (securityId: string, startDate?: string, endDate?: string) => Promise<PriceHistory[]>;
       fmpRefreshPrices: () => Promise<RefreshPricesResult>;
       fmpFetchHistorical: (symbol: string, days?: number) => Promise<{ success: boolean; count?: number; error?: string }>;
+      fmpGetEarningsCalendar: (fromDate?: string, toDate?: string) => Promise<EarningsEvent[]>;
+      fmpGetPortfolioEarnings: (fromDate?: string, toDate?: string) => Promise<EarningsEvent[]>;
     };
   }
 }
@@ -996,5 +999,49 @@ export function useFMP() {
     getPriceHistory,
     refreshPrices,
     fetchHistorical,
+  };
+}
+
+export function useEarnings() {
+  const [earnings, setEarnings] = useState<EarningsEvent[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchEarningsCalendar = useCallback(async (fromDate?: string, toDate?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.fmpGetEarningsCalendar(fromDate, toDate);
+      setEarnings(data);
+      return data;
+    } catch (err) {
+      setError((err as Error).message);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchPortfolioEarnings = useCallback(async (fromDate?: string, toDate?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.fmpGetPortfolioEarnings(fromDate, toDate);
+      setEarnings(data);
+      return data;
+    } catch (err) {
+      setError((err as Error).message);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return {
+    earnings,
+    loading,
+    error,
+    fetchEarningsCalendar,
+    fetchPortfolioEarnings,
   };
 }

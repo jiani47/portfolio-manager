@@ -172,6 +172,19 @@ export interface RefreshPricesResult {
   prices: Map<string, number> | Record<string, number>;
 }
 
+// Earnings calendar event from FMP
+export interface EarningsEvent {
+  symbol: string;
+  date: string;           // YYYY-MM-DD
+  time?: 'bmo' | 'amc' | 'dmh' | '';  // before market open, after market close, during market hours
+  epsEstimated?: number;
+  epsActual?: number;
+  revenueEstimated?: number;
+  revenueActual?: number;
+  fiscalDateEnding?: string;
+  updatedFromDate?: string;
+}
+
 // IPC channel types
 export interface IPCChannels {
   // Database operations

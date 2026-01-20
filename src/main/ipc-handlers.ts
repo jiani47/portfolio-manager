@@ -480,4 +480,30 @@ export function setupIpcHandlers(
     const count = db.savePriceHistoryBatch(pricesWithSecurityId);
     return { success: true, count };
   });
+
+  // Earnings calendar handlers
+  ipcMain.handle('fmp:get-earnings-calendar', async (_, fromDate?: string, toDate?: string) => {
+    return fmpService.getEarningsCalendar(fromDate, toDate);
+  });
+
+  ipcMain.handle('fmp:get-portfolio-earnings', async (_, fromDate?: string, toDate?: string) => {
+    // Get all unique symbols from positions
+    const positions = db.listPositions();
+    const securities = db.listSecurities();
+    const securityMap = new Map(securities.map(s => [s.id, s]));
+
+    const symbols: string[] = [];
+    for (const pos of positions) {
+      const security = securityMap.get(pos.securityId);
+      if (security && security.type !== 'cash' && !symbols.includes(security.symbol)) {
+        symbols.push(security.symbol);
+      }
+    }
+
+    if (symbols.length === 0) {
+      return [];
+    }
+
+    return fmpService.getEarningsForSymbols(symbols, fromDate, toDate);
+  });
 }

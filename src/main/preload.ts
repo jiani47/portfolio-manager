@@ -105,4 +105,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   fmpRefreshPrices: () => ipcRenderer.invoke('fmp:refresh-prices'),
   fmpFetchHistorical: (symbol: string, days?: number) =>
     ipcRenderer.invoke('fmp:fetch-historical', symbol, days),
+  fmpGetEarningsCalendar: (fromDate?: string, toDate?: string) =>
+    ipcRenderer.invoke('fmp:get-earnings-calendar', fromDate, toDate),
+  fmpGetPortfolioEarnings: (fromDate?: string, toDate?: string) =>
+    ipcRenderer.invoke('fmp:get-portfolio-earnings', fromDate, toDate),
 });

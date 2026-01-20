@@ -1,4 +1,4 @@
-import { AppSettings, CompanyProfile, StockQuote, PriceHistory } from '../shared/types';
+import { AppSettings, CompanyProfile, StockQuote, PriceHistory, EarningsEvent } from '../shared/types';
 
 // FMP API response types
 interface FMPQuoteResponse {
@@ -32,6 +32,18 @@ interface FMPHistoricalResponse {
     close: number;
     volume: number;
   }>;
+}
+
+interface FMPEarningsResponse {
+  symbol: string;
+  date: string;
+  time?: string;
+  epsEstimated?: number;
+  eps?: number;
+  revenueEstimated?: number;
+  revenue?: number;
+  fiscalDateEnding?: string;
+  updatedFromDate?: string;
 }
 
 export class FMPService {
@@ -282,5 +294,65 @@ export class FMPService {
     }
 
     return { prices, priceHistory, errors };
+  }
+
+  async getEarningsCalendar(fromDate?: string, toDate?: string): Promise<EarningsEvent[]> {
+    if (!this.apiKey) {
+      console.warn('FMP API key not configured');
+      return [];
+    }
+
+    try {
+      let url = `${this.baseUrl}/earnings-calendar?apikey=${this.apiKey}`;
+      if (fromDate) {
+        url += `&from=${fromDate}`;
+      }
+      if (toDate) {
+        url += `&to=${toDate}`;
+      }
+
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        console.error(`FMP earnings calendar error: ${response.status}`);
+        return [];
+      }
+
+      const data: FMPEarningsResponse[] = await response.json();
+      if (!Array.isArray(data)) {
+        return [];
+      }
+
+      return data.map(item => ({
+        symbol: item.symbol,
+        date: item.date,
+        time: this.normalizeEarningsTime(item.time),
+        epsEstimated: item.epsEstimated,
+        epsActual: item.eps,
+        revenueEstimated: item.revenueEstimated,
+        revenueActual: item.revenue,
+        fiscalDateEnding: item.fiscalDateEnding,
+        updatedFromDate: item.updatedFromDate,
+      }));
+    } catch (error) {
+      console.error('FMP earnings calendar error:', error);
+      return [];
+    }
+  }
+
+  async getEarningsForSymbols(symbols: string[], fromDate?: string, toDate?: string): Promise<EarningsEvent[]> {
+    // Get full earnings calendar and filter by symbols
+    const allEarnings = await this.getEarningsCalendar(fromDate, toDate);
+    const symbolSet = new Set(symbols.map(s => s.toUpperCase()));
+    return allEarnings.filter(e => symbolSet.has(e.symbol.toUpperCase()));
+  }
+
+  private normalizeEarningsTime(time?: string): EarningsEvent['time'] {
+    if (!time) return '';
+    const t = time.toLowerCase();
+    if (t.includes('bmo') || t.includes('before')) return 'bmo';
+    if (t.includes('amc') || t.includes('after')) return 'amc';
+    if (t.includes('dmh') || t.includes('during')) return 'dmh';
+    return '';
   }
 }
