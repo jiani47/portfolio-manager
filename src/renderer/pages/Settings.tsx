@@ -1,15 +1,33 @@
 import { useEffect, useState } from 'react';
-import { useSettings, useBackup } from '../hooks/useApi';
-import type { AppSettings, BackupConfig } from '../../shared/types';
+import { useSettings, useBackup, useSecurityTags } from '../hooks/useApi';
+import type { AppSettings, BackupConfig, SecurityTag } from '../../shared/types';
 import { format } from 'date-fns';
+
+const TAG_COLORS = [
+  { value: 'blue', label: 'Blue', class: 'bg-blue-500' },
+  { value: 'purple', label: 'Purple', class: 'bg-purple-500' },
+  { value: 'orange', label: 'Orange', class: 'bg-orange-500' },
+  { value: 'green', label: 'Green', class: 'bg-green-500' },
+  { value: 'red', label: 'Red', class: 'bg-red-500' },
+  { value: 'gray', label: 'Gray', class: 'bg-gray-500' },
+];
 
 export default function Settings() {
   const { settings, loading, error, fetchSettings, updateSettings } = useSettings();
   const { backups, loading: backupsLoading, fetchBackups, createBackup, restoreBackup } = useBackup();
+  const { tags, fetchTags, createTag, updateTag, deleteTag } = useSecurityTags();
   const [saving, setSaving] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [showTagModal, setShowTagModal] = useState(false);
+  const [editingTag, setEditingTag] = useState<SecurityTag | null>(null);
+  const [tagFormData, setTagFormData] = useState({
+    name: '',
+    displayName: '',
+    color: 'blue',
+    description: '',
+  });
 
   const [formData, setFormData] = useState<Partial<AppSettings>>({
     theme: 'system',
@@ -27,7 +45,8 @@ export default function Settings() {
   useEffect(() => {
     fetchSettings();
     fetchBackups();
-  }, [fetchSettings, fetchBackups]);
+    fetchTags();
+  }, [fetchSettings, fetchBackups, fetchTags]);
 
   useEffect(() => {
     if (settings) {
@@ -168,6 +187,80 @@ export default function Settings() {
               <option value="yyyy-MM-dd">YYYY-MM-DD</option>
             </select>
           </div>
+        </div>
+      </div>
+
+      {/* Security Tags Settings */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Security Tags</h2>
+            <p className="text-sm text-gray-500">Categorize your securities with custom tags</p>
+          </div>
+          <button
+            onClick={() => {
+              setEditingTag(null);
+              setTagFormData({ name: '', displayName: '', color: 'blue', description: '' });
+              setShowTagModal(true);
+            }}
+            className="btn-secondary text-sm"
+          >
+            Add Tag
+          </button>
+        </div>
+        <div className="space-y-2">
+          {tags.map(tag => {
+            const colorClass = TAG_COLORS.find(c => c.value === tag.color)?.class || 'bg-gray-500';
+            return (
+              <div key={tag.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                <div className="flex items-center gap-3">
+                  <div className={`w-4 h-4 rounded-full ${colorClass}`} />
+                  <div>
+                    <div className="font-medium text-gray-900">{tag.displayName}</div>
+                    {tag.description && (
+                      <div className="text-xs text-gray-500">{tag.description}</div>
+                    )}
+                  </div>
+                  {tag.isSystem && (
+                    <span className="text-xs text-gray-400 bg-gray-200 px-2 py-0.5 rounded">System</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      setEditingTag(tag);
+                      setTagFormData({
+                        name: tag.name,
+                        displayName: tag.displayName,
+                        color: tag.color,
+                        description: tag.description || '',
+                      });
+                      setShowTagModal(true);
+                    }}
+                    className="text-primary-600 hover:text-primary-700 text-sm"
+                  >
+                    Edit
+                  </button>
+                  {!tag.isSystem && (
+                    <button
+                      onClick={async () => {
+                        if (window.confirm('Are you sure you want to delete this tag?')) {
+                          try {
+                            await deleteTag(tag.id);
+                          } catch (err) {
+                            console.error('Failed to delete tag:', err);
+                          }
+                        }
+                      }}
+                      className="text-red-600 hover:text-red-700 text-sm"
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -343,6 +436,101 @@ export default function Settings() {
           </ul>
         </div>
       </div>
+
+      {/* Tag Modal */}
+      {showTagModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">
+              {editingTag ? 'Edit Tag' : 'Create Tag'}
+            </h2>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                try {
+                  if (editingTag) {
+                    await updateTag(editingTag.id, {
+                      name: tagFormData.name,
+                      displayName: tagFormData.displayName,
+                      color: tagFormData.color,
+                      description: tagFormData.description || undefined,
+                    });
+                  } else {
+                    await createTag({
+                      name: tagFormData.name.toLowerCase().replace(/\s+/g, '_'),
+                      displayName: tagFormData.displayName,
+                      color: tagFormData.color,
+                      description: tagFormData.description || undefined,
+                      isSystem: false,
+                    });
+                  }
+                  setShowTagModal(false);
+                  setEditingTag(null);
+                } catch (err) {
+                  console.error('Failed to save tag:', err);
+                }
+              }}
+              className="space-y-4"
+            >
+              <div>
+                <label className="label">Display Name</label>
+                <input
+                  type="text"
+                  className="input"
+                  value={tagFormData.displayName}
+                  onChange={(e) => setTagFormData({ ...tagFormData, displayName: e.target.value })}
+                  placeholder="e.g., Growth"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="label">Color</label>
+                <div className="flex gap-2">
+                  {TAG_COLORS.map(color => (
+                    <button
+                      key={color.value}
+                      type="button"
+                      onClick={() => setTagFormData({ ...tagFormData, color: color.value })}
+                      className={`w-8 h-8 rounded-full ${color.class} ${
+                        tagFormData.color === color.value ? 'ring-2 ring-offset-2 ring-gray-400' : ''
+                      }`}
+                      title={color.label}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="label">Description (optional)</label>
+                <input
+                  type="text"
+                  className="input"
+                  value={tagFormData.description}
+                  onChange={(e) => setTagFormData({ ...tagFormData, description: e.target.value })}
+                  placeholder="e.g., High-growth tech companies"
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowTagModal(false);
+                    setEditingTag(null);
+                  }}
+                  className="btn-secondary"
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn-primary">
+                  {editingTag ? 'Save Changes' : 'Create Tag'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

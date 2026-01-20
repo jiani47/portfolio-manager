@@ -291,4 +291,30 @@ export function setupIpcHandlers(
 
     return parser.parse(filePath);
   });
+
+  // Security tag handlers
+  ipcMain.handle('db:security-tags:list', () => db.listSecurityTags());
+  ipcMain.handle('db:security-tags:create', (_, tag) => db.createSecurityTag(tag));
+  ipcMain.handle('db:security-tags:update', (_, id, tag) => db.updateSecurityTag(id, tag));
+  ipcMain.handle('db:security-tags:delete', (_, id) => db.deleteSecurityTag(id));
+
+  // Security tag assignment handlers
+  ipcMain.handle('db:security-tag-assignments:list', (_, securityId) => db.listSecurityTagAssignments(securityId));
+  ipcMain.handle('db:security-tag-assignments:assign', (_, securityId, tagId) => db.assignTagToSecurity(securityId, tagId));
+  ipcMain.handle('db:security-tag-assignments:remove', (_, securityId, tagId) => db.removeTagFromSecurity(securityId, tagId));
+  ipcMain.handle('db:security-tag-assignments:get-tags-for-security', (_, securityId) => db.getTagsForSecurity(securityId));
+
+  // Trading rule handlers
+  ipcMain.handle('db:trading-rules:list', (_, filters) => db.listTradingRules(filters));
+  ipcMain.handle('db:trading-rules:create', (_, rule) => db.createTradingRule(rule));
+  ipcMain.handle('db:trading-rules:get', (_, id) => db.getTradingRuleById(id));
+  ipcMain.handle('db:trading-rules:update', (_, id, rule) => db.updateTradingRule(id, rule));
+  ipcMain.handle('db:trading-rules:delete', (_, id) => db.deleteTradingRule(id));
+
+  // Decision log handlers
+  ipcMain.handle('db:decision-logs:list', (_, filters) => db.listDecisionLogs(filters));
+  ipcMain.handle('db:decision-logs:create', (_, log) => db.createDecisionLog(log));
+  ipcMain.handle('db:decision-logs:get', (_, id) => db.getDecisionLogById(id));
+  ipcMain.handle('db:decision-logs:update', (_, id, log) => db.updateDecisionLog(id, log));
+  ipcMain.handle('db:decision-logs:delete', (_, id) => db.deleteDecisionLog(id));
 }

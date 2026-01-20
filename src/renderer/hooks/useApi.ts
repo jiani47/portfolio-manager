@@ -21,6 +21,12 @@ import type {
   TransactionParseResult,
   LotDetailsParserInfo,
   LotDetailsParseResult,
+  SecurityTag,
+  SecurityTagAssignment,
+  TradingRule,
+  TradingRuleFilters,
+  DecisionLog,
+  DecisionLogFilters,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -94,6 +100,32 @@ declare global {
       // Lot details import operations
       listLotDetailsParsers: () => Promise<LotDetailsParserInfo[]>;
       parseLotDetailsFile: (parserId: string, filePath: string) => Promise<LotDetailsParseResult>;
+
+      // Security tag operations
+      getSecurityTags: () => Promise<SecurityTag[]>;
+      createSecurityTag: (tag: Omit<SecurityTag, 'id' | 'createdAt'>) => Promise<SecurityTag>;
+      updateSecurityTag: (id: string, tag: Partial<SecurityTag>) => Promise<SecurityTag>;
+      deleteSecurityTag: (id: string) => Promise<void>;
+
+      // Security tag assignment operations
+      getSecurityTagAssignments: (securityId?: string) => Promise<SecurityTagAssignment[]>;
+      assignTagToSecurity: (securityId: string, tagId: string) => Promise<SecurityTagAssignment>;
+      removeTagFromSecurity: (securityId: string, tagId: string) => Promise<void>;
+      getTagsForSecurity: (securityId: string) => Promise<SecurityTag[]>;
+
+      // Trading rule operations
+      getTradingRules: (filters?: TradingRuleFilters) => Promise<TradingRule[]>;
+      createTradingRule: (rule: Omit<TradingRule, 'id' | 'createdAt' | 'updatedAt'>) => Promise<TradingRule>;
+      getTradingRule: (id: string) => Promise<TradingRule | null>;
+      updateTradingRule: (id: string, rule: Partial<TradingRule>) => Promise<TradingRule>;
+      deleteTradingRule: (id: string) => Promise<void>;
+
+      // Decision log operations
+      getDecisionLogs: (filters?: DecisionLogFilters) => Promise<DecisionLog[]>;
+      createDecisionLog: (log: Omit<DecisionLog, 'id' | 'createdAt' | 'updatedAt'>) => Promise<DecisionLog>;
+      getDecisionLog: (id: string) => Promise<DecisionLog | null>;
+      updateDecisionLog: (id: string, log: Partial<DecisionLog>) => Promise<DecisionLog>;
+      deleteDecisionLog: (id: string) => Promise<void>;
     };
   }
 }
@@ -668,5 +700,182 @@ export function useLotDetailsImport() {
     selectFiles,
     parseLotDetailsFiles,
     clearResults,
+  };
+}
+
+export function useSecurityTags() {
+  const [tags, setTags] = useState<SecurityTag[]>([]);
+  const [assignments, setAssignments] = useState<SecurityTagAssignment[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchTags = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getSecurityTags();
+      setTags(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchAssignments = useCallback(async (securityId?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getSecurityTagAssignments(securityId);
+      setAssignments(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createTag = useCallback(async (tag: Omit<SecurityTag, 'id' | 'createdAt'>) => {
+    const newTag = await window.electronAPI.createSecurityTag(tag);
+    setTags(prev => [...prev, newTag]);
+    return newTag;
+  }, []);
+
+  const updateTag = useCallback(async (id: string, tag: Partial<SecurityTag>) => {
+    const updated = await window.electronAPI.updateSecurityTag(id, tag);
+    setTags(prev => prev.map(t => t.id === id ? updated : t));
+    return updated;
+  }, []);
+
+  const deleteTag = useCallback(async (id: string) => {
+    await window.electronAPI.deleteSecurityTag(id);
+    setTags(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  const assignTag = useCallback(async (securityId: string, tagId: string) => {
+    const assignment = await window.electronAPI.assignTagToSecurity(securityId, tagId);
+    setAssignments(prev => [...prev.filter(a => !(a.securityId === securityId && a.tagId === tagId)), assignment]);
+    return assignment;
+  }, []);
+
+  const removeTag = useCallback(async (securityId: string, tagId: string) => {
+    await window.electronAPI.removeTagFromSecurity(securityId, tagId);
+    setAssignments(prev => prev.filter(a => !(a.securityId === securityId && a.tagId === tagId)));
+  }, []);
+
+  const getTagsForSecurity = useCallback(async (securityId: string) => {
+    return window.electronAPI.getTagsForSecurity(securityId);
+  }, []);
+
+  return {
+    tags,
+    assignments,
+    loading,
+    error,
+    fetchTags,
+    fetchAssignments,
+    createTag,
+    updateTag,
+    deleteTag,
+    assignTag,
+    removeTag,
+    getTagsForSecurity,
+  };
+}
+
+export function useTradingRules() {
+  const [rules, setRules] = useState<TradingRule[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchRules = useCallback(async (filters?: TradingRuleFilters) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getTradingRules(filters);
+      setRules(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createRule = useCallback(async (rule: Omit<TradingRule, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const newRule = await window.electronAPI.createTradingRule(rule);
+    setRules(prev => [newRule, ...prev]);
+    return newRule;
+  }, []);
+
+  const updateRule = useCallback(async (id: string, rule: Partial<TradingRule>) => {
+    const updated = await window.electronAPI.updateTradingRule(id, rule);
+    setRules(prev => prev.map(r => r.id === id ? updated : r));
+    return updated;
+  }, []);
+
+  const deleteRule = useCallback(async (id: string) => {
+    await window.electronAPI.deleteTradingRule(id);
+    setRules(prev => prev.filter(r => r.id !== id));
+  }, []);
+
+  const toggleRule = useCallback(async (id: string, isEnabled: boolean) => {
+    return updateRule(id, { isEnabled });
+  }, [updateRule]);
+
+  return {
+    rules,
+    loading,
+    error,
+    fetchRules,
+    createRule,
+    updateRule,
+    deleteRule,
+    toggleRule,
+  };
+}
+
+export function useDecisionLogs() {
+  const [logs, setLogs] = useState<DecisionLog[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchLogs = useCallback(async (filters?: DecisionLogFilters) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getDecisionLogs(filters);
+      setLogs(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createLog = useCallback(async (log: Omit<DecisionLog, 'id' | 'createdAt' | 'updatedAt'>) => {
+    const newLog = await window.electronAPI.createDecisionLog(log);
+    setLogs(prev => [newLog, ...prev]);
+    return newLog;
+  }, []);
+
+  const updateLog = useCallback(async (id: string, log: Partial<DecisionLog>) => {
+    const updated = await window.electronAPI.updateDecisionLog(id, log);
+    setLogs(prev => prev.map(l => l.id === id ? updated : l));
+    return updated;
+  }, []);
+
+  const deleteLog = useCallback(async (id: string) => {
+    await window.electronAPI.deleteDecisionLog(id);
+    setLogs(prev => prev.filter(l => l.id !== id));
+  }, []);
+
+  return {
+    logs,
+    loading,
+    error,
+    fetchLogs,
+    createLog,
+    updateLog,
+    deleteLog,
   };
 }

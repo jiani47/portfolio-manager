@@ -10,6 +10,12 @@ import {
   TaxLotFilters,
   PortfolioSummary,
   AssetAllocation,
+  SecurityTag,
+  SecurityTagAssignment,
+  TradingRule,
+  DecisionLog,
+  TradingRuleFilters,
+  DecisionLogFilters,
 } from '../shared/types';
 
 export class Database {
@@ -179,6 +185,92 @@ export class Database {
       CREATE INDEX IF NOT EXISTS idx_tax_lots_account ON tax_lots(account_id);
       CREATE INDEX IF NOT EXISTS idx_tax_lots_security ON tax_lots(security_id);
       CREATE INDEX IF NOT EXISTS idx_tax_lots_open ON tax_lots(is_open);
+    `);
+
+    // Security tags table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS security_tags (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        color TEXT NOT NULL,
+        description TEXT,
+        is_system INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL
+      )
+    `);
+
+    // Security tag assignments junction table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS security_tag_assignments (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        tag_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (security_id) REFERENCES securities(id) ON DELETE CASCADE,
+        FOREIGN KEY (tag_id) REFERENCES security_tags(id) ON DELETE CASCADE,
+        UNIQUE(security_id, tag_id)
+      )
+    `);
+
+    // Seed default security tags if they don't exist
+    const existingTags = this.db.prepare('SELECT COUNT(*) as count FROM security_tags').get() as { count: number };
+    if (existingTags.count === 0) {
+      const now = new Date().toISOString();
+      this.db.exec(`
+        INSERT INTO security_tags (id, name, display_name, color, description, is_system, created_at) VALUES
+          ('tag-core', 'core', 'Core', 'blue', 'Long-term, high conviction positions', 1, '${now}'),
+          ('tag-satellite', 'satellite', 'Satellite', 'purple', 'Tactical positions for diversification', 1, '${now}'),
+          ('tag-event-macro', 'event_macro', 'Event/Macro', 'orange', 'Event-driven or macro plays', 1, '${now}')
+      `);
+    }
+
+    // Trading rules table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS trading_rules (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        security_id TEXT,
+        rule_type TEXT NOT NULL,
+        condition_type TEXT NOT NULL,
+        condition_operator TEXT NOT NULL,
+        condition_value REAL NOT NULL,
+        action_type TEXT NOT NULL,
+        action_value REAL,
+        is_enabled INTEGER DEFAULT 1,
+        priority INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      )
+    `);
+
+    // Decision logs table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS decision_logs (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        decision_date TEXT NOT NULL,
+        decision_type TEXT NOT NULL,
+        background TEXT,
+        decision TEXT NOT NULL,
+        execution TEXT,
+        transaction_ids TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      )
+    `);
+
+    // Create indexes for new tables
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_security_tag_assignments_security ON security_tag_assignments(security_id);
+      CREATE INDEX IF NOT EXISTS idx_security_tag_assignments_tag ON security_tag_assignments(tag_id);
+      CREATE INDEX IF NOT EXISTS idx_trading_rules_security ON trading_rules(security_id);
+      CREATE INDEX IF NOT EXISTS idx_trading_rules_enabled ON trading_rules(is_enabled);
+      CREATE INDEX IF NOT EXISTS idx_decision_logs_security ON decision_logs(security_id);
+      CREATE INDEX IF NOT EXISTS idx_decision_logs_date ON decision_logs(decision_date);
     `);
   }
 
@@ -634,6 +726,293 @@ export class Database {
     }));
   }
 
+  // Security tag operations
+  listSecurityTags(): SecurityTag[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM security_tags ORDER BY is_system DESC, name');
+    return stmt.all().map(this.mapRowToSecurityTag);
+  }
+
+  createSecurityTag(tag: Omit<SecurityTag, 'id' | 'createdAt'>): SecurityTag {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO security_tags (id, name, display_name, color, description, is_system, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(id, tag.name, tag.displayName, tag.color, tag.description || null, tag.isSystem ? 1 : 0, now);
+    return this.getSecurityTagById(id)!;
+  }
+
+  getSecurityTagById(id: string): SecurityTag | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM security_tags WHERE id = ?');
+    const row = stmt.get(id);
+    return row ? this.mapRowToSecurityTag(row) : null;
+  }
+
+  updateSecurityTag(id: string, tag: Partial<SecurityTag>): SecurityTag {
+    if (!this.db) throw new Error('Database not initialized');
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    if (tag.name !== undefined) { fields.push('name = ?'); values.push(tag.name); }
+    if (tag.displayName !== undefined) { fields.push('display_name = ?'); values.push(tag.displayName); }
+    if (tag.color !== undefined) { fields.push('color = ?'); values.push(tag.color); }
+    if (tag.description !== undefined) { fields.push('description = ?'); values.push(tag.description); }
+
+    if (fields.length === 0) return this.getSecurityTagById(id)!;
+
+    values.push(id);
+    const stmt = this.db.prepare(`UPDATE security_tags SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+    return this.getSecurityTagById(id)!;
+  }
+
+  deleteSecurityTag(id: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    // Don't allow deleting system tags
+    const tag = this.getSecurityTagById(id);
+    if (tag?.isSystem) {
+      throw new Error('Cannot delete system tags');
+    }
+    const stmt = this.db.prepare('DELETE FROM security_tags WHERE id = ?');
+    stmt.run(id);
+  }
+
+  // Security tag assignment operations
+  listSecurityTagAssignments(securityId?: string): SecurityTagAssignment[] {
+    if (!this.db) throw new Error('Database not initialized');
+    let sql = 'SELECT * FROM security_tag_assignments';
+    const params: string[] = [];
+    if (securityId) {
+      sql += ' WHERE security_id = ?';
+      params.push(securityId);
+    }
+    const stmt = this.db.prepare(sql);
+    return (params.length ? stmt.all(...params) : stmt.all()).map(this.mapRowToSecurityTagAssignment);
+  }
+
+  assignTagToSecurity(securityId: string, tagId: string): SecurityTagAssignment {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO security_tag_assignments (id, security_id, tag_id, created_at)
+      VALUES (?, ?, ?, ?)
+    `);
+    stmt.run(id, securityId, tagId, now);
+    // Return the assignment (either new or existing)
+    const existing = this.db.prepare('SELECT * FROM security_tag_assignments WHERE security_id = ? AND tag_id = ?').get(securityId, tagId);
+    return this.mapRowToSecurityTagAssignment(existing);
+  }
+
+  removeTagFromSecurity(securityId: string, tagId: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('DELETE FROM security_tag_assignments WHERE security_id = ? AND tag_id = ?');
+    stmt.run(securityId, tagId);
+  }
+
+  getTagsForSecurity(securityId: string): SecurityTag[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare(`
+      SELECT t.* FROM security_tags t
+      JOIN security_tag_assignments a ON t.id = a.tag_id
+      WHERE a.security_id = ?
+      ORDER BY t.is_system DESC, t.name
+    `);
+    return stmt.all(securityId).map(this.mapRowToSecurityTag);
+  }
+
+  // Trading rule operations
+  listTradingRules(filters?: TradingRuleFilters): TradingRule[] {
+    if (!this.db) throw new Error('Database not initialized');
+    let sql = 'SELECT * FROM trading_rules WHERE 1=1';
+    const params: unknown[] = [];
+
+    if (filters?.securityId !== undefined) {
+      if (filters.securityId === null) {
+        sql += ' AND security_id IS NULL';
+      } else {
+        sql += ' AND security_id = ?';
+        params.push(filters.securityId);
+      }
+    }
+    if (filters?.ruleType) {
+      sql += ' AND rule_type = ?';
+      params.push(filters.ruleType);
+    }
+    if (filters?.isEnabled !== undefined) {
+      sql += ' AND is_enabled = ?';
+      params.push(filters.isEnabled ? 1 : 0);
+    }
+
+    sql += ' ORDER BY priority DESC, created_at DESC';
+
+    const stmt = this.db.prepare(sql);
+    return stmt.all(...params).map(this.mapRowToTradingRule);
+  }
+
+  createTradingRule(rule: Omit<TradingRule, 'id' | 'createdAt' | 'updatedAt'>): TradingRule {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO trading_rules (id, name, description, security_id, rule_type, condition_type, condition_operator, condition_value, action_type, action_value, is_enabled, priority, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      id,
+      rule.name,
+      rule.description || null,
+      rule.securityId || null,
+      rule.ruleType,
+      rule.conditionType,
+      rule.conditionOperator,
+      rule.conditionValue,
+      rule.actionType,
+      rule.actionValue || null,
+      rule.isEnabled ? 1 : 0,
+      rule.priority,
+      now,
+      now
+    );
+    return this.getTradingRuleById(id)!;
+  }
+
+  getTradingRuleById(id: string): TradingRule | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM trading_rules WHERE id = ?');
+    const row = stmt.get(id);
+    return row ? this.mapRowToTradingRule(row) : null;
+  }
+
+  updateTradingRule(id: string, rule: Partial<TradingRule>): TradingRule {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const fields: string[] = ['updated_at = ?'];
+    const values: unknown[] = [now];
+
+    if (rule.name !== undefined) { fields.push('name = ?'); values.push(rule.name); }
+    if (rule.description !== undefined) { fields.push('description = ?'); values.push(rule.description); }
+    if (rule.securityId !== undefined) { fields.push('security_id = ?'); values.push(rule.securityId); }
+    if (rule.ruleType !== undefined) { fields.push('rule_type = ?'); values.push(rule.ruleType); }
+    if (rule.conditionType !== undefined) { fields.push('condition_type = ?'); values.push(rule.conditionType); }
+    if (rule.conditionOperator !== undefined) { fields.push('condition_operator = ?'); values.push(rule.conditionOperator); }
+    if (rule.conditionValue !== undefined) { fields.push('condition_value = ?'); values.push(rule.conditionValue); }
+    if (rule.actionType !== undefined) { fields.push('action_type = ?'); values.push(rule.actionType); }
+    if (rule.actionValue !== undefined) { fields.push('action_value = ?'); values.push(rule.actionValue); }
+    if (rule.isEnabled !== undefined) { fields.push('is_enabled = ?'); values.push(rule.isEnabled ? 1 : 0); }
+    if (rule.priority !== undefined) { fields.push('priority = ?'); values.push(rule.priority); }
+
+    values.push(id);
+    const stmt = this.db.prepare(`UPDATE trading_rules SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+    return this.getTradingRuleById(id)!;
+  }
+
+  deleteTradingRule(id: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('DELETE FROM trading_rules WHERE id = ?');
+    stmt.run(id);
+  }
+
+  // Decision log operations
+  listDecisionLogs(filters?: DecisionLogFilters): DecisionLog[] {
+    if (!this.db) throw new Error('Database not initialized');
+    let sql = 'SELECT * FROM decision_logs WHERE 1=1';
+    const params: unknown[] = [];
+
+    if (filters?.securityId) {
+      sql += ' AND security_id = ?';
+      params.push(filters.securityId);
+    }
+    if (filters?.decisionType) {
+      sql += ' AND decision_type = ?';
+      params.push(filters.decisionType);
+    }
+    if (filters?.startDate) {
+      sql += ' AND decision_date >= ?';
+      params.push(filters.startDate);
+    }
+    if (filters?.endDate) {
+      sql += ' AND decision_date <= ?';
+      params.push(filters.endDate);
+    }
+    if (filters?.search) {
+      sql += ' AND (decision LIKE ? OR background LIKE ? OR execution LIKE ?)';
+      const searchTerm = `%${filters.search}%`;
+      params.push(searchTerm, searchTerm, searchTerm);
+    }
+
+    sql += ' ORDER BY decision_date DESC, created_at DESC';
+
+    if (filters?.limit) {
+      sql += ' LIMIT ?';
+      params.push(filters.limit);
+    }
+
+    const stmt = this.db.prepare(sql);
+    return stmt.all(...params).map(this.mapRowToDecisionLog);
+  }
+
+  createDecisionLog(log: Omit<DecisionLog, 'id' | 'createdAt' | 'updatedAt'>): DecisionLog {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO decision_logs (id, security_id, decision_date, decision_type, background, decision, execution, transaction_ids, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      id,
+      log.securityId,
+      log.decisionDate,
+      log.decisionType,
+      log.background || null,
+      log.decision,
+      log.execution || null,
+      JSON.stringify(log.transactionIds || []),
+      now,
+      now
+    );
+    return this.getDecisionLogById(id)!;
+  }
+
+  getDecisionLogById(id: string): DecisionLog | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM decision_logs WHERE id = ?');
+    const row = stmt.get(id);
+    return row ? this.mapRowToDecisionLog(row) : null;
+  }
+
+  updateDecisionLog(id: string, log: Partial<DecisionLog>): DecisionLog {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const fields: string[] = ['updated_at = ?'];
+    const values: unknown[] = [now];
+
+    if (log.securityId !== undefined) { fields.push('security_id = ?'); values.push(log.securityId); }
+    if (log.decisionDate !== undefined) { fields.push('decision_date = ?'); values.push(log.decisionDate); }
+    if (log.decisionType !== undefined) { fields.push('decision_type = ?'); values.push(log.decisionType); }
+    if (log.background !== undefined) { fields.push('background = ?'); values.push(log.background); }
+    if (log.decision !== undefined) { fields.push('decision = ?'); values.push(log.decision); }
+    if (log.execution !== undefined) { fields.push('execution = ?'); values.push(log.execution); }
+    if (log.transactionIds !== undefined) { fields.push('transaction_ids = ?'); values.push(JSON.stringify(log.transactionIds)); }
+
+    values.push(id);
+    const stmt = this.db.prepare(`UPDATE decision_logs SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+    return this.getDecisionLogById(id)!;
+  }
+
+  deleteDecisionLog(id: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('DELETE FROM decision_logs WHERE id = ?');
+    stmt.run(id);
+  }
+
   // Row mappers
   private mapRowToAccount = (row: unknown): Account => {
     const r = row as Record<string, unknown>;
@@ -715,6 +1094,73 @@ export class Database {
       closedTransactionId: r.closed_transaction_id as string | undefined,
       realizedGain: r.realized_gain as number | undefined,
       holdingPeriod: r.holding_period as TaxLot['holdingPeriod'],
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
+
+  private mapRowToSecurityTag = (row: unknown): SecurityTag => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      displayName: r.display_name as string,
+      color: r.color as string,
+      description: r.description as string | undefined,
+      isSystem: Boolean(r.is_system),
+      createdAt: r.created_at as string,
+    };
+  };
+
+  private mapRowToSecurityTagAssignment = (row: unknown): SecurityTagAssignment => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      securityId: r.security_id as string,
+      tagId: r.tag_id as string,
+      createdAt: r.created_at as string,
+    };
+  };
+
+  private mapRowToTradingRule = (row: unknown): TradingRule => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      description: r.description as string | undefined,
+      securityId: r.security_id as string | undefined,
+      ruleType: r.rule_type as TradingRule['ruleType'],
+      conditionType: r.condition_type as TradingRule['conditionType'],
+      conditionOperator: r.condition_operator as TradingRule['conditionOperator'],
+      conditionValue: r.condition_value as number,
+      actionType: r.action_type as TradingRule['actionType'],
+      actionValue: r.action_value as number | undefined,
+      isEnabled: Boolean(r.is_enabled),
+      priority: r.priority as number,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
+
+  private mapRowToDecisionLog = (row: unknown): DecisionLog => {
+    const r = row as Record<string, unknown>;
+    let transactionIds: string[] = [];
+    try {
+      if (r.transaction_ids) {
+        transactionIds = JSON.parse(r.transaction_ids as string);
+      }
+    } catch {
+      transactionIds = [];
+    }
+    return {
+      id: r.id as string,
+      securityId: r.security_id as string,
+      decisionDate: r.decision_date as string,
+      decisionType: r.decision_type as DecisionLog['decisionType'],
+      background: r.background as string | undefined,
+      decision: r.decision as string,
+      execution: r.execution as string | undefined,
+      transactionIds,
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,
     };

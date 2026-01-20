@@ -1,22 +1,36 @@
-import { useEffect, useState, useMemo } from 'react';
-import { usePositions, useAccounts, useSecurities } from '../hooks/useApi';
+import { useEffect, useState, useMemo, useCallback } from 'react';
+import { usePositions, useAccounts, useSecurities, useSecurityTags } from '../hooks/useApi';
 import BrokerageImportModal from '../components/BrokerageImportModal';
-import type { Position, Security } from '../../shared/types';
+import type { Position, Security, SecurityTag } from '../../shared/types';
 
 interface PositionWithPercent extends Position {
   portfolioPercent: number;
   security?: Security;
   account?: { id: string; name: string };
+  tags?: SecurityTag[];
 }
+
+const TAG_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  blue: { bg: 'bg-blue-100', text: 'text-blue-800', border: 'border-blue-200' },
+  purple: { bg: 'bg-purple-100', text: 'text-purple-800', border: 'border-purple-200' },
+  orange: { bg: 'bg-orange-100', text: 'text-orange-800', border: 'border-orange-200' },
+  green: { bg: 'bg-green-100', text: 'text-green-800', border: 'border-green-200' },
+  red: { bg: 'bg-red-100', text: 'text-red-800', border: 'border-red-200' },
+  gray: { bg: 'bg-gray-100', text: 'text-gray-800', border: 'border-gray-200' },
+};
 
 export default function Holdings() {
   const { positions, loading, error, fetchPositions, createPosition, updatePosition, deletePosition } = usePositions();
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities, createSecurity, findBySymbol } = useSecurities();
+  const { tags, assignments, fetchTags, fetchAssignments, assignTag, removeTag } = useSecurityTags();
   const [showModal, setShowModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showTagModal, setShowTagModal] = useState(false);
   const [editingPosition, setEditingPosition] = useState<Position | null>(null);
+  const [taggingPosition, setTaggingPosition] = useState<PositionWithPercent | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<string>('');
+  const [selectedTagFilter, setSelectedTagFilter] = useState<string>('');
   const [showWatchlist, setShowWatchlist] = useState(false);
   const [formData, setFormData] = useState({
     accountId: '',
@@ -32,27 +46,49 @@ export default function Holdings() {
     fetchPositions();
     fetchAccounts();
     fetchSecurities();
-  }, [fetchPositions, fetchAccounts, fetchSecurities]);
+    fetchTags();
+    fetchAssignments();
+  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments]);
+
+  // Create a map of security ID to tags
+  const securityTagsMap = useMemo(() => {
+    const map = new Map<string, SecurityTag[]>();
+    for (const assignment of assignments) {
+      const tag = tags.find(t => t.id === assignment.tagId);
+      if (tag) {
+        const existing = map.get(assignment.securityId) || [];
+        existing.push(tag);
+        map.set(assignment.securityId, existing);
+      }
+    }
+    return map;
+  }, [tags, assignments]);
 
   const securityMap = useMemo(() => new Map(securities.map(s => [s.id, s])), [securities]);
   const accountMap = useMemo(() => new Map(accounts.map(a => [a.id, a])), [accounts]);
 
   // Calculate positions with portfolio percentage and group them
   const { concentratedPositions, normalPositions, smallPositions, watchlistPositions, totalMarketValue, totalCash } = useMemo(() => {
-    const filtered = selectedAccount
+    let filtered = selectedAccount
       ? positions.filter(p => p.accountId === selectedAccount)
       : positions;
 
     // Calculate total market value (including cash for percentage calculation)
     const total = filtered.reduce((sum, p) => sum + (p.marketValue || 0), 0);
 
-    // Add percentage and enrich with security/account info
-    const enriched: PositionWithPercent[] = filtered.map(p => ({
+    // Add percentage and enrich with security/account info and tags
+    let enriched: PositionWithPercent[] = filtered.map(p => ({
       ...p,
       portfolioPercent: total > 0 ? ((p.marketValue || 0) / total) * 100 : 0,
       security: securityMap.get(p.securityId),
       account: accountMap.get(p.accountId),
+      tags: securityTagsMap.get(p.securityId) || [],
     }));
+
+    // Apply tag filter if selected
+    if (selectedTagFilter) {
+      enriched = enriched.filter(p => p.tags?.some(t => t.id === selectedTagFilter));
+    }
 
     // Separate cash positions from non-cash
     const cashPositions = enriched.filter(p => p.security?.type === 'cash');
@@ -79,7 +115,49 @@ export default function Holdings() {
       totalMarketValue: total,
       totalCash: cashTotal,
     };
-  }, [positions, selectedAccount, securityMap, accountMap]);
+  }, [positions, selectedAccount, selectedTagFilter, securityMap, accountMap, securityTagsMap]);
+
+  const handleOpenTagModal = useCallback((position: PositionWithPercent) => {
+    setTaggingPosition(position);
+    setShowTagModal(true);
+  }, []);
+
+  const handleTagToggle = useCallback(async (tagId: string) => {
+    if (!taggingPosition) return;
+    const securityId = taggingPosition.securityId;
+    const hasTag = taggingPosition.tags?.some(t => t.id === tagId);
+
+    try {
+      if (hasTag) {
+        await removeTag(securityId, tagId);
+      } else {
+        await assignTag(securityId, tagId);
+      }
+      // Refresh assignments
+      await fetchAssignments();
+    } catch (err) {
+      console.error('Failed to toggle tag:', err);
+    }
+  }, [taggingPosition, assignTag, removeTag, fetchAssignments]);
+
+  const renderTagBadges = (positionTags: SecurityTag[] = []) => {
+    if (positionTags.length === 0) return null;
+    return (
+      <div className="flex gap-1 mt-1">
+        {positionTags.map(tag => {
+          const colors = TAG_COLORS[tag.color] || TAG_COLORS.gray;
+          return (
+            <span
+              key={tag.id}
+              className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${colors.bg} ${colors.text}`}
+            >
+              {tag.displayName}
+            </span>
+          );
+        })}
+      </div>
+    );
+  };
 
   const handleOpenModal = (position?: Position) => {
     if (position) {
@@ -221,6 +299,18 @@ export default function Holdings() {
               </option>
             ))}
           </select>
+          <select
+            className="select w-40"
+            value={selectedTagFilter}
+            onChange={(e) => setSelectedTagFilter(e.target.value)}
+          >
+            <option value="">All Tags</option>
+            {tags.map((tag) => (
+              <option key={tag.id} value={tag.id}>
+                {tag.displayName}
+              </option>
+            ))}
+          </select>
           <button onClick={() => setShowImportModal(true)} className="btn-secondary">
             Import from Brokerage
           </button>
@@ -302,6 +392,7 @@ export default function Holdings() {
                               </span>
                             )}
                           </div>
+                          {renderTagBadges(position.tags)}
                         </td>
                         <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
                         <td className="table-cell text-gray-500">{position.account?.name || 'Unknown'}</td>
@@ -321,6 +412,7 @@ export default function Holdings() {
                           ) : '-'}
                         </td>
                         <td className="table-cell text-right">
+                          <button onClick={() => handleOpenTagModal(position)} className="text-purple-600 hover:text-purple-700 mr-3">Tag</button>
                           <button onClick={() => handleOpenModal(position)} className="text-primary-600 hover:text-primary-700 mr-3">Edit</button>
                           <button onClick={() => handleDelete(position.id)} className="text-red-600 hover:text-red-700">Delete</button>
                         </td>
@@ -356,7 +448,10 @@ export default function Holdings() {
                   <tbody className="bg-white divide-y divide-gray-200">
                     {normalPositions.map((position) => (
                       <tr key={position.id} className="hover:bg-gray-50">
-                        <td className="table-cell font-medium">{position.security?.symbol || 'Unknown'}</td>
+                        <td className="table-cell font-medium">
+                          {position.security?.symbol || 'Unknown'}
+                          {renderTagBadges(position.tags)}
+                        </td>
                         <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
                         <td className="table-cell text-gray-500">{position.account?.name || 'Unknown'}</td>
                         <td className="table-cell text-right font-medium">{position.portfolioPercent.toFixed(1)}%</td>
@@ -371,6 +466,7 @@ export default function Holdings() {
                           ) : '-'}
                         </td>
                         <td className="table-cell text-right">
+                          <button onClick={() => handleOpenTagModal(position)} className="text-purple-600 hover:text-purple-700 mr-3">Tag</button>
                           <button onClick={() => handleOpenModal(position)} className="text-primary-600 hover:text-primary-700 mr-3">Edit</button>
                           <button onClick={() => handleDelete(position.id)} className="text-red-600 hover:text-red-700">Delete</button>
                         </td>
@@ -406,7 +502,10 @@ export default function Holdings() {
                   <tbody className="bg-white divide-y divide-gray-200">
                     {smallPositions.map((position) => (
                       <tr key={position.id} className="hover:bg-gray-50">
-                        <td className="table-cell font-medium">{position.security?.symbol || 'Unknown'}</td>
+                        <td className="table-cell font-medium">
+                          {position.security?.symbol || 'Unknown'}
+                          {renderTagBadges(position.tags)}
+                        </td>
                         <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
                         <td className="table-cell text-gray-500">{position.account?.name || 'Unknown'}</td>
                         <td className="table-cell text-right text-gray-500">{position.portfolioPercent.toFixed(2)}%</td>
@@ -421,6 +520,7 @@ export default function Holdings() {
                           ) : '-'}
                         </td>
                         <td className="table-cell text-right">
+                          <button onClick={() => handleOpenTagModal(position)} className="text-purple-600 hover:text-purple-700 mr-3">Tag</button>
                           <button onClick={() => handleOpenModal(position)} className="text-primary-600 hover:text-primary-700 mr-3">Edit</button>
                           <button onClick={() => handleDelete(position.id)} className="text-red-600 hover:text-red-700">Delete</button>
                         </td>
@@ -462,7 +562,10 @@ export default function Holdings() {
                     <tbody className="bg-white divide-y divide-gray-200">
                       {watchlistPositions.map((position) => (
                         <tr key={position.id} className="hover:bg-gray-50">
-                          <td className="table-cell font-medium">{position.security?.symbol || 'Unknown'}</td>
+                          <td className="table-cell font-medium">
+                            {position.security?.symbol || 'Unknown'}
+                            {renderTagBadges(position.tags)}
+                          </td>
                           <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
                           <td className="table-cell text-gray-500">{position.account?.name || 'Unknown'}</td>
                           <td className="table-cell text-right text-gray-500">{position.quantity.toFixed(4)}</td>
@@ -476,6 +579,7 @@ export default function Holdings() {
                             ) : '-'}
                           </td>
                           <td className="table-cell text-right">
+                            <button onClick={() => handleOpenTagModal(position)} className="text-purple-600 hover:text-purple-700 mr-3">Tag</button>
                             <button onClick={() => handleOpenModal(position)} className="text-primary-600 hover:text-primary-700 mr-3">Edit</button>
                             <button onClick={() => handleDelete(position.id)} className="text-red-600 hover:text-red-700">Delete</button>
                           </td>
@@ -645,6 +749,62 @@ export default function Holdings() {
           fetchSecurities();
         }}
       />
+
+      {/* Tag Modal */}
+      {showTagModal && taggingPosition && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">
+              Manage Tags
+            </h2>
+            <p className="text-sm text-gray-500 mb-4">
+              {taggingPosition.security?.symbol} - {taggingPosition.security?.name}
+            </p>
+            <div className="space-y-2 mb-6">
+              {tags.map(tag => {
+                const colors = TAG_COLORS[tag.color] || TAG_COLORS.gray;
+                const isSelected = taggingPosition.tags?.some(t => t.id === tag.id);
+                return (
+                  <label
+                    key={tag.id}
+                    className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                      isSelected
+                        ? `${colors.bg} ${colors.border} border-2`
+                        : 'border-gray-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => handleTagToggle(tag.id)}
+                      className="rounded border-gray-300"
+                    />
+                    <div>
+                      <div className={`font-medium ${isSelected ? colors.text : 'text-gray-900'}`}>
+                        {tag.displayName}
+                      </div>
+                      {tag.description && (
+                        <div className="text-xs text-gray-500">{tag.description}</div>
+                      )}
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={() => {
+                  setShowTagModal(false);
+                  setTaggingPosition(null);
+                }}
+                className="btn-secondary"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

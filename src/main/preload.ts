@@ -69,4 +69,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Lot details import operations
   listLotDetailsParsers: () => ipcRenderer.invoke('lot-details-parsers:list'),
   parseLotDetailsFile: (parserId: string, filePath: string) => ipcRenderer.invoke('file:parse-lot-details', parserId, filePath),
+
+  // Security tag operations
+  getSecurityTags: () => ipcRenderer.invoke('db:security-tags:list'),
+  createSecurityTag: (tag: unknown) => ipcRenderer.invoke('db:security-tags:create', tag),
+  updateSecurityTag: (id: string, tag: unknown) => ipcRenderer.invoke('db:security-tags:update', id, tag),
+  deleteSecurityTag: (id: string) => ipcRenderer.invoke('db:security-tags:delete', id),
+
+  // Security tag assignment operations
+  getSecurityTagAssignments: (securityId?: string) => ipcRenderer.invoke('db:security-tag-assignments:list', securityId),
+  assignTagToSecurity: (securityId: string, tagId: string) => ipcRenderer.invoke('db:security-tag-assignments:assign', securityId, tagId),
+  removeTagFromSecurity: (securityId: string, tagId: string) => ipcRenderer.invoke('db:security-tag-assignments:remove', securityId, tagId),
+  getTagsForSecurity: (securityId: string) => ipcRenderer.invoke('db:security-tag-assignments:get-tags-for-security', securityId),
+
+  // Trading rule operations
+  getTradingRules: (filters?: unknown) => ipcRenderer.invoke('db:trading-rules:list', filters),
+  createTradingRule: (rule: unknown) => ipcRenderer.invoke('db:trading-rules:create', rule),
+  getTradingRule: (id: string) => ipcRenderer.invoke('db:trading-rules:get', id),
+  updateTradingRule: (id: string, rule: unknown) => ipcRenderer.invoke('db:trading-rules:update', id, rule),
+  deleteTradingRule: (id: string) => ipcRenderer.invoke('db:trading-rules:delete', id),
+
+  // Decision log operations
+  getDecisionLogs: (filters?: unknown) => ipcRenderer.invoke('db:decision-logs:list', filters),
+  createDecisionLog: (log: unknown) => ipcRenderer.invoke('db:decision-logs:create', log),
+  getDecisionLog: (id: string) => ipcRenderer.invoke('db:decision-logs:get', id),
+  updateDecisionLog: (id: string, log: unknown) => ipcRenderer.invoke('db:decision-logs:update', id, log),
+  deleteDecisionLog: (id: string) => ipcRenderer.invoke('db:decision-logs:delete', id),
 });
