@@ -139,6 +139,7 @@ declare global {
       fmpGetPriceHistory: (securityId: string, startDate?: string, endDate?: string) => Promise<PriceHistory[]>;
       fmpRefreshPrices: () => Promise<RefreshPricesResult>;
       fmpFetchHistorical: (symbol: string, days?: number) => Promise<{ success: boolean; count?: number; error?: string }>;
+      fmpFetchAllHistorical: (days?: number) => Promise<{ success: boolean; fetched: number; updated: number; errors: string[] }>;
       fmpGetEarningsCalendar: (fromDate?: string, toDate?: string) => Promise<EarningsEvent[]>;
       fmpGetPortfolioEarnings: (fromDate?: string, toDate?: string) => Promise<EarningsEvent[]>;
     };
@@ -990,6 +991,24 @@ export function useFMP() {
     }
   }, []);
 
+  const fetchAllHistorical = useCallback(async (days: number = 30) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.fmpFetchAllHistorical(days);
+      if (!result.success && result.errors.length > 0) {
+        setError(result.errors.join('; '));
+      }
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, fetched: 0, updated: 0, errors: [message] };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   return {
     loading,
     error,
@@ -999,6 +1018,7 @@ export function useFMP() {
     getPriceHistory,
     refreshPrices,
     fetchHistorical,
+    fetchAllHistorical,
   };
 }
 

@@ -24,7 +24,8 @@ export default function Holdings() {
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities, createSecurity, findBySymbol } = useSecurities();
   const { tags, assignments, fetchTags, fetchAssignments, assignTag, removeTag } = useSecurityTags();
-  const { refreshPrices, loading: refreshingPrices, error: refreshError } = useFMP();
+  const { refreshPrices, fetchAllHistorical, loading: refreshingPrices, error: refreshError } = useFMP();
+  const [fetchingHistorical, setFetchingHistorical] = useState(false);
   const { settings, fetchSettings } = useSettings();
   const [showModal, setShowModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
@@ -63,11 +64,12 @@ export default function Holdings() {
         text: `Updated prices for ${result.updated} positions`,
       });
       fetchPositions(); // Refresh positions to show new prices
-    } else if (result.errors.includes('Prices already up to date for today')) {
+    } else if (result.errors.includes('Using recent cached prices')) {
       setRefreshMessage({
-        type: 'info',
-        text: 'Prices already up to date for today',
+        type: 'success',
+        text: `Updated ${result.updated} positions using recent cached prices`,
       });
+      fetchPositions();
     } else if (result.errors.length > 0) {
       setRefreshMessage({
         type: 'error',
@@ -80,6 +82,38 @@ export default function Holdings() {
       });
     }
   }, [refreshPrices, fetchPositions]);
+
+  const handleFetchHistorical = useCallback(async () => {
+    setRefreshMessage(null);
+    setFetchingHistorical(true);
+    try {
+      const result = await fetchAllHistorical(30);
+      if (result.success) {
+        setRefreshMessage({
+          type: 'success',
+          text: `Fetched ${result.fetched} price records, updated ${result.updated} positions`,
+        });
+        fetchPositions(); // Refresh positions to show new prices
+      } else if (result.errors.length > 0) {
+        setRefreshMessage({
+          type: result.updated > 0 ? 'info' : 'error',
+          text: result.updated > 0
+            ? `Updated ${result.updated} positions. Some errors: ${result.errors[0]}`
+            : result.errors[0],
+        });
+        if (result.updated > 0) {
+          fetchPositions();
+        }
+      } else {
+        setRefreshMessage({
+          type: 'info',
+          text: 'No historical data to fetch',
+        });
+      }
+    } finally {
+      setFetchingHistorical(false);
+    }
+  }, [fetchAllHistorical, fetchPositions]);
 
   const isDataProviderConfigured = settings?.dataProvider === 'fmp' && settings?.dataProviderApiKey;
 
@@ -345,14 +379,24 @@ export default function Holdings() {
             ))}
           </select>
           {isDataProviderConfigured && (
-            <button
-              onClick={handleRefreshPrices}
-              disabled={refreshingPrices}
-              className="btn-secondary"
-              title="Fetch latest prices from FMP"
-            >
-              {refreshingPrices ? 'Refreshing...' : 'Refresh Prices'}
-            </button>
+            <>
+              <button
+                onClick={handleRefreshPrices}
+                disabled={refreshingPrices || fetchingHistorical}
+                className="btn-secondary"
+                title="Fetch latest prices from FMP"
+              >
+                {refreshingPrices ? 'Refreshing...' : 'Refresh Prices'}
+              </button>
+              <button
+                onClick={handleFetchHistorical}
+                disabled={refreshingPrices || fetchingHistorical}
+                className="btn-secondary"
+                title="Fetch 30 days of historical prices for all holdings"
+              >
+                {fetchingHistorical ? 'Fetching...' : 'Fetch Historical'}
+              </button>
+            </>
           )}
           <button onClick={() => setShowImportModal(true)} className="btn-secondary">
             Import from Brokerage
@@ -429,6 +473,7 @@ export default function Holdings() {
                       <th className="table-header">Account</th>
                       <th className="table-header text-right">% of Portfolio</th>
                       <th className="table-header text-right">Quantity</th>
+                      <th className="table-header text-right">MTM Price</th>
                       <th className="table-header text-right">Market Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
                       <th className="table-header text-right">Actions</th>
@@ -459,6 +504,7 @@ export default function Holdings() {
                           </span>
                         </td>
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
+                        <td className="table-cell text-right">{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</td>
                         <td className="table-cell text-right">{position.marketValue ? formatCurrency(position.marketValue) : '-'}</td>
                         <td className="table-cell text-right">
                           {position.unrealizedGain !== undefined ? (
@@ -497,6 +543,7 @@ export default function Holdings() {
                       <th className="table-header">Account</th>
                       <th className="table-header text-right">% of Portfolio</th>
                       <th className="table-header text-right">Quantity</th>
+                      <th className="table-header text-right">MTM Price</th>
                       <th className="table-header text-right">Market Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
                       <th className="table-header text-right">Actions</th>
@@ -513,6 +560,7 @@ export default function Holdings() {
                         <td className="table-cell text-gray-500">{position.account?.name || 'Unknown'}</td>
                         <td className="table-cell text-right font-medium">{position.portfolioPercent.toFixed(1)}%</td>
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
+                        <td className="table-cell text-right">{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</td>
                         <td className="table-cell text-right">{position.marketValue ? formatCurrency(position.marketValue) : '-'}</td>
                         <td className="table-cell text-right">
                           {position.unrealizedGain !== undefined ? (
@@ -551,6 +599,7 @@ export default function Holdings() {
                       <th className="table-header">Account</th>
                       <th className="table-header text-right">% of Portfolio</th>
                       <th className="table-header text-right">Quantity</th>
+                      <th className="table-header text-right">MTM Price</th>
                       <th className="table-header text-right">Market Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
                       <th className="table-header text-right">Actions</th>
@@ -567,6 +616,7 @@ export default function Holdings() {
                         <td className="table-cell text-gray-500">{position.account?.name || 'Unknown'}</td>
                         <td className="table-cell text-right text-gray-500">{position.portfolioPercent.toFixed(2)}%</td>
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
+                        <td className="table-cell text-right">{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</td>
                         <td className="table-cell text-right">{position.marketValue ? formatCurrency(position.marketValue) : '-'}</td>
                         <td className="table-cell text-right">
                           {position.unrealizedGain !== undefined ? (
@@ -611,6 +661,7 @@ export default function Holdings() {
                         <th className="table-header">Name</th>
                         <th className="table-header">Account</th>
                         <th className="table-header text-right">Quantity</th>
+                        <th className="table-header text-right">MTM Price</th>
                         <th className="table-header text-right">Market Value</th>
                         <th className="table-header text-right">Gain/Loss</th>
                         <th className="table-header text-right">Actions</th>
@@ -626,6 +677,7 @@ export default function Holdings() {
                           <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
                           <td className="table-cell text-gray-500">{position.account?.name || 'Unknown'}</td>
                           <td className="table-cell text-right text-gray-500">{position.quantity.toFixed(4)}</td>
+                          <td className="table-cell text-right">{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</td>
                           <td className="table-cell text-right">{position.marketValue ? formatCurrency(position.marketValue) : '-'}</td>
                           <td className="table-cell text-right">
                             {position.unrealizedGain !== undefined ? (

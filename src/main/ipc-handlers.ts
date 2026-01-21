@@ -382,31 +382,56 @@ export function setupIpcHandlers(
       };
     }
 
-    // Check if we already have today's prices cached
-    const today = new Date().toISOString().split('T')[0];
+    // Check if we already have recent prices (within last 3 days to account for weekends)
+    const today = new Date();
+    const threeDaysAgo = new Date(today);
+    threeDaysAgo.setDate(today.getDate() - 3);
+    const threeDaysAgoStr = threeDaysAgo.toISOString().split('T')[0];
+    const todayStr = today.toISOString().split('T')[0];
+
     const symbolsNeedingUpdate: Map<string, string> = new Map();
 
     for (const [symbol, securityId] of symbolSecurityMap) {
-      const cachedPrice = db.getPriceForDate(securityId, today);
-      if (!cachedPrice) {
+      // Check if we have price data from the last 3 days
+      const latestPrice = db.getLatestPrice(securityId);
+      if (!latestPrice || latestPrice.date < threeDaysAgoStr) {
         symbolsNeedingUpdate.set(symbol, securityId);
       }
     }
 
-    // If all prices are cached, return early
+    // If all prices are recent, use them directly
     if (symbolsNeedingUpdate.size === 0) {
       const pricesObj: Record<string, number> = {};
-      for (const [symbol, securityId] of symbolSecurityMap) {
-        const price = db.getLatestPrice(securityId);
-        if (price) {
-          pricesObj[symbol] = price.closePrice;
+      let updated = 0;
+
+      for (const pos of positions) {
+        const security = securityMap.get(pos.securityId);
+        if (!security || security.type === 'cash') continue;
+
+        const latestPrice = db.getLatestPrice(security.id);
+        if (latestPrice) {
+          pricesObj[security.symbol] = latestPrice.closePrice;
+
+          // Update position with latest historical price
+          const marketValue = pos.quantity * latestPrice.closePrice;
+          const unrealizedGain = marketValue - pos.costBasis;
+          const unrealizedGainPercent = pos.costBasis > 0 ? (unrealizedGain / pos.costBasis) * 100 : 0;
+
+          db.updatePosition(pos.id, {
+            currentPrice: latestPrice.closePrice,
+            marketValue,
+            unrealizedGain,
+            unrealizedGainPercent,
+          });
+          updated++;
         }
       }
+
       return {
         success: true,
-        updated: 0,
+        updated,
         failed: 0,
-        errors: ['Prices already up to date for today'],
+        errors: ['Using recent cached prices'],
         prices: pricesObj,
       };
     }
@@ -419,16 +444,52 @@ export function setupIpcHandlers(
       db.savePriceHistoryBatch(priceHistory);
     }
 
-    // Update positions with new prices
+    // For symbols where quotes failed, try to use historical data
+    const symbolsMissingPrices: string[] = [];
+    for (const [symbol] of symbolsNeedingUpdate) {
+      if (!prices.has(symbol)) {
+        symbolsMissingPrices.push(symbol);
+      }
+    }
+
+    // Fetch historical data for symbols that didn't get quotes (weekend/holiday fallback)
+    if (symbolsMissingPrices.length > 0) {
+      const historicalMap = new Map<string, string>();
+      for (const symbol of symbolsMissingPrices) {
+        const securityId = symbolSecurityMap.get(symbol);
+        if (securityId) {
+          historicalMap.set(symbol, securityId);
+        }
+      }
+
+      const historicalResult = await fmpService.fetchHistoricalForAll(historicalMap, 5);
+      if (historicalResult.priceHistory.length > 0) {
+        db.savePriceHistoryBatch(historicalResult.priceHistory);
+      }
+    }
+
+    // Update positions with new prices or latest historical prices
     let updated = 0;
     let failed = 0;
+    const pricesObj: Record<string, number> = {};
 
     for (const pos of positions) {
       const security = securityMap.get(pos.securityId);
       if (!security || security.type === 'cash') continue;
 
-      const newPrice = prices.get(security.symbol);
+      // First try real-time price, then fall back to historical
+      let newPrice = prices.get(security.symbol);
+
+      if (newPrice === undefined || newPrice <= 0) {
+        const latestHistorical = db.getLatestPrice(security.id);
+        if (latestHistorical) {
+          newPrice = latestHistorical.closePrice;
+        }
+      }
+
       if (newPrice !== undefined && newPrice > 0) {
+        pricesObj[security.symbol] = newPrice;
+
         const marketValue = pos.quantity * newPrice;
         const unrealizedGain = marketValue - pos.costBasis;
         const unrealizedGainPercent = pos.costBasis > 0 ? (unrealizedGain / pos.costBasis) * 100 : 0;
@@ -445,14 +506,8 @@ export function setupIpcHandlers(
       }
     }
 
-    // Convert Map to plain object for serialization
-    const pricesObj: Record<string, number> = {};
-    for (const [symbol, price] of prices) {
-      pricesObj[symbol] = price;
-    }
-
     return {
-      success: errors.length === 0,
+      success: errors.length === 0 || updated > 0,
       updated,
       failed,
       errors,
@@ -479,6 +534,61 @@ export function setupIpcHandlers(
 
     const count = db.savePriceHistoryBatch(pricesWithSecurityId);
     return { success: true, count };
+  });
+
+  ipcMain.handle('fmp:fetch-all-historical', async (_, days: number = 30) => {
+    // 1. Get all non-cash positions/securities
+    const positions = db.listPositions();
+    const securities = db.listSecurities();
+    const securityMap = new Map(securities.map(s => [s.id, s]));
+
+    // 2. Build symbol -> securityId map for non-cash securities
+    const symbolSecurityMap = new Map<string, string>();
+    for (const pos of positions) {
+      const security = securityMap.get(pos.securityId);
+      if (security && security.type !== 'cash') {
+        symbolSecurityMap.set(security.symbol, security.id);
+      }
+    }
+
+    if (symbolSecurityMap.size === 0) {
+      return { success: true, fetched: 0, updated: 0, errors: [] };
+    }
+
+    // 3. Fetch historical data for all symbols
+    const { priceHistory, errors } = await fmpService.fetchHistoricalForAll(symbolSecurityMap, days);
+
+    // 4. Save to database
+    const fetched = priceHistory.length > 0 ? db.savePriceHistoryBatch(priceHistory) : 0;
+
+    // 5. Update positions with latest prices (mark-to-market)
+    let updated = 0;
+    for (const [, securityId] of symbolSecurityMap) {
+      const latestPrice = db.getLatestPrice(securityId);
+      if (latestPrice) {
+        const pos = positions.find(p => p.securityId === securityId);
+        if (pos) {
+          const marketValue = pos.quantity * latestPrice.closePrice;
+          const unrealizedGain = marketValue - pos.costBasis;
+          const unrealizedGainPercent = pos.costBasis > 0 ? (unrealizedGain / pos.costBasis) * 100 : 0;
+
+          db.updatePosition(pos.id, {
+            currentPrice: latestPrice.closePrice,
+            marketValue,
+            unrealizedGain,
+            unrealizedGainPercent,
+          });
+          updated++;
+        }
+      }
+    }
+
+    return {
+      success: errors.length === 0,
+      fetched,
+      updated,
+      errors,
+    };
   });
 
   // Earnings calendar handlers

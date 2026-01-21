@@ -246,6 +246,36 @@ export class FMPService {
     }
   }
 
+  async fetchHistoricalForAll(
+    symbolSecurityMap: Map<string, string>,
+    days: number = 30
+  ): Promise<{ priceHistory: Omit<PriceHistory, 'id'>[]; errors: string[] }> {
+    const priceHistory: Omit<PriceHistory, 'id'>[] = [];
+    const errors: string[] = [];
+
+    if (!this.apiKey) {
+      errors.push('FMP API key not configured');
+      return { priceHistory, errors };
+    }
+
+    for (const [symbol, securityId] of symbolSecurityMap) {
+      try {
+        const history = await this.getHistoricalPrices(symbol, days);
+        if (history.length === 0) {
+          errors.push(`No historical data for ${symbol}`);
+        } else {
+          for (const price of history) {
+            priceHistory.push({ ...price, securityId });
+          }
+        }
+      } catch (err) {
+        errors.push(`Failed to fetch ${symbol}: ${(err as Error).message}`);
+      }
+    }
+
+    return { priceHistory, errors };
+  }
+
   async refreshPrices(
     symbolSecurityMap: Map<string, string> // Map<symbol, securityId>
   ): Promise<{
