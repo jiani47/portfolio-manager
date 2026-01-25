@@ -111,4 +111,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('fmp:get-earnings-calendar', fromDate, toDate),
   fmpGetPortfolioEarnings: (fromDate?: string, toDate?: string) =>
     ipcRenderer.invoke('fmp:get-portfolio-earnings', fromDate, toDate),
+
+  // Massive data provider operations
+  massiveTestConnection: () => ipcRenderer.invoke('massive:test-connection'),
+  massiveGetQuote: (symbol: string) => ipcRenderer.invoke('massive:get-quote', symbol),
+  massiveGetTickerDetails: (symbol: string) => ipcRenderer.invoke('massive:get-ticker-details', symbol),
+  massiveGetPriceHistory: (securityId: string, startDate?: string, endDate?: string) =>
+    ipcRenderer.invoke('massive:get-price-history', securityId, startDate, endDate),
+  massiveRefreshPrices: () => ipcRenderer.invoke('massive:refresh-prices'),
+  massiveFetchHistorical: (symbol: string, days?: number) =>
+    ipcRenderer.invoke('massive:fetch-historical', symbol, days),
+  massiveFetchAllHistorical: (days?: number) =>
+    ipcRenderer.invoke('massive:fetch-all-historical', days),
+  massiveGetIntraday: (symbol: string, date?: string) =>
+    ipcRenderer.invoke('massive:get-intraday', symbol, date),
+
+  // Unified data provider operations (auto-routes to configured provider)
+  dataRefreshPrices: () => ipcRenderer.invoke('data:refresh-prices'),
+  dataFetchAllHistorical: (days?: number) => ipcRenderer.invoke('data:fetch-all-historical', days),
 });

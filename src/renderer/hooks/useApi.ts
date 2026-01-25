@@ -32,6 +32,8 @@ import type {
   PriceHistory,
   RefreshPricesResult,
   EarningsEvent,
+  TickerDetails,
+  IntradayPrice,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -142,6 +144,20 @@ declare global {
       fmpFetchAllHistorical: (days?: number) => Promise<{ success: boolean; fetched: number; updated: number; errors: string[] }>;
       fmpGetEarningsCalendar: (fromDate?: string, toDate?: string) => Promise<EarningsEvent[]>;
       fmpGetPortfolioEarnings: (fromDate?: string, toDate?: string) => Promise<EarningsEvent[]>;
+
+      // Massive data provider operations
+      massiveTestConnection: () => Promise<{ success: boolean; message: string }>;
+      massiveGetQuote: (symbol: string) => Promise<StockQuote | null>;
+      massiveGetTickerDetails: (symbol: string) => Promise<TickerDetails | null>;
+      massiveGetPriceHistory: (securityId: string, startDate?: string, endDate?: string) => Promise<PriceHistory[]>;
+      massiveRefreshPrices: () => Promise<RefreshPricesResult>;
+      massiveFetchHistorical: (symbol: string, days?: number) => Promise<{ success: boolean; count?: number; error?: string }>;
+      massiveFetchAllHistorical: (days?: number) => Promise<{ success: boolean; fetched: number; updated: number; errors: string[] }>;
+      massiveGetIntraday: (symbol: string, date?: string) => Promise<IntradayPrice[]>;
+
+      // Unified data provider operations (auto-routes to configured provider)
+      dataRefreshPrices: () => Promise<RefreshPricesResult>;
+      dataFetchAllHistorical: (days?: number) => Promise<{ success: boolean; fetched: number; updated: number; errors: string[] }>;
     };
   }
 }
@@ -1063,5 +1079,199 @@ export function useEarnings() {
     error,
     fetchEarningsCalendar,
     fetchPortfolioEarnings,
+  };
+}
+
+export function useMassive() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const testConnection = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.massiveTestConnection();
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, message };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const getQuote = useCallback(async (symbol: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.massiveGetQuote(symbol);
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const getTickerDetails = useCallback(async (symbol: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.massiveGetTickerDetails(symbol);
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const getPriceHistory = useCallback(async (securityId: string, startDate?: string, endDate?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.massiveGetPriceHistory(securityId, startDate, endDate);
+    } catch (err) {
+      setError((err as Error).message);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const refreshPrices = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.massiveRefreshPrices();
+      if (!result.success && result.errors.length > 0) {
+        setError(result.errors.join('; '));
+      }
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return {
+        success: false,
+        updated: 0,
+        failed: 0,
+        errors: [message],
+        prices: {},
+      } as RefreshPricesResult;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchHistorical = useCallback(async (symbol: string, days: number = 30) => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.massiveFetchHistorical(symbol, days);
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, error: message };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchAllHistorical = useCallback(async (days: number = 30) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.massiveFetchAllHistorical(days);
+      if (!result.success && result.errors.length > 0) {
+        setError(result.errors.join('; '));
+      }
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, fetched: 0, updated: 0, errors: [message] };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const getIntradayPrices = useCallback(async (symbol: string, date?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      return await window.electronAPI.massiveGetIntraday(symbol, date);
+    } catch (err) {
+      setError((err as Error).message);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return {
+    loading,
+    error,
+    testConnection,
+    getQuote,
+    getTickerDetails,
+    getPriceHistory,
+    refreshPrices,
+    fetchHistorical,
+    fetchAllHistorical,
+    getIntradayPrices,
+  };
+}
+
+export function useDataProvider() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refreshPrices = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.dataRefreshPrices();
+      if (!result.success && result.errors.length > 0) {
+        setError(result.errors.join('; '));
+      }
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return {
+        success: false,
+        updated: 0,
+        failed: 0,
+        errors: [message],
+        prices: {},
+      } as RefreshPricesResult;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchAllHistorical = useCallback(async (days: number = 30) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.dataFetchAllHistorical(days);
+      if (!result.success && result.errors.length > 0) {
+        setError(result.errors.join('; '));
+      }
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, fetched: 0, updated: 0, errors: [message] };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return {
+    loading,
+    error,
+    refreshPrices,
+    fetchAllHistorical,
   };
 }

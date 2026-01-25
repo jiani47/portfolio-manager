@@ -5,6 +5,7 @@ import { setupIpcHandlers } from './ipc-handlers';
 import { BackupService } from './backup-service';
 import { AIService } from './ai-service';
 import { FMPService } from './fmp-service';
+import { MassiveService } from './massive-service';
 import Store from 'electron-store';
 import { AppSettings } from '../shared/types';
 
@@ -15,6 +16,7 @@ let database: Database | null = null;
 let backupService: BackupService | null = null;
 let aiService: AIService | null = null;
 let fmpService: FMPService | null = null;
+let massiveService: MassiveService | null = null;
 
 const defaultSettings: AppSettings = {
   theme: 'system',
@@ -85,8 +87,12 @@ async function initializeApp() {
   fmpService = new FMPService();
   fmpService.configure(settings);
 
+  // Initialize Massive service
+  massiveService = new MassiveService();
+  await massiveService.configure(settings);
+
   // Setup IPC handlers
-  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, store);
+  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, store);
 }
 
 app.whenReady().then(async () => {

@@ -113,7 +113,7 @@ export interface AppSettings {
   backup: BackupConfig;
   aiProvider: 'openai' | 'anthropic' | 'none';
   aiApiKey?: string;
-  dataProvider: 'fmp' | 'none';
+  dataProvider: 'fmp' | 'massive' | 'none';
   dataProviderApiKey?: string;
 }
 
@@ -183,6 +183,38 @@ export interface EarningsEvent {
   revenueActual?: number;
   fiscalDateEnding?: string;
   updatedFromDate?: string;
+}
+
+// Ticker details from Massive API
+export interface TickerDetails {
+  symbol: string;
+  name: string;
+  type: string;
+  market: string;
+  locale: string;
+  primaryExchange: string;
+  currencyName: string;
+  cik?: string;
+  sicCode?: string;
+  sicDescription?: string;
+  marketCap?: number;
+  phoneNumber?: string;
+  address?: string;
+  description?: string;
+  homepageUrl?: string;
+  totalEmployees?: number;
+  listDate?: string;
+}
+
+// Intraday price (minute bars) from Massive API
+export interface IntradayPrice {
+  timestamp: string;  // ISO timestamp
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  vwap?: number;      // Volume-weighted avg price
 }
 
 // IPC channel types

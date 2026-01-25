@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useSettings, useBackup, useSecurityTags, useFMP } from '../hooks/useApi';
+import { useSettings, useBackup, useSecurityTags, useFMP, useMassive } from '../hooks/useApi';
 import type { AppSettings, BackupConfig, SecurityTag } from '../../shared/types';
 import { format } from 'date-fns';
 
@@ -16,7 +16,8 @@ export default function Settings() {
   const { settings, loading, error, fetchSettings, updateSettings } = useSettings();
   const { backups, loading: backupsLoading, fetchBackups, createBackup, restoreBackup } = useBackup();
   const { tags, fetchTags, createTag, updateTag, deleteTag } = useSecurityTags();
-  const { testConnection, loading: testingConnection } = useFMP();
+  const { testConnection: fmpTestConnection, loading: testingFmpConnection } = useFMP();
+  const { testConnection: massiveTestConnection, loading: testingMassiveConnection } = useMassive();
   const [saving, setSaving] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -24,6 +25,7 @@ export default function Settings() {
   const [showTagModal, setShowTagModal] = useState(false);
   const [editingTag, setEditingTag] = useState<SecurityTag | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<{ success: boolean; message: string } | null>(null);
+  const [showApiKey, setShowApiKey] = useState(false);
   const [tagFormData, setTagFormData] = useState({
     name: '',
     displayName: '',
@@ -330,22 +332,32 @@ export default function Settings() {
             >
               <option value="none">None</option>
               <option value="fmp">FMP (Financial Modeling Prep)</option>
+              <option value="massive">Massive</option>
             </select>
           </div>
           {formData.dataProvider === 'fmp' && (
             <>
               <div>
                 <label className="label">API Key</label>
-                <input
-                  type="password"
-                  className="input w-full max-w-md"
-                  value={formData.dataProviderApiKey}
-                  onChange={(e) => {
-                    setFormData({ ...formData, dataProviderApiKey: e.target.value });
-                    setConnectionStatus(null);
-                  }}
-                  placeholder="Your FMP API key"
-                />
+                <div className="flex items-center gap-2 max-w-md">
+                  <input
+                    type={showApiKey ? 'text' : 'password'}
+                    className="input flex-1"
+                    value={formData.dataProviderApiKey}
+                    onChange={(e) => {
+                      setFormData({ ...formData, dataProviderApiKey: e.target.value });
+                      setConnectionStatus(null);
+                    }}
+                    placeholder="Your FMP API key"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md hover:bg-gray-50"
+                  >
+                    {showApiKey ? 'Hide' : 'Show'}
+                  </button>
+                </div>
                 <p className="text-xs text-gray-500 mt-1">
                   Get your free API key from{' '}
                   <a
@@ -366,13 +378,77 @@ export default function Settings() {
                       dataProvider: formData.dataProvider,
                       dataProviderApiKey: formData.dataProviderApiKey,
                     });
-                    const result = await testConnection();
+                    const result = await fmpTestConnection();
                     setConnectionStatus(result);
                   }}
-                  disabled={testingConnection || !formData.dataProviderApiKey}
+                  disabled={testingFmpConnection || !formData.dataProviderApiKey}
                   className="btn-secondary"
                 >
-                  {testingConnection ? 'Testing...' : 'Test Connection'}
+                  {testingFmpConnection ? 'Testing...' : 'Test Connection'}
+                </button>
+                {connectionStatus && (
+                  <span
+                    className={`text-sm ${
+                      connectionStatus.success ? 'text-green-600' : 'text-red-600'
+                    }`}
+                  >
+                    {connectionStatus.message}
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+          {formData.dataProvider === 'massive' && (
+            <>
+              <div>
+                <label className="label">API Key</label>
+                <div className="flex items-center gap-2 max-w-md">
+                  <input
+                    type={showApiKey ? 'text' : 'password'}
+                    className="input flex-1"
+                    value={formData.dataProviderApiKey}
+                    onChange={(e) => {
+                      setFormData({ ...formData, dataProviderApiKey: e.target.value });
+                      setConnectionStatus(null);
+                    }}
+                    placeholder="Your Massive API key"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md hover:bg-gray-50"
+                  >
+                    {showApiKey ? 'Hide' : 'Show'}
+                  </button>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  Get your API key from{' '}
+                  <a
+                    href="https://massive.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary-600 hover:underline"
+                  >
+                    massive.com
+                  </a>
+                  . Supports real-time quotes, historical prices, and intraday data.
+                </p>
+              </div>
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={async () => {
+                    // Save settings first so the API key is configured
+                    await updateSettings({
+                      dataProvider: formData.dataProvider,
+                      dataProviderApiKey: formData.dataProviderApiKey,
+                    });
+                    const result = await massiveTestConnection();
+                    setConnectionStatus(result);
+                  }}
+                  disabled={testingMassiveConnection || !formData.dataProviderApiKey}
+                  className="btn-secondary"
+                >
+                  {testingMassiveConnection ? 'Testing...' : 'Test Connection'}
                 </button>
                 {connectionStatus && (
                   <span

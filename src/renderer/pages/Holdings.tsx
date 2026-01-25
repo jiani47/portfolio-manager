@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePositions, useAccounts, useSecurities, useSecurityTags, useFMP, useSettings } from '../hooks/useApi';
+import { usePositions, useAccounts, useSecurities, useSecurityTags, useDataProvider, useSettings } from '../hooks/useApi';
 import BrokerageImportModal from '../components/BrokerageImportModal';
 import type { Position, Security, SecurityTag } from '../../shared/types';
 
@@ -24,7 +24,7 @@ export default function Holdings() {
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities, createSecurity, findBySymbol } = useSecurities();
   const { tags, assignments, fetchTags, fetchAssignments, assignTag, removeTag } = useSecurityTags();
-  const { refreshPrices, fetchAllHistorical, loading: refreshingPrices, error: refreshError } = useFMP();
+  const { refreshPrices, fetchAllHistorical, loading: refreshingPrices, error: refreshError } = useDataProvider();
   const [fetchingHistorical, setFetchingHistorical] = useState(false);
   const { settings, fetchSettings } = useSettings();
   const [showModal, setShowModal] = useState(false);
@@ -115,7 +115,7 @@ export default function Holdings() {
     }
   }, [fetchAllHistorical, fetchPositions]);
 
-  const isDataProviderConfigured = settings?.dataProvider === 'fmp' && settings?.dataProviderApiKey;
+  const isDataProviderConfigured = (settings?.dataProvider === 'fmp' || settings?.dataProvider === 'massive') && settings?.dataProviderApiKey;
 
   // Create a map of security ID to tags
   const securityTagsMap = useMemo(() => {
@@ -384,7 +384,7 @@ export default function Holdings() {
                 onClick={handleRefreshPrices}
                 disabled={refreshingPrices || fetchingHistorical}
                 className="btn-secondary"
-                title="Fetch latest prices from FMP"
+                title="Fetch latest prices from configured data provider"
               >
                 {refreshingPrices ? 'Refreshing...' : 'Refresh Prices'}
               </button>
