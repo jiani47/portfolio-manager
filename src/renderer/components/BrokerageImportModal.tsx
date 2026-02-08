@@ -114,16 +114,14 @@ export default function BrokerageImportModal({ isOpen, onClose, onSuccess }: Bro
             });
           }
 
-          // Create position
+          // Create position with just quantity and costBasis
+          // MTM values (currentPrice, marketValue, unrealizedGain) are calculated
+          // on-the-fly from price_history when loading positions
           await createPosition({
             accountId: appAccountId,
             securityId: security.id,
             quantity: position.quantity,
             costBasis: position.costBasis,
-            currentPrice: position.currentPrice,
-            marketValue: position.marketValue,
-            unrealizedGain: position.unrealizedGain,
-            unrealizedGainPercent: position.unrealizedGainPercent,
             lastUpdated: new Date().toISOString(),
           });
         }

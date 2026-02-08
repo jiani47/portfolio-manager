@@ -35,6 +35,7 @@ export interface Position {
   securityId: string;
   quantity: number;
   costBasis: number;
+  // Computed fields (calculated on-the-fly from price_history, not stored in DB)
   currentPrice?: number;
   marketValue?: number;
   unrealizedGain?: number;

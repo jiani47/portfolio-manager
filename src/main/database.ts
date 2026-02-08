@@ -541,6 +541,70 @@ export class Database {
     return (params.length ? stmt.all(...params) : stmt.all()).map(this.mapRowToPosition);
   }
 
+  // List positions with MTM values calculated on-the-fly from price_history
+  listPositionsWithMTM(accountId?: string): Position[] {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Use a subquery to get the latest price for each security
+    let sql = `
+      SELECT
+        p.*,
+        ph.close_price as latest_price,
+        ph.date as price_date
+      FROM positions p
+      LEFT JOIN (
+        SELECT security_id, close_price, date
+        FROM price_history ph1
+        WHERE date = (
+          SELECT MAX(date) FROM price_history ph2
+          WHERE ph2.security_id = ph1.security_id
+        )
+      ) ph ON p.security_id = ph.security_id
+    `;
+    const params: string[] = [];
+    if (accountId) {
+      sql += ' WHERE p.account_id = ?';
+      params.push(accountId);
+    }
+    sql += ' ORDER BY (p.quantity * COALESCE(ph.close_price, 0)) DESC';
+
+    const stmt = this.db.prepare(sql);
+    const rows = params.length ? stmt.all(...params) : stmt.all();
+
+    return rows.map((row) => {
+      const r = row as Record<string, unknown>;
+      const quantity = r.quantity as number;
+      const costBasis = r.cost_basis as number;
+      const latestPrice = r.latest_price as number | null;
+
+      // Calculate MTM values if we have a price
+      let currentPrice: number | undefined;
+      let marketValue: number | undefined;
+      let unrealizedGain: number | undefined;
+      let unrealizedGainPercent: number | undefined;
+
+      if (latestPrice !== null && latestPrice > 0) {
+        currentPrice = latestPrice;
+        marketValue = quantity * latestPrice;
+        unrealizedGain = marketValue - costBasis;
+        unrealizedGainPercent = costBasis > 0 ? (unrealizedGain / costBasis) * 100 : 0;
+      }
+
+      return {
+        id: r.id as string,
+        accountId: r.account_id as string,
+        securityId: r.security_id as string,
+        quantity,
+        costBasis,
+        currentPrice,
+        marketValue,
+        unrealizedGain,
+        unrealizedGainPercent,
+        lastUpdated: r.last_updated as string,
+      };
+    });
+  }
+
   createPosition(position: Omit<Position, 'id'>): Position {
     if (!this.db) throw new Error('Database not initialized');
     const id = uuidv4();
@@ -838,11 +902,11 @@ export class Database {
     return result.changes;
   }
 
-  // Portfolio summary
+  // Portfolio summary (uses calculated MTM values from price_history)
   getPortfolioSummary(): PortfolioSummary {
     if (!this.db) throw new Error('Database not initialized');
 
-    const positions = this.listPositions();
+    const positions = this.listPositionsWithMTM();
     const accounts = this.listAccounts();
 
     const totalValue = positions.reduce((sum, p) => sum + (p.marketValue || 0), 0);
@@ -862,14 +926,24 @@ export class Database {
     };
   }
 
+  // Get asset allocation with MTM values calculated from price_history
   getAssetAllocation(): AssetAllocation[] {
     if (!this.db) throw new Error('Database not initialized');
 
+    // Join with latest prices from price_history to calculate market values
     const stmt = this.db.prepare(`
-      SELECT s.type, SUM(p.market_value) as total_value
+      SELECT s.type, SUM(p.quantity * COALESCE(ph.close_price, 0)) as total_value
       FROM positions p
       JOIN securities s ON p.security_id = s.id
-      WHERE p.market_value > 0
+      LEFT JOIN (
+        SELECT security_id, close_price
+        FROM price_history ph1
+        WHERE date = (
+          SELECT MAX(date) FROM price_history ph2
+          WHERE ph2.security_id = ph1.security_id
+        )
+      ) ph ON p.security_id = ph.security_id
+      WHERE (p.quantity * COALESCE(ph.close_price, 0)) > 0
       GROUP BY s.type
       ORDER BY total_value DESC
     `);
