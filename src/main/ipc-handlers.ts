@@ -7,6 +7,7 @@ import { BackupService } from './backup-service';
 import { AIService } from './ai-service';
 import { FMPService } from './fmp-service';
 import { MassiveService } from './massive-service';
+import { SchwabService } from './schwab-service';
 import { parserRegistry, transactionParserRegistry, lotDetailsParserRegistry } from './parsers';
 import { AppSettings, ExcelImportResult, RefreshPricesResult } from '../shared/types';
 
@@ -17,6 +18,7 @@ export function setupIpcHandlers(
   aiService: AIService,
   fmpService: FMPService,
   massiveService: MassiveService,
+  schwabService: SchwabService,
   store: Store<{ settings: AppSettings }>
 ): void {
   // Account handlers
@@ -144,6 +146,11 @@ export function setupIpcHandlers(
     if (newSettings.dataProvider !== undefined || newSettings.dataProviderApiKey !== undefined) {
       fmpService.configure(updated);
       await massiveService.configure(updated);
+    }
+
+    // Update Schwab service if credentials changed
+    if (newSettings.schwabClientId !== undefined || newSettings.schwabClientSecret !== undefined || newSettings.schwabCallbackUrl !== undefined) {
+      schwabService.configure(updated);
     }
 
     return updated;
@@ -825,8 +832,15 @@ export function setupIpcHandlers(
     let prices: Map<string, number>;
     let priceHistory: Omit<import('../shared/types').PriceHistory, 'id'>[];
     let errors: string[];
+    let delayed: boolean | undefined;
 
-    if (settings.dataProvider === 'massive' && massiveService.isConfigured()) {
+    if (settings.dataProvider === 'schwab' && schwabService.isConnected()) {
+      const result = await schwabService.refreshPrices(symbolSecurityMap);
+      prices = result.prices;
+      priceHistory = result.priceHistory;
+      errors = result.errors;
+      delayed = result.delayed;
+    } else if (settings.dataProvider === 'massive' && massiveService.isConfigured()) {
       const result = await massiveService.refreshPrices(symbolSecurityMap);
       prices = result.prices;
       priceHistory = result.priceHistory;
@@ -871,7 +885,7 @@ export function setupIpcHandlers(
       }
     }
 
-    return { success: errors.length === 0 || updated > 0, updated, failed, errors, prices: pricesObj };
+    return { success: errors.length === 0 || updated > 0, updated, failed, errors, prices: pricesObj, delayed };
   });
 
   ipcMain.handle('data:fetch-all-historical', async (_, days: number = 30) => {
@@ -896,7 +910,11 @@ export function setupIpcHandlers(
     let priceHistory: Omit<import('../shared/types').PriceHistory, 'id'>[] = [];
     let errors: string[] = [];
 
-    if (settings.dataProvider === 'massive' && massiveService.isConfigured()) {
+    if (settings.dataProvider === 'schwab' && schwabService.isConnected()) {
+      const result = await schwabService.fetchHistoricalForAll(symbolSecurityMap, days);
+      priceHistory = result.priceHistory;
+      errors = result.errors;
+    } else if (settings.dataProvider === 'massive' && massiveService.isConfigured()) {
       const result = await massiveService.fetchHistoricalForAll(symbolSecurityMap, days);
       priceHistory = result.priceHistory;
       errors = result.errors;
@@ -921,5 +939,45 @@ export function setupIpcHandlers(
     }
 
     return { success: errors.length === 0, fetched, updated, errors };
+  });
+
+  // Schwab brokerage connection handlers
+  ipcMain.handle('schwab:start-oauth', async () => {
+    return schwabService.startOAuth();
+  });
+
+  ipcMain.handle('schwab:get-status', () => {
+    return schwabService.getConnectionStatus();
+  });
+
+  ipcMain.handle('schwab:disconnect', () => {
+    schwabService.disconnect();
+    return { success: true };
+  });
+
+  ipcMain.handle('schwab:sync-positions', async () => {
+    return schwabService.syncPositions(db);
+  });
+
+  ipcMain.handle('schwab:sync-transactions', async (_, startDate?: string, endDate?: string) => {
+    return schwabService.syncTransactions(db, startDate, endDate);
+  });
+
+  // Schwab order handlers
+  ipcMain.handle('schwab:place-order', async (_, order) => {
+    return schwabService.placeOrder(order.accountNumber, order);
+  });
+
+  ipcMain.handle('schwab:get-orders', async (_, status?) => {
+    return schwabService.getOrdersForAllAccounts(status);
+  });
+
+  ipcMain.handle('schwab:cancel-order', async (_, accountNumber, orderId) => {
+    return schwabService.cancelOrder(accountNumber, orderId);
+  });
+
+  // Schwab market data handler
+  ipcMain.handle('schwab:test-market-data', async () => {
+    return schwabService.testMarketDataConnection();
   });
 }

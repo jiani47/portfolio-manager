@@ -129,4 +129,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Unified data provider operations (auto-routes to configured provider)
   dataRefreshPrices: () => ipcRenderer.invoke('data:refresh-prices'),
   dataFetchAllHistorical: (days?: number) => ipcRenderer.invoke('data:fetch-all-historical', days),
+
+  // Schwab brokerage connection operations
+  schwabStartOAuth: () => ipcRenderer.invoke('schwab:start-oauth'),
+  schwabGetStatus: () => ipcRenderer.invoke('schwab:get-status'),
+  schwabDisconnect: () => ipcRenderer.invoke('schwab:disconnect'),
+  schwabSyncPositions: () => ipcRenderer.invoke('schwab:sync-positions'),
+  schwabSyncTransactions: (startDate?: string, endDate?: string) => ipcRenderer.invoke('schwab:sync-transactions', startDate, endDate),
+
+  // Schwab order operations
+  schwabPlaceOrder: (order: unknown) => ipcRenderer.invoke('schwab:place-order', order),
+  schwabGetOrders: (status?: string) => ipcRenderer.invoke('schwab:get-orders', status),
+  schwabCancelOrder: (accountNumber: string, orderId: string) => ipcRenderer.invoke('schwab:cancel-order', accountNumber, orderId),
+  schwabTestMarketData: () => ipcRenderer.invoke('schwab:test-market-data'),
 });

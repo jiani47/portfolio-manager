@@ -34,6 +34,10 @@ import type {
   EarningsEvent,
   TickerDetails,
   IntradayPrice,
+  SchwabConnectionStatus,
+  SchwabSyncResult,
+  SchwabOrder,
+  SchwabOrderRequest,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -158,6 +162,21 @@ declare global {
       // Unified data provider operations (auto-routes to configured provider)
       dataRefreshPrices: () => Promise<RefreshPricesResult>;
       dataFetchAllHistorical: (days?: number) => Promise<{ success: boolean; fetched: number; updated: number; errors: string[] }>;
+
+      // Schwab brokerage connection operations
+      schwabStartOAuth: () => Promise<{ success: boolean; message: string }>;
+      schwabGetStatus: () => Promise<SchwabConnectionStatus>;
+      schwabDisconnect: () => Promise<{ success: boolean }>;
+      schwabSyncPositions: () => Promise<SchwabSyncResult>;
+      schwabSyncTransactions: (startDate?: string, endDate?: string) => Promise<SchwabSyncResult>;
+
+      // Schwab order operations
+      schwabPlaceOrder: (order: SchwabOrderRequest) => Promise<{ success: boolean; message: string; orderId?: string }>;
+      schwabGetOrders: (status?: string) => Promise<SchwabOrder[]>;
+      schwabCancelOrder: (accountNumber: string, orderId: string) => Promise<{ success: boolean; message: string }>;
+
+      // Schwab market data operations
+      schwabTestMarketData: () => Promise<{ success: boolean; message: string }>;
     };
   }
 }
@@ -1225,6 +1244,7 @@ export function useMassive() {
 export function useDataProvider() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [delayed, setDelayed] = useState<boolean | undefined>(undefined);
 
   const refreshPrices = useCallback(async () => {
     setLoading(true);
@@ -1234,6 +1254,7 @@ export function useDataProvider() {
       if (!result.success && result.errors.length > 0) {
         setError(result.errors.join('; '));
       }
+      setDelayed(result.delayed);
       return result;
     } catch (err) {
       const message = (err as Error).message;
@@ -1271,7 +1292,160 @@ export function useDataProvider() {
   return {
     loading,
     error,
+    delayed,
     refreshPrices,
     fetchAllHistorical,
+  };
+}
+
+export function useSchwab() {
+  const [status, setStatus] = useState<SchwabConnectionStatus | null>(null);
+  const [orders, setOrders] = useState<SchwabOrder[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const data = await window.electronAPI.schwabGetStatus();
+      setStatus(data);
+      return data;
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    }
+  }, []);
+
+  const startOAuth = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.schwabStartOAuth();
+      if (!result.success) {
+        setError(result.message);
+      }
+      await fetchStatus();
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, message };
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchStatus]);
+
+  const disconnect = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await window.electronAPI.schwabDisconnect();
+      await fetchStatus();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchStatus]);
+
+  const syncPositions = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.schwabSyncPositions();
+      if (!result.success && result.errors.length > 0) {
+        setError(result.errors.join('; '));
+      }
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, accountsSynced: 0, positionsSynced: 0, transactionsSynced: 0, errors: [message] } as SchwabSyncResult;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const syncTransactions = useCallback(async (startDate?: string, endDate?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.schwabSyncTransactions(startDate, endDate);
+      if (!result.success && result.errors.length > 0) {
+        setError(result.errors.join('; '));
+      }
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, accountsSynced: 0, positionsSynced: 0, transactionsSynced: 0, errors: [message] } as SchwabSyncResult;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchOrders = useCallback(async (statusFilter?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.schwabGetOrders(statusFilter);
+      setOrders(data);
+      return data;
+    } catch (err) {
+      setError((err as Error).message);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const placeOrder = useCallback(async (order: SchwabOrderRequest) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.schwabPlaceOrder(order);
+      if (!result.success) {
+        setError(result.message);
+      }
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, message };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const cancelOrder = useCallback(async (accountNumber: string, orderId: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.schwabCancelOrder(accountNumber, orderId);
+      if (!result.success) {
+        setError(result.message);
+      }
+      return result;
+    } catch (err) {
+      const message = (err as Error).message;
+      setError(message);
+      return { success: false, message };
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return {
+    status,
+    orders,
+    loading,
+    error,
+    fetchStatus,
+    startOAuth,
+    disconnect,
+    syncPositions,
+    syncTransactions,
+    fetchOrders,
+    placeOrder,
+    cancelOrder,
   };
 }

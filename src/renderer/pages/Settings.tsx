@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useSettings, useBackup, useSecurityTags, useFMP, useMassive } from '../hooks/useApi';
+import { useSettings, useBackup, useSecurityTags, useFMP, useMassive, useSchwab } from '../hooks/useApi';
 import type { AppSettings, BackupConfig, SecurityTag } from '../../shared/types';
 import { format } from 'date-fns';
 
@@ -18,6 +18,7 @@ export default function Settings() {
   const { tags, fetchTags, createTag, updateTag, deleteTag } = useSecurityTags();
   const { testConnection: fmpTestConnection, loading: testingFmpConnection } = useFMP();
   const { testConnection: massiveTestConnection, loading: testingMassiveConnection } = useMassive();
+  const { status: schwabStatus, loading: schwabLoading, error: schwabError, fetchStatus: fetchSchwabStatus, startOAuth, disconnect: disconnectSchwab, syncPositions, syncTransactions } = useSchwab();
   const [saving, setSaving] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -26,6 +27,8 @@ export default function Settings() {
   const [editingTag, setEditingTag] = useState<SecurityTag | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<{ success: boolean; message: string } | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
+  const [schwabMessage, setSchwabMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [showSchwabSecret, setShowSchwabSecret] = useState(false);
   const [tagFormData, setTagFormData] = useState({
     name: '',
     displayName: '',
@@ -41,6 +44,9 @@ export default function Settings() {
     aiApiKey: '',
     dataProvider: 'none',
     dataProviderApiKey: '',
+    schwabClientId: '',
+    schwabClientSecret: '',
+    schwabCallbackUrl: '',
     backup: {
       provider: 'local',
       enabled: false,
@@ -52,7 +58,8 @@ export default function Settings() {
     fetchSettings();
     fetchBackups();
     fetchTags();
-  }, [fetchSettings, fetchBackups, fetchTags]);
+    fetchSchwabStatus();
+  }, [fetchSettings, fetchBackups, fetchTags, fetchSchwabStatus]);
 
   useEffect(() => {
     if (settings) {
@@ -64,6 +71,9 @@ export default function Settings() {
         aiApiKey: settings.aiApiKey || '',
         dataProvider: settings.dataProvider || 'none',
         dataProviderApiKey: settings.dataProviderApiKey || '',
+        schwabClientId: settings.schwabClientId || '',
+        schwabClientSecret: settings.schwabClientSecret || '',
+        schwabCallbackUrl: settings.schwabCallbackUrl || '',
         backup: settings.backup,
       });
     }
@@ -333,6 +343,7 @@ export default function Settings() {
               <option value="none">None</option>
               <option value="fmp">FMP (Financial Modeling Prep)</option>
               <option value="massive">Massive</option>
+              <option value="schwab">Schwab (uses connected account)</option>
             </select>
           </div>
           {formData.dataProvider === 'fmp' && (
@@ -461,6 +472,199 @@ export default function Settings() {
                 )}
               </div>
             </>
+          )}
+          {formData.dataProvider === 'schwab' && (
+            <>
+              <div className="p-4 bg-gray-50 rounded-lg">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className={`w-2.5 h-2.5 rounded-full ${schwabStatus?.connected ? 'bg-green-500' : 'bg-red-400'}`} />
+                  <span className={`text-sm font-medium ${schwabStatus?.connected ? 'text-green-700' : 'text-red-600'}`}>
+                    {schwabStatus?.connected ? 'Schwab connected' : 'Schwab not connected'}
+                  </span>
+                </div>
+                {!schwabStatus?.connected && (
+                  <p className="text-xs text-gray-500">
+                    Set up your Schwab connection in the Brokerage Connection section below, then select Schwab as your data provider.
+                  </p>
+                )}
+                <p className="text-xs text-gray-500 mt-1">
+                  Market data uses your Schwab OAuth connection. Data may be delayed 15-20 min depending on account entitlements.
+                </p>
+              </div>
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={async () => {
+                    const result = await window.electronAPI.schwabTestMarketData();
+                    setConnectionStatus(result);
+                  }}
+                  disabled={!schwabStatus?.connected}
+                  className="btn-secondary"
+                >
+                  Test Connection
+                </button>
+                {connectionStatus && (
+                  <span
+                    className={`text-sm ${
+                      connectionStatus.success ? 'text-green-600' : 'text-red-600'
+                    }`}
+                  >
+                    {connectionStatus.message}
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Brokerage Connection */}
+      <div className="card">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Brokerage Connection</h2>
+        <p className="text-sm text-gray-600 mb-4">
+          Connect your Charles Schwab account to sync positions and transactions directly.
+          This is separate from market data providers above -- both can be used simultaneously.
+        </p>
+        <div className="space-y-4">
+          <div>
+            <label className="label">Client ID</label>
+            <input
+              type="text"
+              className="input w-full max-w-md"
+              value={formData.schwabClientId || ''}
+              onChange={(e) => setFormData({ ...formData, schwabClientId: e.target.value })}
+              placeholder="Your Schwab API Client ID"
+            />
+          </div>
+          <div>
+            <label className="label">Client Secret</label>
+            <div className="flex items-center gap-2 max-w-md">
+              <input
+                type={showSchwabSecret ? 'text' : 'password'}
+                className="input flex-1"
+                value={formData.schwabClientSecret || ''}
+                onChange={(e) => setFormData({ ...formData, schwabClientSecret: e.target.value })}
+                placeholder="Your Schwab API Client Secret"
+              />
+              <button
+                type="button"
+                onClick={() => setShowSchwabSecret(!showSchwabSecret)}
+                className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md hover:bg-gray-50"
+              >
+                {showSchwabSecret ? 'Hide' : 'Show'}
+              </button>
+            </div>
+          </div>
+          <div>
+            <label className="label">Callback URL</label>
+            <input
+              type="text"
+              className="input w-full max-w-md"
+              value={formData.schwabCallbackUrl || ''}
+              onChange={(e) => setFormData({ ...formData, schwabCallbackUrl: e.target.value })}
+              placeholder="https://127.0.0.1:5556/callback"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Must match the callback URL registered in your Schwab developer app. HTTPS required.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3 pt-2">
+            {!schwabStatus?.connected ? (
+              <button
+                onClick={async () => {
+                  setSchwabMessage(null);
+                  // Save credentials first
+                  await updateSettings({
+                    schwabClientId: formData.schwabClientId,
+                    schwabClientSecret: formData.schwabClientSecret,
+                    schwabCallbackUrl: formData.schwabCallbackUrl,
+                  });
+                  const result = await startOAuth();
+                  if (result.success) {
+                    setSchwabMessage({ type: 'success', text: result.message });
+                  } else {
+                    setSchwabMessage({ type: 'error', text: result.message });
+                  }
+                }}
+                disabled={schwabLoading || !formData.schwabClientId || !formData.schwabClientSecret || !formData.schwabCallbackUrl}
+                className="btn-primary"
+              >
+                {schwabLoading ? 'Connecting...' : 'Connect to Schwab'}
+              </button>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-full bg-green-500" />
+                  <span className="text-sm text-green-700 font-medium">
+                    Connected{schwabStatus.accountCount ? ` (${schwabStatus.accountCount} account${schwabStatus.accountCount !== 1 ? 's' : ''})` : ''}
+                  </span>
+                </div>
+                <button
+                  onClick={async () => {
+                    setSchwabMessage(null);
+                    await disconnectSchwab();
+                    setSchwabMessage({ type: 'success', text: 'Disconnected from Schwab' });
+                  }}
+                  disabled={schwabLoading}
+                  className="btn-secondary text-sm"
+                >
+                  Disconnect
+                </button>
+              </>
+            )}
+          </div>
+
+          {schwabStatus?.connected && (
+            <div className="flex items-center gap-3 pt-2 border-t border-gray-200">
+              <button
+                onClick={async () => {
+                  setSchwabMessage(null);
+                  const result = await syncPositions();
+                  if (result.success) {
+                    setSchwabMessage({ type: 'success', text: `Synced ${result.positionsSynced} positions across ${result.accountsSynced} account(s)` });
+                  } else {
+                    setSchwabMessage({ type: 'error', text: result.errors.join('; ') || 'Sync failed' });
+                  }
+                }}
+                disabled={schwabLoading}
+                className="btn-secondary"
+              >
+                {schwabLoading ? 'Syncing...' : 'Sync Positions'}
+              </button>
+              <button
+                onClick={async () => {
+                  setSchwabMessage(null);
+                  const result = await syncTransactions();
+                  if (result.success) {
+                    setSchwabMessage({ type: 'success', text: `Synced ${result.transactionsSynced} transactions across ${result.accountsSynced} account(s)` });
+                  } else {
+                    setSchwabMessage({ type: 'error', text: result.errors.join('; ') || 'Sync failed' });
+                  }
+                }}
+                disabled={schwabLoading}
+                className="btn-secondary"
+              >
+                {schwabLoading ? 'Syncing...' : 'Sync Transactions'}
+              </button>
+            </div>
+          )}
+
+          {schwabMessage && (
+            <div
+              className={`rounded-lg p-3 text-sm ${
+                schwabMessage.type === 'success'
+                  ? 'bg-green-50 border border-green-200 text-green-700'
+                  : 'bg-red-50 border border-red-200 text-red-700'
+              }`}
+            >
+              {schwabMessage.text}
+            </div>
+          )}
+
+          {schwabError && !schwabMessage && (
+            <div className="rounded-lg p-3 text-sm bg-red-50 border border-red-200 text-red-700">
+              {schwabError}
+            </div>
           )}
         </div>
       </div>

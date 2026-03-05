@@ -19,7 +19,7 @@ export default function Dashboard() {
   const [sortColumn, setSortColumn] = useState<SortColumn>('marketValue');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
 
-  const isDataProviderConfigured = settings?.dataProvider === 'fmp' && settings?.dataProviderApiKey;
+  const isDataProviderConfigured = settings?.dataProvider === 'schwab' || ((settings?.dataProvider === 'fmp' || settings?.dataProvider === 'massive') && settings?.dataProviderApiKey);
 
   const fetchEarnings = useCallback(() => {
     if (!isDataProviderConfigured) return;

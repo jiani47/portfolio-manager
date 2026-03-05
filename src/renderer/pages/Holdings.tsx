@@ -24,7 +24,7 @@ export default function Holdings() {
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities, createSecurity, findBySymbol } = useSecurities();
   const { tags, assignments, fetchTags, fetchAssignments, assignTag, removeTag } = useSecurityTags();
-  const { refreshPrices, fetchAllHistorical, loading: refreshingPrices, error: refreshError } = useDataProvider();
+  const { refreshPrices, fetchAllHistorical, loading: refreshingPrices, error: refreshError, delayed } = useDataProvider();
   const [fetchingHistorical, setFetchingHistorical] = useState(false);
   const { settings, fetchSettings } = useSettings();
   const [showModal, setShowModal] = useState(false);
@@ -115,7 +115,7 @@ export default function Holdings() {
     }
   }, [fetchAllHistorical, fetchPositions]);
 
-  const isDataProviderConfigured = (settings?.dataProvider === 'fmp' || settings?.dataProvider === 'massive') && settings?.dataProviderApiKey;
+  const isDataProviderConfigured = settings?.dataProvider === 'schwab' || ((settings?.dataProvider === 'fmp' || settings?.dataProvider === 'massive') && settings?.dataProviderApiKey);
 
   // Create a map of security ID to tags
   const securityTagsMap = useMemo(() => {
@@ -397,6 +397,14 @@ export default function Holdings() {
                 {fetchingHistorical ? 'Fetching...' : 'Fetch Historical'}
               </button>
             </>
+          )}
+          {delayed && (
+            <span className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md" title="Market data is delayed 15-20 minutes">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              Delayed
+            </span>
           )}
           <button onClick={() => setShowImportModal(true)} className="btn-secondary">
             Import from Brokerage

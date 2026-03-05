@@ -114,8 +114,36 @@ export interface AppSettings {
   backup: BackupConfig;
   aiProvider: 'openai' | 'anthropic' | 'none';
   aiApiKey?: string;
-  dataProvider: 'fmp' | 'massive' | 'none';
+  dataProvider: 'fmp' | 'massive' | 'schwab' | 'none';
   dataProviderApiKey?: string;
+  schwabClientId?: string;
+  schwabClientSecret?: string;
+  schwabCallbackUrl?: string;
+  schwabTokens?: SchwabTokens;
+}
+
+export interface SchwabTokens {
+  accessToken: string;
+  refreshToken: string;
+  accessTokenExpiresAt: number;
+  refreshTokenExpiresAt: number;
+  scope?: string;
+  tokenType: string;
+}
+
+export interface SchwabSyncResult {
+  success: boolean;
+  accountsSynced: number;
+  positionsSynced: number;
+  transactionsSynced: number;
+  errors: string[];
+}
+
+export interface SchwabConnectionStatus {
+  connected: boolean;
+  lastSync?: string;
+  accountCount?: number;
+  message: string;
 }
 
 export interface AIInsight {
@@ -162,6 +190,7 @@ export interface StockQuote {
   changePercent: number;
   volume?: number;
   previousClose?: number;
+  delayed?: boolean;
 }
 
 // Refresh prices result
@@ -171,6 +200,7 @@ export interface RefreshPricesResult {
   failed: number;
   errors: string[];
   prices: Map<string, number> | Record<string, number>;
+  delayed?: boolean;
 }
 
 // Earnings calendar event from FMP
@@ -489,4 +519,33 @@ export interface DecisionLogFilters {
   endDate?: string;
   search?: string;
   limit?: number;
+}
+
+// Schwab order types
+export interface SchwabOrderRequest {
+  accountNumber: string;
+  symbol: string;
+  instruction: 'BUY' | 'SELL';
+  quantity: number;
+  orderType: 'MARKET' | 'LIMIT' | 'STOP' | 'STOP_LIMIT';
+  price?: number;
+  stopPrice?: number;
+  duration: 'DAY' | 'GTC' | 'FILL_OR_KILL';
+}
+
+export interface SchwabOrder {
+  orderId: string;
+  accountNumber: string;
+  accountHash: string;
+  status: string;
+  symbol: string;
+  instruction: string;
+  quantity: number;
+  filledQuantity: number;
+  price?: number;
+  orderType: string;
+  duration: string;
+  enteredTime: string;
+  closedTime?: string;
+  description?: string;
 }
