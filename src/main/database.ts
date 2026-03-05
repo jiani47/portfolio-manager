@@ -549,9 +549,11 @@ export class Database {
     let sql = `
       SELECT
         p.*,
+        s.type as security_type,
         ph.close_price as latest_price,
         ph.date as price_date
       FROM positions p
+      JOIN securities s ON p.security_id = s.id
       LEFT JOIN (
         SELECT security_id, close_price, date
         FROM price_history ph1
@@ -582,8 +584,15 @@ export class Database {
       let marketValue: number | undefined;
       let unrealizedGain: number | undefined;
       let unrealizedGainPercent: number | undefined;
+      const securityType = r.security_type as string;
 
-      if (latestPrice !== null && latestPrice > 0) {
+      if (securityType === 'cash') {
+        // Cash positions: quantity IS the dollar value, no price lookup needed
+        currentPrice = 1;
+        marketValue = quantity;
+        unrealizedGain = 0;
+        unrealizedGainPercent = 0;
+      } else if (latestPrice !== null && latestPrice > 0) {
         currentPrice = latestPrice;
         marketValue = quantity * latestPrice;
         unrealizedGain = marketValue - costBasis;
@@ -932,7 +941,9 @@ export class Database {
 
     // Join with latest prices from price_history to calculate market values
     const stmt = this.db.prepare(`
-      SELECT s.type, SUM(p.quantity * COALESCE(ph.close_price, 0)) as total_value
+      SELECT s.type,
+        SUM(CASE WHEN s.type = 'cash' THEN p.quantity
+                 ELSE p.quantity * COALESCE(ph.close_price, 0) END) as total_value
       FROM positions p
       JOIN securities s ON p.security_id = s.id
       LEFT JOIN (
@@ -943,7 +954,8 @@ export class Database {
           WHERE ph2.security_id = ph1.security_id
         )
       ) ph ON p.security_id = ph.security_id
-      WHERE (p.quantity * COALESCE(ph.close_price, 0)) > 0
+      WHERE (s.type = 'cash' AND p.quantity > 0)
+         OR (s.type != 'cash' AND (p.quantity * COALESCE(ph.close_price, 0)) > 0)
       GROUP BY s.type
       ORDER BY total_value DESC
     `);
