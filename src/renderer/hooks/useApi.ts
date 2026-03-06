@@ -41,6 +41,10 @@ import type {
   StreamingQuote,
   StreamingState,
   PositionIntent,
+  DailyRitual,
+  PositionIntentChangeLog,
+  Watchlist,
+  WatchlistItem,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -115,13 +119,13 @@ declare global {
       listLotDetailsParsers: () => Promise<LotDetailsParserInfo[]>;
       parseLotDetailsFile: (parserId: string, filePath: string) => Promise<LotDetailsParseResult>;
 
-      // Security tag operations
+      // Holdings tag operations
       getSecurityTags: () => Promise<SecurityTag[]>;
       createSecurityTag: (tag: Omit<SecurityTag, 'id' | 'createdAt'>) => Promise<SecurityTag>;
       updateSecurityTag: (id: string, tag: Partial<SecurityTag>) => Promise<SecurityTag>;
       deleteSecurityTag: (id: string) => Promise<void>;
 
-      // Security tag assignment operations
+      // Holdings tag assignment operations
       getSecurityTagAssignments: (securityId?: string) => Promise<SecurityTagAssignment[]>;
       assignTagToSecurity: (securityId: string, tagId: string) => Promise<SecurityTagAssignment>;
       removeTagFromSecurity: (securityId: string, tagId: string) => Promise<void>;
@@ -139,6 +143,27 @@ declare global {
       upsertPositionIntent: (positionId: string, data: Partial<PositionIntent>) => Promise<PositionIntent>;
       deletePositionIntent: (positionId: string) => Promise<void>;
       listPositionIntents: () => Promise<PositionIntent[]>;
+
+      // Daily ritual operations
+      getDailyRitual: (date: string) => Promise<DailyRitual | null>;
+      upsertDailyRitual: (date: string, data: Partial<DailyRitual>) => Promise<DailyRitual>;
+      listDailyRituals: (limit?: number) => Promise<DailyRitual[]>;
+
+      // Intent change log operations
+      listIntentChangeLogs: (positionId?: string) => Promise<PositionIntentChangeLog[]>;
+      listIntentChangeLogsByDate: (date: string) => Promise<PositionIntentChangeLog[]>;
+
+      // Watchlist operations
+      listWatchlists: () => Promise<Watchlist[]>;
+      getWatchlist: (id: string) => Promise<Watchlist | null>;
+      createWatchlist: (name: string, description?: string) => Promise<Watchlist>;
+      updateWatchlist: (id: string, data: Partial<Watchlist>) => Promise<Watchlist>;
+      deleteWatchlist: (id: string) => Promise<void>;
+      listWatchlistItems: (watchlistId?: string) => Promise<WatchlistItem[]>;
+      addWatchlistItem: (watchlistId: string, data: Partial<WatchlistItem>) => Promise<WatchlistItem>;
+      updateWatchlistItem: (id: string, data: Partial<WatchlistItem>) => Promise<WatchlistItem>;
+      removeWatchlistItem: (id: string) => Promise<void>;
+      getWatchlistSymbols: () => Promise<string[]>;
 
       // Decision log operations
       getDecisionLogs: (filters?: DecisionLogFilters) => Promise<DecisionLog[]>;
@@ -1507,4 +1532,123 @@ export function usePositionIntents() {
   }, []);
 
   return { intents, loading, fetchIntents, upsertIntent, deleteIntent };
+}
+
+export function useDailyRituals() {
+  const [rituals, setRituals] = useState<DailyRitual[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchRituals = useCallback(async (limit?: number) => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.listDailyRituals(limit);
+      setRituals(data);
+    } catch (err) {
+      console.error('Failed to fetch rituals:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const getRitual = useCallback(async (date: string) => {
+    return window.electronAPI.getDailyRitual(date);
+  }, []);
+
+  const upsertRitual = useCallback(async (date: string, data: Partial<DailyRitual>) => {
+    const result = await window.electronAPI.upsertDailyRitual(date, data);
+    setRituals(prev => {
+      const idx = prev.findIndex(r => r.date === date);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = result;
+        return next;
+      }
+      return [result, ...prev];
+    });
+    return result;
+  }, []);
+
+  return { rituals, loading, fetchRituals, getRitual, upsertRitual };
+}
+
+export function useIntentChangeLogs() {
+  const [logs, setLogs] = useState<PositionIntentChangeLog[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchLogs = useCallback(async (positionId?: string) => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.listIntentChangeLogs(positionId);
+      setLogs(data);
+    } catch (err) {
+      console.error('Failed to fetch intent change logs:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchLogsByDate = useCallback(async (date: string) => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.listIntentChangeLogsByDate(date);
+      setLogs(data);
+    } catch (err) {
+      console.error('Failed to fetch intent change logs:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { logs, loading, fetchLogs, fetchLogsByDate };
+}
+
+export function useWatchlists() {
+  const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
+  const [items, setItems] = useState<WatchlistItem[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchWatchlists = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.listWatchlists();
+      setWatchlists(data);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchItems = useCallback(async (watchlistId?: string) => {
+    const data = await window.electronAPI.listWatchlistItems(watchlistId);
+    setItems(data);
+  }, []);
+
+  const createWatchlist = useCallback(async (name: string, description?: string) => {
+    const wl = await window.electronAPI.createWatchlist(name, description);
+    setWatchlists(prev => [...prev, wl]);
+    return wl;
+  }, []);
+
+  const deleteWatchlist = useCallback(async (id: string) => {
+    await window.electronAPI.deleteWatchlist(id);
+    setWatchlists(prev => prev.filter(w => w.id !== id));
+  }, []);
+
+  const addItem = useCallback(async (watchlistId: string, data: Partial<WatchlistItem>) => {
+    const item = await window.electronAPI.addWatchlistItem(watchlistId, data);
+    setItems(prev => [...prev, item]);
+    return item;
+  }, []);
+
+  const updateItem = useCallback(async (id: string, data: Partial<WatchlistItem>) => {
+    const updated = await window.electronAPI.updateWatchlistItem(id, data);
+    setItems(prev => prev.map(i => i.id === id ? updated : i));
+    return updated;
+  }, []);
+
+  const removeItem = useCallback(async (id: string) => {
+    await window.electronAPI.removeWatchlistItem(id);
+    setItems(prev => prev.filter(i => i.id !== id));
+  }, []);
+
+  return { watchlists, items, loading, fetchWatchlists, fetchItems, createWatchlist, deleteWatchlist, addItem, updateItem, removeItem };
 }
