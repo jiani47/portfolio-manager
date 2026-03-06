@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePortfolio, usePositions, useAccounts, useSecurities, useEarnings, useSettings } from '../hooks/useApi';
+import { usePortfolio, usePositions, useAccounts, useSecurities, useEarnings, useSettings, usePositionIntents } from '../hooks/useApi';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip } from 'recharts';
 import type { Position, EarningsEvent } from '../../shared/types';
 import { format, addDays, parseISO } from 'date-fns';
@@ -16,6 +16,7 @@ export default function Dashboard() {
   const { securities, fetchSecurities } = useSecurities();
   const { earnings, loading: earningsLoading, fetchPortfolioEarnings } = useEarnings();
   const { settings, fetchSettings } = useSettings();
+  const { intents, fetchIntents } = usePositionIntents();
   const [sortColumn, setSortColumn] = useState<SortColumn>('marketValue');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
 
@@ -35,7 +36,8 @@ export default function Dashboard() {
     fetchAccounts();
     fetchSecurities();
     fetchSettings();
-  }, [fetchSummary, fetchPositions, fetchAccounts, fetchSecurities, fetchSettings]);
+    fetchIntents();
+  }, [fetchSummary, fetchPositions, fetchAccounts, fetchSecurities, fetchSettings, fetchIntents]);
 
   // Fetch earnings when data provider is configured and positions are loaded
   useEffect(() => {
@@ -120,6 +122,31 @@ export default function Dashboard() {
   const topPositions = positions
     .sort((a, b) => (b.marketValue || 0) - (a.marketValue || 0))
     .slice(0, 5);
+
+  const tierAllocation = useMemo(() => {
+    const tierMap = new Map<string, { value: number; count: number }>();
+    let noTierValue = 0;
+    let noTierCount = 0;
+
+    for (const p of positions) {
+      const security = securityMap.get(p.securityId);
+      if (security?.type === 'cash') continue;
+      const intent = intents.get(p.id);
+      const tier = intent?.tier;
+      const mv = p.marketValue || 0;
+      if (tier) {
+        const existing = tierMap.get(tier) || { value: 0, count: 0 };
+        existing.value += mv;
+        existing.count += 1;
+        tierMap.set(tier, existing);
+      } else {
+        noTierValue += mv;
+        noTierCount += 1;
+      }
+    }
+
+    return { tierMap, noTierValue, noTierCount };
+  }, [positions, intents, securityMap]);
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -235,6 +262,63 @@ export default function Dashboard() {
               )}
             </div>
           </div>
+
+          {/* Tier Allocation */}
+          {positions.length > 0 && (
+            <div className="card">
+              <h2 className="text-lg font-semibold text-gray-900 mb-4">Tier Allocation</h2>
+              {(() => {
+                const { tierMap, noTierValue, noTierCount } = tierAllocation;
+                const total = Array.from(tierMap.values()).reduce((sum, t) => sum + t.value, 0) + noTierValue;
+                if (total === 0) return <div className="text-gray-500">No positions with market values</div>;
+                const entries = Array.from(tierMap.entries()).sort((a, b) => b[1].value - a[1].value);
+                const tierColors = ['#6366f1', '#8b5cf6', '#a78bfa', '#c4b5fd', '#818cf8'];
+                return (
+                  <div className="space-y-3">
+                    <div className="flex h-6 rounded-full overflow-hidden bg-gray-100">
+                      {entries.map(([tier, data], i) => (
+                        <div
+                          key={tier}
+                          style={{ width: `${(data.value / total) * 100}%`, backgroundColor: tierColors[i % tierColors.length] }}
+                          className="flex items-center justify-center text-xs text-white font-medium"
+                          title={`${tier}: ${formatCurrency(data.value)}`}
+                        >
+                          {(data.value / total) * 100 >= 8 ? tier : ''}
+                        </div>
+                      ))}
+                      {noTierValue > 0 && (
+                        <div
+                          style={{ width: `${(noTierValue / total) * 100}%` }}
+                          className="bg-gray-300 flex items-center justify-center text-xs text-gray-600 font-medium"
+                          title={`No tier: ${formatCurrency(noTierValue)}`}
+                        >
+                          {(noTierValue / total) * 100 >= 8 ? 'No tier' : ''}
+                        </div>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+                      {entries.map(([tier, data], i) => (
+                        <div key={tier} className="flex items-center gap-2 text-sm">
+                          <span className="w-3 h-3 rounded" style={{ backgroundColor: tierColors[i % tierColors.length] }} />
+                          <span className="font-medium">{tier}</span>
+                          <span className="text-gray-500">{((data.value / total) * 100).toFixed(1)}%</span>
+                          <span className="text-gray-400 text-xs">({data.count})</span>
+                        </div>
+                      ))}
+                      {noTierCount > 0 && (
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="w-3 h-3 rounded bg-gray-300" />
+                          <span className="font-medium text-gray-500">No tier</span>
+                          <span className="text-gray-500">{((noTierValue / total) * 100).toFixed(1)}%</span>
+                          <span className="text-gray-400 text-xs">({noTierCount})</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
 
           {/* Upcoming Earnings */}
           {isDataProviderConfigured && (

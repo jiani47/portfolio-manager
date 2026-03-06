@@ -89,6 +89,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateTradingRule: (id: string, rule: unknown) => ipcRenderer.invoke('db:trading-rules:update', id, rule),
   deleteTradingRule: (id: string) => ipcRenderer.invoke('db:trading-rules:delete', id),
 
+  // Position intent operations
+  getPositionIntent: (positionId: string) => ipcRenderer.invoke('db:position-intents:get', positionId),
+  upsertPositionIntent: (positionId: string, data: unknown) => ipcRenderer.invoke('db:position-intents:upsert', positionId, data),
+  deletePositionIntent: (positionId: string) => ipcRenderer.invoke('db:position-intents:delete', positionId),
+  listPositionIntents: () => ipcRenderer.invoke('db:position-intents:list'),
+
   // Decision log operations
   getDecisionLogs: (filters?: unknown) => ipcRenderer.invoke('db:decision-logs:list', filters),
   createDecisionLog: (log: unknown) => ipcRenderer.invoke('db:decision-logs:create', log),

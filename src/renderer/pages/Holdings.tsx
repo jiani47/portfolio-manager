@@ -1,14 +1,15 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePositions, useAccounts, useSecurities, useSecurityTags, useDataProvider, useSettings } from '../hooks/useApi';
+import { usePositions, useAccounts, useSecurities, useSecurityTags, useDataProvider, useSettings, usePositionIntents } from '../hooks/useApi';
 import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import BrokerageImportModal from '../components/BrokerageImportModal';
-import type { Position, Security, SecurityTag } from '../../shared/types';
+import type { Position, Security, SecurityTag, PositionIntent, Account } from '../../shared/types';
 
 interface PositionWithPercent extends Position {
   portfolioPercent: number;
   security?: Security;
-  account?: { id: string; name: string };
+  account?: Account;
   tags?: SecurityTag[];
+  intent?: PositionIntent;
 }
 
 const TAG_COLORS: Record<string, { bg: string; text: string; border: string }> = {
@@ -26,11 +27,16 @@ export default function Holdings() {
   const { securities, fetchSecurities, createSecurity, findBySymbol } = useSecurities();
   const { tags, assignments, fetchTags, fetchAssignments, assignTag, removeTag } = useSecurityTags();
   const { refreshPrices, fetchAllHistorical, loading: refreshingPrices, error: refreshError, delayed } = useDataProvider();
+  const { intents, fetchIntents, upsertIntent } = usePositionIntents();
   const [fetchingHistorical, setFetchingHistorical] = useState(false);
   const { settings, fetchSettings } = useSettings();
   const [showModal, setShowModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showTagModal, setShowTagModal] = useState(false);
+  const [showIntentModal, setShowIntentModal] = useState(false);
+  const [intentPosition, setIntentPosition] = useState<PositionWithPercent | null>(null);
+  const [intentForm, setIntentForm] = useState({ tier: '', thesis: '', invalidation: '', entryStyle: '', targetHoldPeriod: '' });
+  const [showRiskShape, setShowRiskShape] = useState(false);
   const [editingPosition, setEditingPosition] = useState<Position | null>(null);
   const [taggingPosition, setTaggingPosition] = useState<PositionWithPercent | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<string>('');
@@ -54,7 +60,8 @@ export default function Holdings() {
     fetchTags();
     fetchAssignments();
     fetchSettings();
-  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments, fetchSettings]);
+    fetchIntents();
+  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments, fetchSettings, fetchIntents]);
 
   const handleRefreshPrices = useCallback(async () => {
     setRefreshMessage(null);
@@ -171,13 +178,14 @@ export default function Holdings() {
     // Calculate total market value (including cash for percentage calculation)
     const total = withStreaming.reduce((sum, p) => sum + (p.marketValue || 0), 0);
 
-    // Add percentage and enrich with security/account info and tags
+    // Add percentage and enrich with security/account info, tags, and intents
     let enriched: PositionWithPercent[] = withStreaming.map(p => ({
       ...p,
       portfolioPercent: total > 0 ? ((p.marketValue || 0) / total) * 100 : 0,
       security: securityMap.get(p.securityId),
       account: accountMap.get(p.accountId),
       tags: securityTagsMap.get(p.securityId) || [],
+      intent: intents.get(p.id),
     }));
 
     // Apply tag filter if selected
@@ -210,7 +218,7 @@ export default function Holdings() {
       totalMarketValue: total,
       totalCash: cashTotal,
     };
-  }, [positions, selectedAccount, selectedTagFilter, securityMap, accountMap, securityTagsMap, streamingQuotes]);
+  }, [positions, selectedAccount, selectedTagFilter, securityMap, accountMap, securityTagsMap, streamingQuotes, intents]);
 
   const handleOpenTagModal = useCallback((position: PositionWithPercent) => {
     setTaggingPosition(position);
@@ -220,7 +228,8 @@ export default function Holdings() {
   const handleTagToggle = useCallback(async (tagId: string) => {
     if (!taggingPosition) return;
     const securityId = taggingPosition.securityId;
-    const hasTag = taggingPosition.tags?.some(t => t.id === tagId);
+    const currentTags = securityTagsMap.get(securityId) || [];
+    const hasTag = currentTags.some(t => t.id === tagId);
 
     try {
       if (hasTag) {
@@ -233,7 +242,109 @@ export default function Holdings() {
     } catch (err) {
       console.error('Failed to toggle tag:', err);
     }
-  }, [taggingPosition, assignTag, removeTag, fetchAssignments]);
+  }, [taggingPosition, securityTagsMap, assignTag, removeTag, fetchAssignments]);
+
+  const handleOpenIntentModal = useCallback((position: PositionWithPercent) => {
+    setIntentPosition(position);
+    const existing = position.intent;
+    setIntentForm({
+      tier: existing?.tier || '',
+      thesis: existing?.thesis || '',
+      invalidation: existing?.invalidation || '',
+      entryStyle: existing?.entryStyle || '',
+      targetHoldPeriod: existing?.targetHoldPeriod || '',
+    });
+    setShowIntentModal(true);
+  }, []);
+
+  const handleSaveIntent = useCallback(async () => {
+    if (!intentPosition) return;
+    await upsertIntent(intentPosition.id, intentForm);
+    setShowIntentModal(false);
+    setIntentPosition(null);
+  }, [intentPosition, intentForm, upsertIntent]);
+
+  // Collect existing tier values for autocomplete suggestions
+  const existingTiers = useMemo(() => {
+    const tiers = new Set<string>();
+    for (const [, intent] of intents) {
+      if (intent.tier) tiers.add(intent.tier);
+    }
+    return Array.from(tiers).sort();
+  }, [intents]);
+
+  // Risk shape data
+  const riskShapeData = useMemo(() => {
+    const allPositions = [...concentratedPositions, ...normalPositions, ...smallPositions, ...watchlistPositions];
+
+    // Book split
+    const bookSplit = { investing: 0, trading: 0, unassigned: 0 };
+    for (const p of allPositions) {
+      const book = p.account?.book;
+      if (book === 'investing') bookSplit.investing += (p.marketValue || 0);
+      else if (book === 'trading') bookSplit.trading += (p.marketValue || 0);
+      else bookSplit.unassigned += (p.marketValue || 0);
+    }
+
+    // Tier concentration
+    const tierMap = new Map<string, number>();
+    let noTier = 0;
+    for (const p of allPositions) {
+      const tier = p.intent?.tier;
+      if (tier) {
+        tierMap.set(tier, (tierMap.get(tier) || 0) + (p.marketValue || 0));
+      } else {
+        noTier += (p.marketValue || 0);
+      }
+    }
+
+    // Sector exposure
+    const sectorMap = new Map<string, number>();
+    for (const p of allPositions) {
+      const sector = p.security?.sector || 'Unknown';
+      if (p.security?.type !== 'cash') {
+        sectorMap.set(sector, (sectorMap.get(sector) || 0) + (p.marketValue || 0));
+      }
+    }
+
+    // Account allocation
+    const acctMap = new Map<string, number>();
+    for (const p of allPositions) {
+      const name = p.account?.name || 'Unknown';
+      acctMap.set(name, (acctMap.get(name) || 0) + (p.marketValue || 0));
+    }
+
+    return { bookSplit, tierMap, noTier, sectorMap, acctMap };
+  }, [concentratedPositions, normalPositions, smallPositions, watchlistPositions]);
+
+  const TIER_COLORS: Record<string, { bg: string; text: string }> = {
+    'Core': { bg: 'bg-blue-100', text: 'text-blue-800' },
+    'Growth': { bg: 'bg-green-100', text: 'text-green-800' },
+    'Starter': { bg: 'bg-yellow-100', text: 'text-yellow-800' },
+    'Watchlist': { bg: 'bg-orange-100', text: 'text-orange-800' },
+  };
+
+  const renderTierBadge = (intent?: PositionIntent) => {
+    if (!intent?.tier) return null;
+    const colors = TIER_COLORS[intent.tier] || { bg: 'bg-gray-100', text: 'text-gray-800' };
+    return (
+      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${colors.bg} ${colors.text} ml-1`}>
+        {intent.tier}
+      </span>
+    );
+  };
+
+  const renderIntentIcon = (intent?: PositionIntent) => {
+    const hasIntent = intent && (intent.tier || intent.thesis);
+    return (
+      <button
+        className={`text-xs ${hasIntent ? 'text-indigo-600 hover:text-indigo-700' : 'text-gray-400 hover:text-gray-600'}`}
+        title={hasIntent ? `${intent.tier || 'No tier'}: ${intent.thesis || 'No thesis'}` : 'Set intent'}
+      >
+        {hasIntent ? '◆' : '◇'}
+      </button>
+    );
+  };
 
   const renderTagBadges = (positionTags: SecurityTag[] = []) => {
     if (positionTags.length === 0) return null;
@@ -517,6 +628,134 @@ export default function Holdings() {
             </div>
           </div>
 
+          {/* Risk Shape */}
+          <div>
+            <button
+              onClick={() => setShowRiskShape(!showRiskShape)}
+              className="w-full flex items-center justify-between text-lg font-semibold text-gray-900 mb-3 hover:text-gray-700"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-gray-400">{showRiskShape ? '▼' : '▶'}</span>
+                Risk Shape
+              </div>
+            </button>
+            {showRiskShape && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                {/* Book Split */}
+                <div className="card">
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Book Split</h3>
+                  {(() => {
+                    const { bookSplit } = riskShapeData;
+                    const total = bookSplit.investing + bookSplit.trading + bookSplit.unassigned;
+                    if (total === 0) return <div className="text-sm text-gray-500">No positions</div>;
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex h-4 rounded-full overflow-hidden bg-gray-100">
+                          {bookSplit.investing > 0 && (
+                            <div className="bg-blue-500" style={{ width: `${(bookSplit.investing / total) * 100}%` }} title={`Investing: ${formatCurrency(bookSplit.investing)}`} />
+                          )}
+                          {bookSplit.trading > 0 && (
+                            <div className="bg-orange-500" style={{ width: `${(bookSplit.trading / total) * 100}%` }} title={`Trading: ${formatCurrency(bookSplit.trading)}`} />
+                          )}
+                          {bookSplit.unassigned > 0 && (
+                            <div className="bg-gray-300" style={{ width: `${(bookSplit.unassigned / total) * 100}%` }} title={`Unassigned: ${formatCurrency(bookSplit.unassigned)}`} />
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-3 text-xs">
+                          {bookSplit.investing > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded bg-blue-500" />Investing: {formatCurrency(bookSplit.investing)} ({((bookSplit.investing / total) * 100).toFixed(1)}%)</span>}
+                          {bookSplit.trading > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded bg-orange-500" />Trading: {formatCurrency(bookSplit.trading)} ({((bookSplit.trading / total) * 100).toFixed(1)}%)</span>}
+                          {bookSplit.unassigned > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded bg-gray-300" />Unassigned: {formatCurrency(bookSplit.unassigned)} ({((bookSplit.unassigned / total) * 100).toFixed(1)}%)</span>}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Tier Concentration */}
+                <div className="card">
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Tier Concentration</h3>
+                  {(() => {
+                    const { tierMap, noTier } = riskShapeData;
+                    const total = Array.from(tierMap.values()).reduce((a, b) => a + b, 0) + noTier;
+                    if (total === 0) return <div className="text-sm text-gray-500">No positions</div>;
+                    const tierColors = ['#6366f1', '#8b5cf6', '#a78bfa', '#c4b5fd', '#818cf8'];
+                    const entries = Array.from(tierMap.entries()).sort((a, b) => b[1] - a[1]);
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex h-4 rounded-full overflow-hidden bg-gray-100">
+                          {entries.map(([tier, val], i) => (
+                            <div key={tier} style={{ width: `${(val / total) * 100}%`, backgroundColor: tierColors[i % tierColors.length] }} title={`${tier}: ${formatCurrency(val)}`} />
+                          ))}
+                          {noTier > 0 && (
+                            <div className="bg-gray-300" style={{ width: `${(noTier / total) * 100}%` }} title={`No tier: ${formatCurrency(noTier)}`} />
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-3 text-xs">
+                          {entries.map(([tier, val], i) => (
+                            <span key={tier} className="flex items-center gap-1"><span className="w-2 h-2 rounded" style={{ backgroundColor: tierColors[i % tierColors.length] }} />{tier}: {((val / total) * 100).toFixed(1)}%</span>
+                          ))}
+                          {noTier > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded bg-gray-300" />No tier: {((noTier / total) * 100).toFixed(1)}%</span>}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Sector Exposure */}
+                <div className="card">
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Sector Exposure</h3>
+                  {(() => {
+                    const { sectorMap } = riskShapeData;
+                    const total = Array.from(sectorMap.values()).reduce((a, b) => a + b, 0);
+                    if (total === 0) return <div className="text-sm text-gray-500">No equity positions</div>;
+                    const entries = Array.from(sectorMap.entries()).sort((a, b) => b[1] - a[1]);
+                    const sectorColors = ['#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#6366f1', '#f97316', '#84cc16', '#06b6d4'];
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex h-4 rounded-full overflow-hidden bg-gray-100">
+                          {entries.map(([sector, val], i) => (
+                            <div key={sector} style={{ width: `${(val / total) * 100}%`, backgroundColor: sectorColors[i % sectorColors.length] }} title={`${sector}: ${formatCurrency(val)}`} />
+                          ))}
+                        </div>
+                        <div className="flex flex-wrap gap-3 text-xs">
+                          {entries.map(([sector, val], i) => (
+                            <span key={sector} className="flex items-center gap-1"><span className="w-2 h-2 rounded" style={{ backgroundColor: sectorColors[i % sectorColors.length] }} />{sector}: {((val / total) * 100).toFixed(1)}%</span>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Account Allocation */}
+                <div className="card">
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Account Allocation</h3>
+                  {(() => {
+                    const { acctMap } = riskShapeData;
+                    const total = Array.from(acctMap.values()).reduce((a, b) => a + b, 0);
+                    if (total === 0) return <div className="text-sm text-gray-500">No positions</div>;
+                    const entries = Array.from(acctMap.entries()).sort((a, b) => b[1] - a[1]);
+                    const acctColors = ['#0ea5e9', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444'];
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex h-4 rounded-full overflow-hidden bg-gray-100">
+                          {entries.map(([name, val], i) => (
+                            <div key={name} style={{ width: `${(val / total) * 100}%`, backgroundColor: acctColors[i % acctColors.length] }} title={`${name}: ${formatCurrency(val)}`} />
+                          ))}
+                        </div>
+                        <div className="flex flex-wrap gap-3 text-xs">
+                          {entries.map(([name, val], i) => (
+                            <span key={name} className="flex items-center gap-1"><span className="w-2 h-2 rounded" style={{ backgroundColor: acctColors[i % acctColors.length] }} />{name}: {formatCurrency(val)} ({((val / total) * 100).toFixed(1)}%)</span>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Concentrated Positions (>= 5%) */}
           {concentratedPositions.length > 0 && (
             <div>
@@ -553,6 +792,7 @@ export default function Holdings() {
                                 {'\u2265'}8%
                               </span>
                             )}
+                            {renderTierBadge(position.intent)}
                           </div>
                           {renderTagBadges(position.tags)}
                         </td>
@@ -575,6 +815,7 @@ export default function Holdings() {
                           ) : '-'}
                         </td>
                         <td className="table-cell text-right">
+                          <button onClick={() => handleOpenIntentModal(position)} className="text-indigo-600 hover:text-indigo-700 mr-3">{renderIntentIcon(position.intent)}</button>
                           <button onClick={() => handleOpenTagModal(position)} className="text-purple-600 hover:text-purple-700 mr-3">Tag</button>
                           <button onClick={() => handleOpenModal(position)} className="text-primary-600 hover:text-primary-700 mr-3">Edit</button>
                           <button onClick={() => handleDelete(position.id)} className="text-red-600 hover:text-red-700">Delete</button>
@@ -613,7 +854,10 @@ export default function Holdings() {
                     {normalPositions.map((position) => (
                       <tr key={position.id} className="hover:bg-gray-50">
                         <td className="table-cell font-medium">
-                          {position.security?.symbol || 'Unknown'}
+                          <div className="flex items-center gap-1">
+                            {position.security?.symbol || 'Unknown'}
+                            {renderTierBadge(position.intent)}
+                          </div>
                           {renderTagBadges(position.tags)}
                         </td>
                         <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
@@ -631,6 +875,7 @@ export default function Holdings() {
                           ) : '-'}
                         </td>
                         <td className="table-cell text-right">
+                          <button onClick={() => handleOpenIntentModal(position)} className="text-indigo-600 hover:text-indigo-700 mr-3">{renderIntentIcon(position.intent)}</button>
                           <button onClick={() => handleOpenTagModal(position)} className="text-purple-600 hover:text-purple-700 mr-3">Tag</button>
                           <button onClick={() => handleOpenModal(position)} className="text-primary-600 hover:text-primary-700 mr-3">Edit</button>
                           <button onClick={() => handleDelete(position.id)} className="text-red-600 hover:text-red-700">Delete</button>
@@ -669,7 +914,10 @@ export default function Holdings() {
                     {smallPositions.map((position) => (
                       <tr key={position.id} className="hover:bg-gray-50">
                         <td className="table-cell font-medium">
-                          {position.security?.symbol || 'Unknown'}
+                          <div className="flex items-center gap-1">
+                            {position.security?.symbol || 'Unknown'}
+                            {renderTierBadge(position.intent)}
+                          </div>
                           {renderTagBadges(position.tags)}
                         </td>
                         <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
@@ -687,6 +935,7 @@ export default function Holdings() {
                           ) : '-'}
                         </td>
                         <td className="table-cell text-right">
+                          <button onClick={() => handleOpenIntentModal(position)} className="text-indigo-600 hover:text-indigo-700 mr-3">{renderIntentIcon(position.intent)}</button>
                           <button onClick={() => handleOpenTagModal(position)} className="text-purple-600 hover:text-purple-700 mr-3">Tag</button>
                           <button onClick={() => handleOpenModal(position)} className="text-primary-600 hover:text-primary-700 mr-3">Edit</button>
                           <button onClick={() => handleDelete(position.id)} className="text-red-600 hover:text-red-700">Delete</button>
@@ -731,7 +980,10 @@ export default function Holdings() {
                       {watchlistPositions.map((position) => (
                         <tr key={position.id} className="hover:bg-gray-50">
                           <td className="table-cell font-medium">
-                            {position.security?.symbol || 'Unknown'}
+                            <div className="flex items-center gap-1">
+                              {position.security?.symbol || 'Unknown'}
+                              {renderTierBadge(position.intent)}
+                            </div>
                             {renderTagBadges(position.tags)}
                           </td>
                           <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
@@ -748,6 +1000,7 @@ export default function Holdings() {
                             ) : '-'}
                           </td>
                           <td className="table-cell text-right">
+                            <button onClick={() => handleOpenIntentModal(position)} className="text-indigo-600 hover:text-indigo-700 mr-3">{renderIntentIcon(position.intent)}</button>
                             <button onClick={() => handleOpenTagModal(position)} className="text-purple-600 hover:text-purple-700 mr-3">Tag</button>
                             <button onClick={() => handleOpenModal(position)} className="text-primary-600 hover:text-primary-700 mr-3">Edit</button>
                             <button onClick={() => handleDelete(position.id)} className="text-red-600 hover:text-red-700">Delete</button>
@@ -919,6 +1172,98 @@ export default function Holdings() {
         }}
       />
 
+      {/* Intent Modal */}
+      {showIntentModal && intentPosition && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">
+              Position Intent
+            </h2>
+            <p className="text-sm text-gray-500 mb-4">
+              {intentPosition.security?.symbol} - {intentPosition.security?.name}
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label className="label">Tier</label>
+                <input
+                  type="text"
+                  className="input"
+                  value={intentForm.tier}
+                  onChange={(e) => setIntentForm({ ...intentForm, tier: e.target.value })}
+                  placeholder="e.g., Tier 1, Core, Trade"
+                  list="tier-suggestions"
+                />
+                {existingTiers.length > 0 && (
+                  <datalist id="tier-suggestions">
+                    {existingTiers.map(t => <option key={t} value={t} />)}
+                  </datalist>
+                )}
+              </div>
+              <div>
+                <label className="label">Thesis</label>
+                <textarea
+                  className="input min-h-[80px]"
+                  value={intentForm.thesis}
+                  onChange={(e) => setIntentForm({ ...intentForm, thesis: e.target.value })}
+                  placeholder="Why does this position exist?"
+                />
+              </div>
+              <div>
+                <label className="label">Invalidation</label>
+                <textarea
+                  className="input min-h-[60px]"
+                  value={intentForm.invalidation}
+                  onChange={(e) => setIntentForm({ ...intentForm, invalidation: e.target.value })}
+                  placeholder="What breaks the thesis?"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="label">Entry Style</label>
+                  <input
+                    type="text"
+                    className="input"
+                    value={intentForm.entryStyle}
+                    onChange={(e) => setIntentForm({ ...intentForm, entryStyle: e.target.value })}
+                    placeholder="e.g., DCA, lump sum"
+                  />
+                </div>
+                <div>
+                  <label className="label">Target Hold Period</label>
+                  <select
+                    className="select"
+                    value={intentForm.targetHoldPeriod}
+                    onChange={(e) => setIntentForm({ ...intentForm, targetHoldPeriod: e.target.value })}
+                  >
+                    <option value="">-</option>
+                    <option value="days">Days</option>
+                    <option value="weeks">Weeks</option>
+                    <option value="months">Months</option>
+                    <option value="years">Years</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 pt-4">
+              <button
+                type="button"
+                onClick={() => { setShowIntentModal(false); setIntentPosition(null); }}
+                className="btn-secondary"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveIntent}
+                className="btn-primary"
+              >
+                Save Intent
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Tag Modal */}
       {showTagModal && taggingPosition && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -932,7 +1277,8 @@ export default function Holdings() {
             <div className="space-y-2 mb-6">
               {tags.map(tag => {
                 const colors = TAG_COLORS[tag.color] || TAG_COLORS.gray;
-                const isSelected = taggingPosition.tags?.some(t => t.id === tag.id);
+                const currentTags = securityTagsMap.get(taggingPosition.securityId) || [];
+                const isSelected = currentTags.some(t => t.id === tag.id);
                 return (
                   <label
                     key={tag.id}

@@ -17,6 +17,7 @@ import {
   TradingRuleFilters,
   DecisionLogFilters,
   PriceHistory,
+  PositionIntent,
 } from '../shared/types';
 
 export class Database {
@@ -306,6 +307,33 @@ export class Database {
         // Column already exists
       }
     }
+
+    // Migration: add book column to accounts
+    try {
+      this.db.exec(`ALTER TABLE accounts ADD COLUMN book TEXT`);
+    } catch {
+      // Column already exists
+    }
+
+    // Position intents table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS position_intents (
+        id TEXT PRIMARY KEY,
+        position_id TEXT NOT NULL UNIQUE,
+        tier TEXT,
+        thesis TEXT,
+        invalidation TEXT,
+        entry_style TEXT,
+        target_hold_period TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE CASCADE
+      )
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_position_intents_position ON position_intents(position_id);
+    `);
   }
 
   close(): void {
@@ -356,6 +384,7 @@ export class Database {
     if (account.accountNumber !== undefined) { fields.push('account_number = ?'); values.push(account.accountNumber); }
     if (account.accountType !== undefined) { fields.push('account_type = ?'); values.push(account.accountType); }
     if (account.currency !== undefined) { fields.push('currency = ?'); values.push(account.currency); }
+    if (account.book !== undefined) { fields.push('book = ?'); values.push(account.book || null); }
 
     values.push(id);
     const stmt = this.db.prepare(`UPDATE accounts SET ${fields.join(', ')} WHERE id = ?`);
@@ -1258,6 +1287,81 @@ export class Database {
     stmt.run(id);
   }
 
+  // Position intent operations
+  getPositionIntent(positionId: string): PositionIntent | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM position_intents WHERE position_id = ?');
+    const row = stmt.get(positionId);
+    return row ? this.mapRowToPositionIntent(row) : null;
+  }
+
+  upsertPositionIntent(positionId: string, data: Partial<PositionIntent>): PositionIntent {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const existing = this.getPositionIntent(positionId);
+
+    if (existing) {
+      const fields: string[] = ['updated_at = ?'];
+      const values: unknown[] = [now];
+
+      if (data.tier !== undefined) { fields.push('tier = ?'); values.push(data.tier || null); }
+      if (data.thesis !== undefined) { fields.push('thesis = ?'); values.push(data.thesis || null); }
+      if (data.invalidation !== undefined) { fields.push('invalidation = ?'); values.push(data.invalidation || null); }
+      if (data.entryStyle !== undefined) { fields.push('entry_style = ?'); values.push(data.entryStyle || null); }
+      if (data.targetHoldPeriod !== undefined) { fields.push('target_hold_period = ?'); values.push(data.targetHoldPeriod || null); }
+
+      values.push(existing.id);
+      const stmt = this.db.prepare(`UPDATE position_intents SET ${fields.join(', ')} WHERE id = ?`);
+      stmt.run(...values);
+      return this.getPositionIntent(positionId)!;
+    } else {
+      const id = uuidv4();
+      const stmt = this.db.prepare(`
+        INSERT INTO position_intents (id, position_id, tier, thesis, invalidation, entry_style, target_hold_period, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      stmt.run(
+        id,
+        positionId,
+        data.tier || null,
+        data.thesis || null,
+        data.invalidation || null,
+        data.entryStyle || null,
+        data.targetHoldPeriod || null,
+        now,
+        now
+      );
+      return this.getPositionIntent(positionId)!;
+    }
+  }
+
+  deletePositionIntent(positionId: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('DELETE FROM position_intents WHERE position_id = ?');
+    stmt.run(positionId);
+  }
+
+  listPositionIntents(): PositionIntent[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM position_intents ORDER BY updated_at DESC');
+    return stmt.all().map(this.mapRowToPositionIntent);
+  }
+
+  private mapRowToPositionIntent = (row: unknown): PositionIntent => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      positionId: r.position_id as string,
+      tier: r.tier as string | undefined,
+      thesis: r.thesis as string | undefined,
+      invalidation: r.invalidation as string | undefined,
+      entryStyle: r.entry_style as string | undefined,
+      targetHoldPeriod: r.target_hold_period as string | undefined,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
+
   // Row mappers
   private mapRowToAccount = (row: unknown): Account => {
     const r = row as Record<string, unknown>;
@@ -1267,6 +1371,7 @@ export class Database {
       broker: r.broker as string,
       accountNumber: r.account_number as string | undefined,
       accountType: r.account_type as Account['accountType'],
+      book: r.book as Account['book'] | undefined,
       currency: r.currency as string,
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,

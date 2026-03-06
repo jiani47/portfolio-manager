@@ -330,6 +330,12 @@ export function setupIpcHandlers(
   ipcMain.handle('db:trading-rules:update', (_, id, rule) => db.updateTradingRule(id, rule));
   ipcMain.handle('db:trading-rules:delete', (_, id) => db.deleteTradingRule(id));
 
+  // Position intent handlers
+  ipcMain.handle('db:position-intents:get', (_, positionId) => db.getPositionIntent(positionId));
+  ipcMain.handle('db:position-intents:upsert', (_, positionId, data) => db.upsertPositionIntent(positionId, data));
+  ipcMain.handle('db:position-intents:delete', (_, positionId) => db.deletePositionIntent(positionId));
+  ipcMain.handle('db:position-intents:list', () => db.listPositionIntents());
+
   // Decision log handlers
   ipcMain.handle('db:decision-logs:list', (_, filters) => db.listDecisionLogs(filters));
   ipcMain.handle('db:decision-logs:create', (_, log) => db.createDecisionLog(log));

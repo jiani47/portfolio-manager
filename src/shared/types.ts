@@ -6,7 +6,20 @@ export interface Account {
   broker: string;
   accountNumber?: string;
   accountType: 'brokerage' | 'ira' | 'roth_ira' | '401k' | 'other';
+  book?: 'investing' | 'trading';
   currency: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PositionIntent {
+  id: string;
+  positionId: string;
+  tier?: string;
+  thesis?: string;
+  invalidation?: string;
+  entryStyle?: string;
+  targetHoldPeriod?: string;
   createdAt: string;
   updatedAt: string;
 }

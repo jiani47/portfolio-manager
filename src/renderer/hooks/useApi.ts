@@ -40,6 +40,7 @@ import type {
   SchwabOrderRequest,
   StreamingQuote,
   StreamingState,
+  PositionIntent,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -132,6 +133,12 @@ declare global {
       getTradingRule: (id: string) => Promise<TradingRule | null>;
       updateTradingRule: (id: string, rule: Partial<TradingRule>) => Promise<TradingRule>;
       deleteTradingRule: (id: string) => Promise<void>;
+
+      // Position intent operations
+      getPositionIntent: (positionId: string) => Promise<PositionIntent | null>;
+      upsertPositionIntent: (positionId: string, data: Partial<PositionIntent>) => Promise<PositionIntent>;
+      deletePositionIntent: (positionId: string) => Promise<void>;
+      listPositionIntents: () => Promise<PositionIntent[]>;
 
       // Decision log operations
       getDecisionLogs: (filters?: DecisionLogFilters) => Promise<DecisionLog[]>;
@@ -1458,4 +1465,46 @@ export function useSchwab() {
     placeOrder,
     cancelOrder,
   };
+}
+
+export function usePositionIntents() {
+  const [intents, setIntents] = useState<Map<string, PositionIntent>>(new Map());
+  const [loading, setLoading] = useState(false);
+
+  const fetchIntents = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.listPositionIntents();
+      const map = new Map<string, PositionIntent>();
+      for (const intent of data) {
+        map.set(intent.positionId, intent);
+      }
+      setIntents(map);
+    } catch (err) {
+      console.error('Failed to fetch intents:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const upsertIntent = useCallback(async (positionId: string, data: Partial<PositionIntent>) => {
+    const result = await window.electronAPI.upsertPositionIntent(positionId, data);
+    setIntents(prev => {
+      const next = new Map(prev);
+      next.set(positionId, result);
+      return next;
+    });
+    return result;
+  }, []);
+
+  const deleteIntent = useCallback(async (positionId: string) => {
+    await window.electronAPI.deletePositionIntent(positionId);
+    setIntents(prev => {
+      const next = new Map(prev);
+      next.delete(positionId);
+      return next;
+    });
+  }, []);
+
+  return { intents, loading, fetchIntents, upsertIntent, deleteIntent };
 }

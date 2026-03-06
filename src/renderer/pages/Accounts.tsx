@@ -19,6 +19,7 @@ export default function Accounts() {
     broker: '',
     accountNumber: '',
     accountType: 'brokerage' as Account['accountType'],
+    book: '' as string,
     currency: 'USD',
   });
 
@@ -34,6 +35,7 @@ export default function Accounts() {
         broker: account.broker,
         accountNumber: account.accountNumber || '',
         accountType: account.accountType,
+        book: account.book || '',
         currency: account.currency,
       });
     } else {
@@ -43,6 +45,7 @@ export default function Accounts() {
         broker: '',
         accountNumber: '',
         accountType: 'brokerage',
+        book: '',
         currency: 'USD',
       });
     }
@@ -57,10 +60,14 @@ export default function Accounts() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const submitData = {
+        ...formData,
+        book: formData.book || undefined,
+      };
       if (editingAccount) {
-        await updateAccount(editingAccount.id, formData);
+        await updateAccount(editingAccount.id, submitData);
       } else {
-        await createAccount(formData);
+        await createAccount(submitData);
       }
       handleCloseModal();
     } catch (err) {
@@ -114,9 +121,16 @@ export default function Accounts() {
                   <h3 className="font-semibold text-gray-900">{account.name}</h3>
                   <p className="text-sm text-gray-500">{account.broker}</p>
                 </div>
-                <span className="badge badge-info capitalize">
-                  {account.accountType.replace('_', ' ')}
-                </span>
+                <div className="flex gap-2">
+                  {account.book && (
+                    <span className={`badge ${account.book === 'investing' ? 'badge-info' : 'badge-warning'} capitalize`}>
+                      {account.book}
+                    </span>
+                  )}
+                  <span className="badge badge-info capitalize">
+                    {account.accountType.replace('_', ' ')}
+                  </span>
+                </div>
               </div>
               {account.accountNumber && (
                 <p className="text-sm text-gray-400 mt-2">****{account.accountNumber.slice(-4)}</p>
@@ -192,6 +206,18 @@ export default function Accounts() {
                       {type.label}
                     </option>
                   ))}
+                </select>
+              </div>
+              <div>
+                <label className="label">Book</label>
+                <select
+                  className="select"
+                  value={formData.book}
+                  onChange={(e) => setFormData({ ...formData, book: e.target.value })}
+                >
+                  <option value="">-</option>
+                  <option value="investing">Investing</option>
+                  <option value="trading">Trading</option>
                 </select>
               </div>
               <div>
