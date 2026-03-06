@@ -8,6 +8,7 @@ import { AIService } from './ai-service';
 import { FMPService } from './fmp-service';
 import { MassiveService } from './massive-service';
 import { SchwabService } from './schwab-service';
+import { SchwabStreamService } from './schwab-stream-service';
 import { parserRegistry, transactionParserRegistry, lotDetailsParserRegistry } from './parsers';
 import { AppSettings, ExcelImportResult, RefreshPricesResult } from '../shared/types';
 
@@ -19,6 +20,7 @@ export function setupIpcHandlers(
   fmpService: FMPService,
   massiveService: MassiveService,
   schwabService: SchwabService,
+  streamService: SchwabStreamService | null,
   store: Store<{ settings: AppSettings }>
 ): void {
   // Account handlers
@@ -979,5 +981,25 @@ export function setupIpcHandlers(
   // Schwab market data handler
   ipcMain.handle('schwab:test-market-data', async () => {
     return schwabService.testMarketDataConnection();
+  });
+
+  // Streaming handlers
+  ipcMain.handle('streaming:start', async (_, symbols: string[]) => {
+    if (!streamService) return { success: false, message: 'Streaming not available' };
+    await streamService.connect(symbols);
+    return { success: true };
+  });
+
+  ipcMain.handle('streaming:stop', async () => {
+    streamService?.disconnect();
+  });
+
+  ipcMain.handle('streaming:get-status', () => {
+    if (!streamService) return { status: 'disconnected', subscribedCount: 0 };
+    return streamService.getStatus();
+  });
+
+  ipcMain.handle('streaming:update-symbols', async (_, symbols: string[]) => {
+    streamService?.updateSymbols(symbols);
   });
 }

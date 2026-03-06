@@ -6,6 +6,8 @@ import { BackupService } from './backup-service';
 import { AIService } from './ai-service';
 import { FMPService } from './fmp-service';
 import { MassiveService } from './massive-service';
+import { SchwabService } from './schwab-service';
+import { SchwabStreamService } from './schwab-stream-service';
 import Store from 'electron-store';
 import { AppSettings } from '../shared/types';
 
@@ -17,6 +19,8 @@ let backupService: BackupService | null = null;
 let aiService: AIService | null = null;
 let fmpService: FMPService | null = null;
 let massiveService: MassiveService | null = null;
+let schwabService: SchwabService | null = null;
+let streamService: SchwabStreamService | null = null;
 
 const defaultSettings: AppSettings = {
   theme: 'system',
@@ -91,8 +95,16 @@ async function initializeApp() {
   massiveService = new MassiveService();
   await massiveService.configure(settings);
 
+  // Initialize Schwab service
+  schwabService = new SchwabService(store);
+  schwabService.configure(settings);
+
+  // Initialize streaming service
+  streamService = new SchwabStreamService(schwabService, database, store, () => mainWindow);
+  streamService.startMarketHoursScheduler();
+
   // Setup IPC handlers
-  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, store);
+  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, schwabService, streamService, store);
 }
 
 app.whenReady().then(async () => {
@@ -113,6 +125,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  streamService?.destroy();
   database?.close();
 });
 

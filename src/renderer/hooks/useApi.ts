@@ -38,6 +38,8 @@ import type {
   SchwabSyncResult,
   SchwabOrder,
   SchwabOrderRequest,
+  StreamingQuote,
+  StreamingState,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -177,6 +179,14 @@ declare global {
 
       // Schwab market data operations
       schwabTestMarketData: () => Promise<{ success: boolean; message: string }>;
+
+      // Streaming operations
+      onStreamingQuote: (callback: (quote: StreamingQuote) => void) => () => void;
+      onStreamingStatus: (callback: (status: string) => void) => () => void;
+      streamingStart: (symbols: string[]) => Promise<void>;
+      streamingStop: () => Promise<void>;
+      streamingGetStatus: () => Promise<StreamingState>;
+      streamingUpdateSymbols: (symbols: string[]) => Promise<void>;
     };
   }
 }

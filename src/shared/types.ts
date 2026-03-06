@@ -203,6 +203,31 @@ export interface RefreshPricesResult {
   delayed?: boolean;
 }
 
+// Streaming quote from Schwab WebSocket
+export interface StreamingQuote {
+  symbol: string;
+  bid?: number;
+  ask?: number;
+  last: number;
+  volume?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+  open?: number;
+  netChange?: number;
+  netChangePct?: number;
+  timestamp: number;
+}
+
+export type StreamingStatus = 'disconnected' | 'connecting' | 'connected' | 'outside_hours' | 'error';
+
+export interface StreamingState {
+  status: StreamingStatus;
+  subscribedCount: number;
+  connectedSince?: number;
+  error?: string;
+}
+
 // Earnings calendar event from FMP
 export interface EarningsEvent {
   symbol: string;

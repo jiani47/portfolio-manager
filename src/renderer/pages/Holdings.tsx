@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { usePositions, useAccounts, useSecurities, useSecurityTags, useDataProvider, useSettings } from '../hooks/useApi';
+import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import BrokerageImportModal from '../components/BrokerageImportModal';
 import type { Position, Security, SecurityTag } from '../../shared/types';
 
@@ -134,17 +135,44 @@ export default function Holdings() {
   const securityMap = useMemo(() => new Map(securities.map(s => [s.id, s])), [securities]);
   const accountMap = useMemo(() => new Map(accounts.map(a => [a.id, a])), [accounts]);
 
+  // Streaming quotes
+  const symbolList = useMemo(() => {
+    return positions
+      .map(p => securityMap.get(p.securityId))
+      .filter(s => s && s.type !== 'cash' && s.type !== 'option')
+      .map(s => s!.symbol);
+  }, [positions, securityMap]);
+  const { quotes: streamingQuotes, status: streamStatus } = useStreamingQuotes(symbolList);
+
   // Calculate positions with portfolio percentage and group them
   const { concentratedPositions, normalPositions, smallPositions, watchlistPositions, totalMarketValue, totalCash } = useMemo(() => {
     let filtered = selectedAccount
       ? positions.filter(p => p.accountId === selectedAccount)
       : positions;
 
+    // Overlay streaming prices if available
+    const withStreaming = filtered.map(p => {
+      const security = securityMap.get(p.securityId);
+      const streamQuote = security ? streamingQuotes.get(security.symbol) : undefined;
+      if (streamQuote && streamQuote.last > 0) {
+        const marketValue = p.quantity * streamQuote.last;
+        const unrealizedGain = marketValue - p.costBasis;
+        return {
+          ...p,
+          currentPrice: streamQuote.last,
+          marketValue,
+          unrealizedGain,
+          unrealizedGainPercent: p.costBasis > 0 ? (unrealizedGain / p.costBasis) * 100 : 0,
+        };
+      }
+      return p;
+    });
+
     // Calculate total market value (including cash for percentage calculation)
-    const total = filtered.reduce((sum, p) => sum + (p.marketValue || 0), 0);
+    const total = withStreaming.reduce((sum, p) => sum + (p.marketValue || 0), 0);
 
     // Add percentage and enrich with security/account info and tags
-    let enriched: PositionWithPercent[] = filtered.map(p => ({
+    let enriched: PositionWithPercent[] = withStreaming.map(p => ({
       ...p,
       portfolioPercent: total > 0 ? ((p.marketValue || 0) / total) * 100 : 0,
       security: securityMap.get(p.securityId),
@@ -182,7 +210,7 @@ export default function Holdings() {
       totalMarketValue: total,
       totalCash: cashTotal,
     };
-  }, [positions, selectedAccount, selectedTagFilter, securityMap, accountMap, securityTagsMap]);
+  }, [positions, selectedAccount, selectedTagFilter, securityMap, accountMap, securityTagsMap, streamingQuotes]);
 
   const handleOpenTagModal = useCallback((position: PositionWithPercent) => {
     setTaggingPosition(position);
@@ -398,7 +426,31 @@ export default function Holdings() {
               </button>
             </>
           )}
-          {delayed && (
+          {streamStatus === 'connected' && (
+            <span className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-green-700 bg-green-50 border border-green-200 rounded-md" title="Streaming real-time quotes via Schwab WebSocket">
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              Live
+            </span>
+          )}
+          {streamStatus === 'connecting' && (
+            <span className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-yellow-700 bg-yellow-50 border border-yellow-200 rounded-md">
+              <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
+              Connecting...
+            </span>
+          )}
+          {streamStatus === 'outside_hours' && settings?.dataProvider === 'schwab' && (
+            <span className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-500 bg-gray-50 border border-gray-200 rounded-md" title="Streaming available during market hours (9:30-16:00 ET)">
+              <span className="w-2 h-2 rounded-full bg-gray-400" />
+              Market Closed
+            </span>
+          )}
+          {streamStatus === 'error' && (
+            <span className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-red-700 bg-red-50 border border-red-200 rounded-md" title="Streaming disconnected — using REST fallback">
+              <span className="w-2 h-2 rounded-full bg-red-500" />
+              Stream Error
+            </span>
+          )}
+          {delayed && streamStatus !== 'connected' && (
             <span className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md" title="Market data is delayed 15-20 minutes">
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />

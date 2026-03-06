@@ -859,6 +859,27 @@ export class SchwabService {
     }
   }
 
+  // --- Streaming support ---
+
+  async getUserPreference(): Promise<Record<string, unknown>> {
+    const response = await this.fetchApi('/trader/v1/userPreference');
+    if (!response.ok) {
+      throw new Error(`Failed to fetch user preference (${response.status})`);
+    }
+    return response.json();
+  }
+
+  getAccessToken(): string | null {
+    return this.tokens?.accessToken ?? null;
+  }
+
+  async ensureTokenFresh(): Promise<void> {
+    if (!this.tokens) throw new Error('SCHWAB_REAUTH_REQUIRED');
+    if (this.tokens.accessTokenExpiresAt <= Date.now() + 60000) {
+      await this.refreshAccessToken();
+    }
+  }
+
   // --- Helpers ---
 
   private findOrCreateAccount(db: Database, accountNumber: string, schwabType: string) {

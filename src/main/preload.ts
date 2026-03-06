@@ -142,4 +142,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   schwabGetOrders: (status?: string) => ipcRenderer.invoke('schwab:get-orders', status),
   schwabCancelOrder: (accountNumber: string, orderId: string) => ipcRenderer.invoke('schwab:cancel-order', accountNumber, orderId),
   schwabTestMarketData: () => ipcRenderer.invoke('schwab:test-market-data'),
+
+  // Streaming events (main -> renderer push)
+  onStreamingQuote: (callback: (quote: unknown) => void) => {
+    const handler = (_event: unknown, quote: unknown) => callback(quote);
+    ipcRenderer.on('streaming:quote', handler);
+    return () => { ipcRenderer.removeListener('streaming:quote', handler); };
+  },
+  onStreamingStatus: (callback: (status: string) => void) => {
+    const handler = (_event: unknown, status: string) => callback(status);
+    ipcRenderer.on('streaming:status', handler);
+    return () => { ipcRenderer.removeListener('streaming:status', handler); };
+  },
+
+  // Streaming control (renderer -> main)
+  streamingStart: (symbols: string[]) => ipcRenderer.invoke('streaming:start', symbols),
+  streamingStop: () => ipcRenderer.invoke('streaming:stop'),
+  streamingGetStatus: () => ipcRenderer.invoke('streaming:get-status'),
+  streamingUpdateSymbols: (symbols: string[]) => ipcRenderer.invoke('streaming:update-symbols', symbols),
 });
