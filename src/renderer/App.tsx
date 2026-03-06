@@ -8,9 +8,11 @@ import TaxLots from './pages/TaxLots';
 import TradingRules from './pages/TradingRules';
 import DecisionLogs from './pages/DecisionLogs';
 import Orders from './pages/Orders';
+import DailyRitual from './pages/DailyRitual';
 import Insights from './pages/Insights';
 import Settings from './pages/Settings';
 import Import from './pages/Import';
+import Watchlists from './pages/Watchlists';
 
 function App() {
   return (
@@ -23,8 +25,10 @@ function App() {
         <Route path="/tax-lots" element={<TaxLots />} />
         <Route path="/trading-rules" element={<TradingRules />} />
         <Route path="/decision-logs" element={<DecisionLogs />} />
+        <Route path="/daily-ritual" element={<DailyRitual />} />
         <Route path="/orders" element={<Orders />} />
         <Route path="/insights" element={<Insights />} />
+        <Route path="/watchlists" element={<Watchlists />} />
         <Route path="/import" element={<Import />} />
         <Route path="/settings" element={<Settings />} />
       </Routes>
