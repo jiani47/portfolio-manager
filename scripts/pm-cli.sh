@@ -157,6 +157,26 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
 " 2>/dev/null
     echo ""
 
+    # Watchlist alerts: items near target entry price
+    WL_ALERTS=$(sqlite3 "$DB" "
+      SELECT w.name, wi.symbol, wi.target_entry_price, ph.close_price,
+             printf('%.1f%%', (ph.close_price - wi.target_entry_price) / wi.target_entry_price * 100) as vs_target
+      FROM watchlist_items wi
+      JOIN watchlists w ON wi.watchlist_id = w.id
+      JOIN securities s ON wi.security_id = s.id
+      LEFT JOIN price_history ph ON ph.security_id = s.id AND ph.date = '$LATEST_DATE'
+      WHERE wi.target_entry_price IS NOT NULL
+        AND ph.close_price IS NOT NULL
+        AND ph.close_price <= wi.target_entry_price * 1.05
+      ORDER BY (ph.close_price - wi.target_entry_price) / wi.target_entry_price;
+    ")
+    if [ -n "$WL_ALERTS" ]; then
+      echo "=== Watchlist Alerts (within 5% of target) ==="
+      echo "$WL_ALERTS" | while IFS='|' read -r wl sym target price vs; do
+        echo "  $sym \$$price → target \$$target ($vs) [$wl]"
+      done
+      echo ""
+    fi
 
     echo "(Run 'pm-cli.sh refresh' to update prices. Use web search for news.)"
     echo "============================================"
