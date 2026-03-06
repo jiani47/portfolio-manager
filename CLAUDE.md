@@ -27,14 +27,65 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ## CLI Database Access
 `scripts/pm-cli.sh` provides direct database access for Claude Code:
 ```
-./scripts/pm-cli.sh positions    # List all non-cash positions with intents
-./scripts/pm-cli.sh cash         # List cash positions
-./scripts/pm-cli.sh intents      # List all position intents
-./scripts/pm-cli.sh accounts     # List accounts with book designation
-./scripts/pm-cli.sh summary      # Portfolio summary with tier coverage
+./scripts/pm-cli.sh morning                # Full morning: refresh + briefing + ritual status
+./scripts/pm-cli.sh portfolio              # Full view: positions + summary + intent changes
+./scripts/pm-cli.sh refresh                # Refresh prices via Schwab API (no app needed)
+./scripts/pm-cli.sh briefing               # Morning briefing: portfolio quotes, market context
+./scripts/pm-cli.sh positions              # List all non-cash positions with intents
+./scripts/pm-cli.sh cash                   # List cash positions
+./scripts/pm-cli.sh intents                # List all position intents
+./scripts/pm-cli.sh accounts               # List accounts with book designation
+./scripts/pm-cli.sh summary                # Portfolio summary with tier coverage
 ./scripts/pm-cli.sh set-intent <position_id> <tier> <thesis> <invalidation> [entry_style] [hold_period]
 ./scripts/pm-cli.sh set-book <account_id> <investing|trading>
+./scripts/pm-cli.sh ritual-today           # Show today's ritual (or "not started")
+./scripts/pm-cli.sh ritual-set <field> <value>  # Set a field on today's ritual
+./scripts/pm-cli.sh ritual-history [n]     # Last n rituals (default 5)
+./scripts/pm-cli.sh ritual-status          # Quick: regime set? action chosen? journal written?
+./scripts/pm-cli.sh intent-history [positionId]  # Show change log for a position (or all)
+./scripts/pm-cli.sh intent-changes-today   # Show all intent changes made today
+./scripts/pm-cli.sh watchlists               # List all watchlists
+./scripts/pm-cli.sh watchlist <name>          # Show items with prices vs targets
+./scripts/pm-cli.sh watchlist-add <list> <symbol> [target] [thesis]
+./scripts/pm-cli.sh watchlist-rm <list> <symbol>
+./scripts/pm-cli.sh watchlist-create <name> [description]
+./scripts/pm-cli.sh watchlist-delete <name>
 ```
+
+## Daily PM Ritual
+
+Run with the user in conversation. Four passes, 20-25 minutes total. Do this before the opening bell.
+
+### Pass 0 — Morning Briefing (2 min)
+1. Run `pm-cli.sh briefing` to pull market indices, portfolio quotes, and news
+2. Summarize: what's moving, any overnight news on holdings, index direction
+3. This gives context for the regime read — don't skip it
+
+### Pass 1 — Regime Read (5 min)
+1. Ask: "What's being rewarded today? What's being punished?"
+2. Ask: "Trend day or sorting day?"
+3. Record via: `pm-cli.sh ritual-set regime_rewarding "..."`, `ritual-set regime_punishing "..."`, `ritual-set regime_type trend|sorting`
+4. If sorting day: note that adds are disabled.
+
+### Pass 2 — Portfolio Alignment (10 min)
+1. Run `pm-cli.sh positions` to show current state
+2. Walk through positions by tier, ask:
+   - "Still the right tier?"
+   - "Is the market treating this the way you expect?"
+   - "Any position acting out of character?"
+3. Update intents if tier/thesis changes: `pm-cli.sh set-intent ...` (auto-logs the change)
+4. Show risk shape (run `pm-cli.sh summary`)
+5. At end: `pm-cli.sh intent-changes-today` to review what changed
+
+### Pass 3 — Decision Gate (5-10 min)
+1. Ask: "One action today: reduce, re-tier, add, or nothing?"
+2. Record: `pm-cli.sh ritual-set action_chosen "reduce|retier|add|nothing"`
+3. If action chosen, ask for detail and record: `pm-cli.sh ritual-set action_detail "..."`
+4. Enforce: action must be regime-consistent and tier-consistent
+
+### Journal (end of day)
+1. Ask: "One sentence — today I did/didn't act because ___"
+2. Record: `pm-cli.sh ritual-set journal "..."`
 
 ## Build Commands
 - `npm run build:main` — TypeScript compile main process
