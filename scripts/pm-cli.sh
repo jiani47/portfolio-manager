@@ -520,6 +520,33 @@ print(f'Updated {updated} prices, {errors} errors')
 " 2>/dev/null
 
     echo "Done. Run './scripts/pm-cli.sh briefing' to see the briefing."
+
+    # Check monitors against new prices
+    TRIGGERED=$(sqlite3 "$DB" "
+      SELECT m.id, m.symbol, m.direction, m.price_level, m.label, m.action_type, ph.close_price
+      FROM monitors m
+      JOIN securities s ON s.symbol = m.symbol
+      JOIN price_history ph ON ph.security_id = s.id AND ph.date = '$TODAY'
+      WHERE m.status = 'active'
+        AND (
+          (m.direction = 'below' AND ph.close_price <= m.price_level)
+          OR (m.direction = 'above' AND ph.close_price >= m.price_level)
+        );
+    ")
+    if [ -n "$TRIGGERED" ]; then
+      NOW_TS=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+      echo ""
+      echo "🚨 === MONITOR ALERTS ==="
+      echo "$TRIGGERED" | while IFS='|' read -r mid sym dir level label atype price; do
+        sqlite3 "$DB" "UPDATE monitors SET status = 'triggered', triggered_at = '$NOW_TS', updated_at = '$NOW_TS' WHERE id = '$mid';"
+        ICON="⬇️"
+        [ "$dir" = "above" ] && ICON="⬆️"
+        TYPE_TAG=""
+        [ "$atype" = "action_required" ] && TYPE_TAG=" [ACTION REQUIRED]"
+        echo "  $ICON $sym \$$price crossed $dir \$$level — $label$TYPE_TAG"
+      done
+      echo "========================="
+    fi
     ;;
   watchlists)
     sqlite3 -header -column "$DB" "
