@@ -45,6 +45,7 @@ import type {
   PositionIntentChangeLog,
   Watchlist,
   WatchlistItem,
+  Monitor,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -164,6 +165,15 @@ declare global {
       updateWatchlistItem: (id: string, data: Partial<WatchlistItem>) => Promise<WatchlistItem>;
       removeWatchlistItem: (id: string) => Promise<void>;
       getWatchlistSymbols: () => Promise<string[]>;
+
+      // Monitor operations
+      listMonitors: (status?: string) => Promise<Monitor[]>;
+      getMonitor: (id: string) => Promise<Monitor | null>;
+      createMonitor: (data: Partial<Monitor>) => Promise<Monitor>;
+      updateMonitorStatus: (id: string, status: string) => Promise<Monitor>;
+      deleteMonitor: (id: string) => Promise<void>;
+      checkMonitors: (symbol: string, price: number) => Promise<Monitor[]>;
+      getTriggeredMonitors: () => Promise<Monitor[]>;
 
       // Decision log operations
       getDecisionLogs: (filters?: DecisionLogFilters) => Promise<DecisionLog[]>;

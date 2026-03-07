@@ -559,6 +559,70 @@ export interface DecisionLogFilters {
   limit?: number;
 }
 
+// Daily ritual types
+export interface DailyRitual {
+  id: string;
+  date: string;
+  regimeRewarding?: string;
+  regimePunishing?: string;
+  regimeType?: 'trend' | 'sorting';
+  regimeNotes?: string;
+  actionChosen?: 'reduce' | 'retier' | 'add' | 'nothing';
+  actionDetail?: string;
+  journal?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Position intent change log types
+export interface PositionIntentChangeLog {
+  id: string;
+  positionId: string;
+  ritualDate?: string;
+  fieldChanged: string;
+  oldValue?: string;
+  newValue?: string;
+  reason?: string;
+  createdAt: string;
+}
+
+// Watchlist types
+export interface Watchlist {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WatchlistItem {
+  id: string;
+  watchlistId: string;
+  symbol: string;
+  securityId?: string;
+  notes?: string;
+  targetEntryPrice?: number;
+  targetExitPrice?: number;
+  thesisSnippet?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Monitor {
+  id: string;
+  symbol: string;
+  direction: 'above' | 'below';
+  priceLevel: number;
+  label: string;
+  actionType: 'informational' | 'action_required';
+  status: 'active' | 'triggered' | 'dismissed';
+  linkedPositionId?: string;
+  linkedWatchlistItemId?: string;
+  triggeredAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // Schwab order types
 export interface SchwabOrderRequest {
   accountNumber: string;

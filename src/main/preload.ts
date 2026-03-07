@@ -95,6 +95,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deletePositionIntent: (positionId: string) => ipcRenderer.invoke('db:position-intents:delete', positionId),
   listPositionIntents: () => ipcRenderer.invoke('db:position-intents:list'),
 
+  // Daily ritual operations
+  getDailyRitual: (date: string) => ipcRenderer.invoke('db:daily-rituals:get', date),
+  upsertDailyRitual: (date: string, data: unknown) => ipcRenderer.invoke('db:daily-rituals:upsert', date, data),
+  listDailyRituals: (limit?: number) => ipcRenderer.invoke('db:daily-rituals:list', limit),
+
+  // Intent change log operations
+  listIntentChangeLogs: (positionId?: string) => ipcRenderer.invoke('db:intent-change-logs:list', positionId),
+  listIntentChangeLogsByDate: (date: string) => ipcRenderer.invoke('db:intent-change-logs:list-by-date', date),
+
+  // Watchlist operations
+  listWatchlists: () => ipcRenderer.invoke('db:watchlists:list'),
+  getWatchlist: (id: string) => ipcRenderer.invoke('db:watchlists:get', id),
+  createWatchlist: (name: string, description?: string) => ipcRenderer.invoke('db:watchlists:create', name, description),
+  updateWatchlist: (id: string, data: unknown) => ipcRenderer.invoke('db:watchlists:update', id, data),
+  deleteWatchlist: (id: string) => ipcRenderer.invoke('db:watchlists:delete', id),
+  listWatchlistItems: (watchlistId?: string) => ipcRenderer.invoke('db:watchlist-items:list', watchlistId),
+  addWatchlistItem: (watchlistId: string, data: unknown) => ipcRenderer.invoke('db:watchlist-items:add', watchlistId, data),
+  updateWatchlistItem: (id: string, data: unknown) => ipcRenderer.invoke('db:watchlist-items:update', id, data),
+  removeWatchlistItem: (id: string) => ipcRenderer.invoke('db:watchlist-items:remove', id),
+  getWatchlistSymbols: () => ipcRenderer.invoke('db:watchlist-items:symbols'),
+
+  // Monitor operations
+  listMonitors: (status?: string) => ipcRenderer.invoke('db:monitors:list', status),
+  getMonitor: (id: string) => ipcRenderer.invoke('db:monitors:get', id),
+  createMonitor: (data: unknown) => ipcRenderer.invoke('db:monitors:create', data),
+  updateMonitorStatus: (id: string, status: string) => ipcRenderer.invoke('db:monitors:update-status', id, status),
+  deleteMonitor: (id: string) => ipcRenderer.invoke('db:monitors:delete', id),
+  checkMonitors: (symbol: string, price: number) => ipcRenderer.invoke('db:monitors:check', symbol, price),
+  getTriggeredMonitors: () => ipcRenderer.invoke('db:monitors:triggered'),
+
   // Decision log operations
   getDecisionLogs: (filters?: unknown) => ipcRenderer.invoke('db:decision-logs:list', filters),
   createDecisionLog: (log: unknown) => ipcRenderer.invoke('db:decision-logs:create', log),

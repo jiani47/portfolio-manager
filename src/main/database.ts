@@ -18,6 +18,11 @@ import {
   DecisionLogFilters,
   PriceHistory,
   PositionIntent,
+  DailyRitual,
+  PositionIntentChangeLog,
+  Watchlist,
+  WatchlistItem,
+  Monitor,
 } from '../shared/types';
 
 export class Database {
@@ -215,16 +220,53 @@ export class Database {
       )
     `);
 
-    // Seed default security tags if they don't exist
+    // Seed default holdings tags if they don't exist
     const existingTags = this.db.prepare('SELECT COUNT(*) as count FROM security_tags').get() as { count: number };
     if (existingTags.count === 0) {
       const now = new Date().toISOString();
       this.db.exec(`
         INSERT INTO security_tags (id, name, display_name, color, description, is_system, created_at) VALUES
-          ('tag-core', 'core', 'Core', 'blue', 'Long-term, high conviction positions', 1, '${now}'),
-          ('tag-satellite', 'satellite', 'Satellite', 'purple', 'Tactical positions for diversification', 1, '${now}'),
-          ('tag-event-macro', 'event_macro', 'Event/Macro', 'orange', 'Event-driven or macro plays', 1, '${now}')
+          ('tag-core', 'core', 'Core', 'blue', 'Highest conviction, long-term compounders', 1, '${now}'),
+          ('tag-growth', 'growth', 'Growth', 'green', 'High growth positions, sized for upside', 1, '${now}'),
+          ('tag-starter', 'starter', 'Starter', 'purple', 'Small tracking positions, building conviction', 1, '${now}'),
+          ('tag-watchlist', 'watchlist', 'Watchlist', 'gray', 'Monitoring only, no active position', 1, '${now}')
       `);
+    }
+
+    // Migrate legacy tags to new tier-aligned tags
+    try {
+      const satellite = this.db.prepare("SELECT id FROM security_tags WHERE id = 'tag-satellite'").get();
+      if (satellite) {
+        this.db.exec(`
+          UPDATE security_tags SET name = 'growth', display_name = 'Growth', color = 'green',
+            description = 'High growth positions, sized for upside' WHERE id = 'tag-satellite';
+          UPDATE security_tags SET id = 'tag-growth' WHERE id = 'tag-satellite';
+        `);
+      }
+      const eventMacro = this.db.prepare("SELECT id FROM security_tags WHERE id = 'tag-event-macro'").get();
+      if (eventMacro) {
+        this.db.exec(`
+          UPDATE security_tags SET name = 'starter', display_name = 'Starter', color = 'purple',
+            description = 'Small tracking positions, building conviction' WHERE id = 'tag-event-macro';
+          UPDATE security_tags SET id = 'tag-starter' WHERE id = 'tag-event-macro';
+        `);
+      }
+      // Update core description
+      this.db.exec(`
+        UPDATE security_tags SET description = 'Highest conviction, long-term compounders'
+        WHERE id = 'tag-core';
+      `);
+      // Add watchlist tag if missing
+      const watchlist = this.db.prepare("SELECT id FROM security_tags WHERE id = 'tag-watchlist'").get();
+      if (!watchlist) {
+        const now = new Date().toISOString();
+        this.db.exec(`
+          INSERT INTO security_tags (id, name, display_name, color, description, is_system, created_at)
+          VALUES ('tag-watchlist', 'watchlist', 'Watchlist', 'gray', 'Monitoring only, no active position', 1, '${now}')
+        `);
+      }
+    } catch {
+      // Migration already done or tags already in new format
     }
 
     // Trading rules table
@@ -333,6 +375,95 @@ export class Database {
 
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_position_intents_position ON position_intents(position_id);
+    `);
+
+    // Daily rituals table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS daily_rituals (
+        id TEXT PRIMARY KEY,
+        date TEXT NOT NULL UNIQUE,
+        regime_rewarding TEXT,
+        regime_punishing TEXT,
+        regime_type TEXT,
+        regime_notes TEXT,
+        action_chosen TEXT,
+        action_detail TEXT,
+        journal TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+
+    // Position intent change logs table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS position_intent_change_logs (
+        id TEXT PRIMARY KEY,
+        position_id TEXT NOT NULL,
+        ritual_date TEXT,
+        field_changed TEXT NOT NULL,
+        old_value TEXT,
+        new_value TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE CASCADE
+      )
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_intent_change_logs_position ON position_intent_change_logs(position_id);
+      CREATE INDEX IF NOT EXISTS idx_intent_change_logs_date ON position_intent_change_logs(ritual_date);
+    `);
+
+    // Watchlists tables
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS watchlists (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS watchlist_items (
+        id TEXT PRIMARY KEY,
+        watchlist_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        security_id TEXT,
+        notes TEXT,
+        target_entry_price REAL,
+        target_exit_price REAL,
+        thesis_snippet TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (watchlist_id) REFERENCES watchlists(id) ON DELETE CASCADE,
+        FOREIGN KEY (security_id) REFERENCES securities(id) ON DELETE SET NULL,
+        UNIQUE(watchlist_id, symbol)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_watchlist_items_watchlist ON watchlist_items(watchlist_id);
+      CREATE INDEX IF NOT EXISTS idx_watchlist_items_symbol ON watchlist_items(symbol);
+    `);
+
+    // Monitors table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS monitors (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        price_level REAL NOT NULL,
+        label TEXT NOT NULL,
+        action_type TEXT NOT NULL DEFAULT 'informational',
+        status TEXT NOT NULL DEFAULT 'active',
+        linked_position_id TEXT,
+        linked_watchlist_item_id TEXT,
+        triggered_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (linked_position_id) REFERENCES positions(id) ON DELETE SET NULL,
+        FOREIGN KEY (linked_watchlist_item_id) REFERENCES watchlist_items(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_monitors_symbol ON monitors(symbol);
+      CREATE INDEX IF NOT EXISTS idx_monitors_status ON monitors(status);
     `);
   }
 
@@ -1295,10 +1426,33 @@ export class Database {
     return row ? this.mapRowToPositionIntent(row) : null;
   }
 
-  upsertPositionIntent(positionId: string, data: Partial<PositionIntent>): PositionIntent {
+  upsertPositionIntent(positionId: string, data: Partial<PositionIntent>, ritualDate?: string, reason?: string): PositionIntent {
     if (!this.db) throw new Error('Database not initialized');
     const now = new Date().toISOString();
     const existing = this.getPositionIntent(positionId);
+
+    // Log changes if there's an existing intent
+    if (existing) {
+      const intentFields: { key: keyof PositionIntent; dbField: string }[] = [
+        { key: 'tier', dbField: 'tier' },
+        { key: 'thesis', dbField: 'thesis' },
+        { key: 'invalidation', dbField: 'invalidation' },
+        { key: 'entryStyle', dbField: 'entry_style' },
+        { key: 'targetHoldPeriod', dbField: 'target_hold_period' },
+      ];
+      for (const { key, dbField } of intentFields) {
+        if (data[key] !== undefined && data[key] !== existing[key]) {
+          this.createIntentChangeLog({
+            positionId,
+            ritualDate,
+            fieldChanged: dbField,
+            oldValue: (existing[key] as string) || undefined,
+            newValue: (data[key] as string) || undefined,
+            reason,
+          });
+        }
+      }
+    }
 
     if (existing) {
       const fields: string[] = ['updated_at = ?'];
@@ -1362,7 +1516,373 @@ export class Database {
     };
   };
 
+  // Daily Ritual CRUD
+  getDailyRitual(date: string): DailyRitual | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM daily_rituals WHERE date = ?');
+    const row = stmt.get(date);
+    return row ? this.mapRowToDailyRitual(row) : null;
+  }
+
+  upsertDailyRitual(date: string, data: Partial<DailyRitual>): DailyRitual {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const existing = this.getDailyRitual(date);
+
+    if (existing) {
+      const fields: string[] = ['updated_at = ?'];
+      const values: unknown[] = [now];
+
+      if (data.regimeRewarding !== undefined) { fields.push('regime_rewarding = ?'); values.push(data.regimeRewarding || null); }
+      if (data.regimePunishing !== undefined) { fields.push('regime_punishing = ?'); values.push(data.regimePunishing || null); }
+      if (data.regimeType !== undefined) { fields.push('regime_type = ?'); values.push(data.regimeType || null); }
+      if (data.regimeNotes !== undefined) { fields.push('regime_notes = ?'); values.push(data.regimeNotes || null); }
+      if (data.actionChosen !== undefined) { fields.push('action_chosen = ?'); values.push(data.actionChosen || null); }
+      if (data.actionDetail !== undefined) { fields.push('action_detail = ?'); values.push(data.actionDetail || null); }
+      if (data.journal !== undefined) { fields.push('journal = ?'); values.push(data.journal || null); }
+
+      values.push(existing.id);
+      const stmt = this.db.prepare(`UPDATE daily_rituals SET ${fields.join(', ')} WHERE id = ?`);
+      stmt.run(...values);
+      return this.getDailyRitual(date)!;
+    } else {
+      const id = uuidv4();
+      const stmt = this.db.prepare(`
+        INSERT INTO daily_rituals (id, date, regime_rewarding, regime_punishing, regime_type, regime_notes, action_chosen, action_detail, journal, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      stmt.run(
+        id,
+        date,
+        data.regimeRewarding || null,
+        data.regimePunishing || null,
+        data.regimeType || null,
+        data.regimeNotes || null,
+        data.actionChosen || null,
+        data.actionDetail || null,
+        data.journal || null,
+        now,
+        now
+      );
+      return this.getDailyRitual(date)!;
+    }
+  }
+
+  listDailyRituals(limit: number = 30): DailyRitual[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM daily_rituals ORDER BY date DESC LIMIT ?');
+    return stmt.all(limit).map(this.mapRowToDailyRitual);
+  }
+
+  private mapRowToDailyRitual = (row: unknown): DailyRitual => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      date: r.date as string,
+      regimeRewarding: r.regime_rewarding as string | undefined,
+      regimePunishing: r.regime_punishing as string | undefined,
+      regimeType: r.regime_type as DailyRitual['regimeType'],
+      regimeNotes: r.regime_notes as string | undefined,
+      actionChosen: r.action_chosen as DailyRitual['actionChosen'],
+      actionDetail: r.action_detail as string | undefined,
+      journal: r.journal as string | undefined,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
+
+  // Intent Change Log CRUD
+  createIntentChangeLog(data: Omit<PositionIntentChangeLog, 'id' | 'createdAt'>): PositionIntentChangeLog {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare(`
+      INSERT INTO position_intent_change_logs (id, position_id, ritual_date, field_changed, old_value, new_value, reason, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(id, data.positionId, data.ritualDate || null, data.fieldChanged, data.oldValue || null, data.newValue || null, data.reason || null, now);
+    return { id, ...data, createdAt: now };
+  }
+
+  listIntentChangeLogs(positionId?: string): PositionIntentChangeLog[] {
+    if (!this.db) throw new Error('Database not initialized');
+    if (positionId) {
+      const stmt = this.db.prepare('SELECT * FROM position_intent_change_logs WHERE position_id = ? ORDER BY created_at DESC');
+      return stmt.all(positionId).map(this.mapRowToIntentChangeLog);
+    }
+    const stmt = this.db.prepare('SELECT * FROM position_intent_change_logs ORDER BY created_at DESC');
+    return stmt.all().map(this.mapRowToIntentChangeLog);
+  }
+
+  listIntentChangeLogsByDate(date: string): PositionIntentChangeLog[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM position_intent_change_logs WHERE ritual_date = ? ORDER BY created_at DESC');
+    return stmt.all(date).map(this.mapRowToIntentChangeLog);
+  }
+
+  private mapRowToIntentChangeLog = (row: unknown): PositionIntentChangeLog => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      positionId: r.position_id as string,
+      ritualDate: r.ritual_date as string | undefined,
+      fieldChanged: r.field_changed as string,
+      oldValue: r.old_value as string | undefined,
+      newValue: r.new_value as string | undefined,
+      reason: r.reason as string | undefined,
+      createdAt: r.created_at as string,
+    };
+  };
+
+  // Watchlist CRUD
+  listWatchlists(): Watchlist[] {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare('SELECT * FROM watchlists ORDER BY name').all().map(this.mapRowToWatchlist);
+  }
+
+  getWatchlist(id: string): Watchlist | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM watchlists WHERE id = ?').get(id);
+    return row ? this.mapRowToWatchlist(row) : null;
+  }
+
+  getWatchlistByName(name: string): Watchlist | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM watchlists WHERE name = ?').get(name);
+    return row ? this.mapRowToWatchlist(row) : null;
+  }
+
+  createWatchlist(name: string, description?: string): Watchlist {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    this.db.prepare(
+      'INSERT INTO watchlists (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(id, name, description || null, now, now);
+    return this.getWatchlist(id)!;
+  }
+
+  updateWatchlist(id: string, data: Partial<Pick<Watchlist, 'name' | 'description'>>): Watchlist {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const fields: string[] = ['updated_at = ?'];
+    const values: unknown[] = [now];
+    if (data.name !== undefined) { fields.push('name = ?'); values.push(data.name); }
+    if (data.description !== undefined) { fields.push('description = ?'); values.push(data.description); }
+    values.push(id);
+    this.db.prepare(`UPDATE watchlists SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    return this.getWatchlist(id)!;
+  }
+
+  deleteWatchlist(id: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare('DELETE FROM watchlists WHERE id = ?').run(id);
+  }
+
+  // Watchlist Item CRUD
+  listWatchlistItems(watchlistId?: string): WatchlistItem[] {
+    if (!this.db) throw new Error('Database not initialized');
+    if (watchlistId) {
+      return this.db.prepare('SELECT * FROM watchlist_items WHERE watchlist_id = ? ORDER BY symbol')
+        .all(watchlistId).map(this.mapRowToWatchlistItem);
+    }
+    return this.db.prepare('SELECT * FROM watchlist_items ORDER BY symbol')
+      .all().map(this.mapRowToWatchlistItem);
+  }
+
+  addWatchlistItem(watchlistId: string, data: {
+    symbol: string;
+    notes?: string;
+    targetEntryPrice?: number;
+    targetExitPrice?: number;
+    thesisSnippet?: string;
+  }): WatchlistItem {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    const symbol = data.symbol.toUpperCase();
+
+    // Ensure security exists for this symbol
+    let securityId: string | null = null;
+    const existing = this.db.prepare('SELECT id FROM securities WHERE symbol = ?').get(symbol) as { id: string } | undefined;
+    if (existing) {
+      securityId = existing.id;
+    } else {
+      securityId = uuidv4();
+      this.db.prepare(
+        'INSERT INTO securities (id, symbol, name, type, currency, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(securityId, symbol, symbol, 'stock', 'USD', now);
+    }
+
+    this.db.prepare(`
+      INSERT INTO watchlist_items (id, watchlist_id, symbol, security_id, notes, target_entry_price, target_exit_price, thesis_snippet, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, watchlistId, symbol, securityId, data.notes || null,
+      data.targetEntryPrice || null, data.targetExitPrice || null, data.thesisSnippet || null, now, now);
+    return this.getWatchlistItem(id)!;
+  }
+
+  getWatchlistItem(id: string): WatchlistItem | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM watchlist_items WHERE id = ?').get(id);
+    return row ? this.mapRowToWatchlistItem(row) : null;
+  }
+
+  updateWatchlistItem(id: string, data: Partial<Pick<WatchlistItem, 'notes' | 'targetEntryPrice' | 'targetExitPrice' | 'thesisSnippet'>>): WatchlistItem {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const fields: string[] = ['updated_at = ?'];
+    const values: unknown[] = [now];
+    if (data.notes !== undefined) { fields.push('notes = ?'); values.push(data.notes); }
+    if (data.targetEntryPrice !== undefined) { fields.push('target_entry_price = ?'); values.push(data.targetEntryPrice); }
+    if (data.targetExitPrice !== undefined) { fields.push('target_exit_price = ?'); values.push(data.targetExitPrice); }
+    if (data.thesisSnippet !== undefined) { fields.push('thesis_snippet = ?'); values.push(data.thesisSnippet); }
+    values.push(id);
+    this.db.prepare(`UPDATE watchlist_items SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    return this.getWatchlistItem(id)!;
+  }
+
+  removeWatchlistItem(id: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare('DELETE FROM watchlist_items WHERE id = ?').run(id);
+  }
+
+  getWatchlistSymbols(): string[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.prepare('SELECT DISTINCT symbol FROM watchlist_items ORDER BY symbol').all() as { symbol: string }[];
+    return rows.map(r => r.symbol);
+  }
+
+  // Monitor CRUD methods
+  listMonitors(status?: string): Monitor[] {
+    if (!this.db) throw new Error('Database not initialized');
+    if (status) {
+      return this.db.prepare('SELECT * FROM monitors WHERE status = ? ORDER BY symbol, direction')
+        .all(status).map(this.mapRowToMonitor);
+    }
+    return this.db.prepare('SELECT * FROM monitors ORDER BY symbol, direction')
+      .all().map(this.mapRowToMonitor);
+  }
+
+  getMonitor(id: string): Monitor | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM monitors WHERE id = ?').get(id);
+    return row ? this.mapRowToMonitor(row) : null;
+  }
+
+  createMonitor(data: {
+    symbol: string;
+    direction: 'above' | 'below';
+    priceLevel: number;
+    label: string;
+    actionType?: 'informational' | 'action_required';
+    linkedPositionId?: string;
+    linkedWatchlistItemId?: string;
+  }): Monitor {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO monitors (id, symbol, direction, price_level, label, action_type, status, linked_position_id, linked_watchlist_item_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+    `).run(id, data.symbol.toUpperCase(), data.direction, data.priceLevel, data.label,
+      data.actionType || 'informational', data.linkedPositionId || null,
+      data.linkedWatchlistItemId || null, now, now);
+    return this.getMonitor(id)!;
+  }
+
+  updateMonitorStatus(id: string, status: 'active' | 'triggered' | 'dismissed'): Monitor {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const triggeredAt = status === 'triggered' ? now : null;
+    if (triggeredAt) {
+      this.db.prepare('UPDATE monitors SET status = ?, triggered_at = ?, updated_at = ? WHERE id = ?')
+        .run(status, triggeredAt, now, id);
+    } else {
+      this.db.prepare('UPDATE monitors SET status = ?, updated_at = ? WHERE id = ?')
+        .run(status, now, id);
+    }
+    return this.getMonitor(id)!;
+  }
+
+  deleteMonitor(id: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare('DELETE FROM monitors WHERE id = ?').run(id);
+  }
+
+  checkMonitors(symbol: string, price: number): Monitor[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const active = this.db.prepare(
+      'SELECT * FROM monitors WHERE symbol = ? AND status = ?'
+    ).all(symbol.toUpperCase(), 'active').map(this.mapRowToMonitor);
+
+    const triggered: Monitor[] = [];
+    const now = new Date().toISOString();
+
+    for (const m of active) {
+      const fires = (m.direction === 'below' && price <= m.priceLevel) ||
+                    (m.direction === 'above' && price >= m.priceLevel);
+      if (fires) {
+        this.db.prepare('UPDATE monitors SET status = ?, triggered_at = ?, updated_at = ? WHERE id = ?')
+          .run('triggered', now, now, m.id);
+        triggered.push({ ...m, status: 'triggered', triggeredAt: now });
+      }
+    }
+    return triggered;
+  }
+
+  getTriggeredMonitors(): Monitor[] {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare('SELECT * FROM monitors WHERE status = ? ORDER BY triggered_at DESC')
+      .all('triggered').map(this.mapRowToMonitor);
+  }
+
   // Row mappers
+  private mapRowToWatchlist = (row: unknown): Watchlist => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      description: r.description as string | undefined,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
+
+  private mapRowToWatchlistItem = (row: unknown): WatchlistItem => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      watchlistId: r.watchlist_id as string,
+      symbol: r.symbol as string,
+      securityId: r.security_id as string | undefined,
+      notes: r.notes as string | undefined,
+      targetEntryPrice: r.target_entry_price as number | undefined,
+      targetExitPrice: r.target_exit_price as number | undefined,
+      thesisSnippet: r.thesis_snippet as string | undefined,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
+
+  private mapRowToMonitor = (row: unknown): Monitor => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      symbol: r.symbol as string,
+      direction: r.direction as 'above' | 'below',
+      priceLevel: r.price_level as number,
+      label: r.label as string,
+      actionType: (r.action_type as string) as 'informational' | 'action_required',
+      status: (r.status as string) as 'active' | 'triggered' | 'dismissed',
+      linkedPositionId: r.linked_position_id as string | undefined,
+      linkedWatchlistItemId: r.linked_watchlist_item_id as string | undefined,
+      triggeredAt: r.triggered_at as string | undefined,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
+
   private mapRowToAccount = (row: unknown): Account => {
     const r = row as Record<string, unknown>;
     return {

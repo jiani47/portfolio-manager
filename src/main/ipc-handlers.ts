@@ -336,6 +336,36 @@ export function setupIpcHandlers(
   ipcMain.handle('db:position-intents:delete', (_, positionId) => db.deletePositionIntent(positionId));
   ipcMain.handle('db:position-intents:list', () => db.listPositionIntents());
 
+  // Daily ritual handlers
+  ipcMain.handle('db:daily-rituals:get', (_, date) => db.getDailyRitual(date));
+  ipcMain.handle('db:daily-rituals:upsert', (_, date, data) => db.upsertDailyRitual(date, data));
+  ipcMain.handle('db:daily-rituals:list', (_, limit) => db.listDailyRituals(limit));
+
+  // Intent change log handlers
+  ipcMain.handle('db:intent-change-logs:list', (_, positionId) => db.listIntentChangeLogs(positionId));
+  ipcMain.handle('db:intent-change-logs:list-by-date', (_, date) => db.listIntentChangeLogsByDate(date));
+
+  // Watchlist handlers
+  ipcMain.handle('db:watchlists:list', () => db.listWatchlists());
+  ipcMain.handle('db:watchlists:get', (_, id) => db.getWatchlist(id));
+  ipcMain.handle('db:watchlists:create', (_, name, description) => db.createWatchlist(name, description));
+  ipcMain.handle('db:watchlists:update', (_, id, data) => db.updateWatchlist(id, data));
+  ipcMain.handle('db:watchlists:delete', (_, id) => db.deleteWatchlist(id));
+  ipcMain.handle('db:watchlist-items:list', (_, watchlistId) => db.listWatchlistItems(watchlistId));
+  ipcMain.handle('db:watchlist-items:add', (_, watchlistId, data) => db.addWatchlistItem(watchlistId, data));
+  ipcMain.handle('db:watchlist-items:update', (_, id, data) => db.updateWatchlistItem(id, data));
+  ipcMain.handle('db:watchlist-items:remove', (_, id) => db.removeWatchlistItem(id));
+  ipcMain.handle('db:watchlist-items:symbols', () => db.getWatchlistSymbols());
+
+  // Monitor handlers
+  ipcMain.handle('db:monitors:list', (_, status) => db.listMonitors(status));
+  ipcMain.handle('db:monitors:get', (_, id) => db.getMonitor(id));
+  ipcMain.handle('db:monitors:create', (_, data) => db.createMonitor(data));
+  ipcMain.handle('db:monitors:update-status', (_, id, status) => db.updateMonitorStatus(id, status));
+  ipcMain.handle('db:monitors:delete', (_, id) => db.deleteMonitor(id));
+  ipcMain.handle('db:monitors:check', (_, symbol, price) => db.checkMonitors(symbol, price));
+  ipcMain.handle('db:monitors:triggered', () => db.getTriggeredMonitors());
+
   // Decision log handlers
   ipcMain.handle('db:decision-logs:list', (_, filters) => db.listDecisionLogs(filters));
   ipcMain.handle('db:decision-logs:create', (_, log) => db.createDecisionLog(log));
