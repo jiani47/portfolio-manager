@@ -51,6 +51,27 @@ case "$1" in
     echo "  Prices as of: $LATEST_DATE"
     echo ""
 
+    # Show triggered monitors at top of briefing
+    TRIGGERED_MONITORS=$(sqlite3 "$DB" "
+      SELECT m.symbol, m.direction, printf('%.2f', m.price_level) as level,
+             m.label, m.action_type, substr(m.triggered_at, 1, 10) as triggered_date
+      FROM monitors m
+      WHERE m.status = 'triggered'
+      ORDER BY m.action_type DESC, m.triggered_at DESC;
+    ")
+    if [ -n "$TRIGGERED_MONITORS" ]; then
+      echo "🚨 === TRIGGERED MONITORS ==="
+      echo "$TRIGGERED_MONITORS" | while IFS='|' read -r sym dir level label atype tdate; do
+        ICON="⬇️"
+        [ "$dir" = "above" ] && ICON="⬆️"
+        TYPE_TAG=""
+        [ "$atype" = "action_required" ] && TYPE_TAG=" ⚠️  ACTION REQUIRED"
+        echo "  $ICON $sym $dir \$$level — $label$TYPE_TAG (triggered $tdate)"
+      done
+      echo "=============================="
+      echo ""
+    fi
+
     # Market context: FMP for SPY (free tier) + index symbols from DB
     FMP_KEY=$(get_fmp_key)
     echo "=== Market Context ==="
