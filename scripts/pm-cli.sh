@@ -641,6 +641,62 @@ for line in sys.stdin:
     sqlite3 "$DB" "DELETE FROM watchlists WHERE name = '$(echo "$WL_NAME" | sed "s/'/''/g")';"
     echo "Deleted watchlist: $WL_NAME"
     ;;
+  monitors)
+    echo "=== Active Monitors ==="
+    sqlite3 -header -column "$DB" "
+      SELECT id, symbol, direction, printf('%.2f', price_level) as price,
+             label, action_type, status,
+             CASE WHEN triggered_at IS NOT NULL THEN substr(triggered_at, 1, 10) ELSE '' END as triggered
+      FROM monitors
+      WHERE status IN ('active', 'triggered')
+      ORDER BY status DESC, symbol;
+    "
+    ;;
+  monitor-add)
+    SYMBOL="$2"; DIRECTION="$3"; PRICE="$4"; LABEL="$5"; ACTION_TYPE="${6:-informational}"
+    if [ -z "$SYMBOL" ] || [ -z "$DIRECTION" ] || [ -z "$PRICE" ] || [ -z "$LABEL" ]; then
+      echo "Usage: pm-cli.sh monitor-add <symbol> <above|below> <price> <label> [action_required]"
+      exit 1
+    fi
+    SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+    if [ "$DIRECTION" != "above" ] && [ "$DIRECTION" != "below" ]; then
+      echo "Direction must be 'above' or 'below'"
+      exit 1
+    fi
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    sqlite3 "$DB" "INSERT INTO monitors (id, symbol, direction, price_level, label, action_type, status, created_at, updated_at) VALUES ('$ID', '$SYMBOL', '$DIRECTION', $PRICE, '$(echo "$LABEL" | sed "s/'/''/g")', '$ACTION_TYPE', 'active', '$NOW', '$NOW');"
+    echo "Monitor added: $SYMBOL $DIRECTION \$$PRICE — $LABEL [$ACTION_TYPE]"
+    ;;
+  monitor-dismiss)
+    MON_ID="$2"
+    if [ -z "$MON_ID" ]; then
+      echo "Usage: pm-cli.sh monitor-dismiss <id>"
+      exit 1
+    fi
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    sqlite3 "$DB" "UPDATE monitors SET status = 'dismissed', updated_at = '$NOW' WHERE id = '$MON_ID';"
+    echo "Monitor dismissed: $MON_ID"
+    ;;
+  monitor-rm)
+    MON_ID="$2"
+    if [ -z "$MON_ID" ]; then
+      echo "Usage: pm-cli.sh monitor-rm <id>"
+      exit 1
+    fi
+    sqlite3 "$DB" "DELETE FROM monitors WHERE id = '$MON_ID';"
+    echo "Monitor deleted: $MON_ID"
+    ;;
+  monitor-reset)
+    MON_ID="$2"
+    if [ -z "$MON_ID" ]; then
+      echo "Usage: pm-cli.sh monitor-reset <id>"
+      exit 1
+    fi
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    sqlite3 "$DB" "UPDATE monitors SET status = 'active', triggered_at = NULL, updated_at = '$NOW' WHERE id = '$MON_ID';"
+    echo "Monitor re-armed: $MON_ID"
+    ;;
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -666,5 +722,10 @@ for line in sys.stdin:
     echo "  watchlist-rm        - Remove item: <list> <symbol>"
     echo "  watchlist-create    - Create watchlist: <name> [description]"
     echo "  watchlist-delete    - Delete watchlist: <name>"
+    echo "  monitors            - List active and triggered monitors"
+    echo "  monitor-add         - Add monitor: <symbol> <above|below> <price> <label> [action_required]"
+    echo "  monitor-dismiss     - Dismiss triggered monitor: <id>"
+    echo "  monitor-rm          - Delete monitor: <id>"
+    echo "  monitor-reset       - Re-arm monitor: <id>"
     ;;
 esac
