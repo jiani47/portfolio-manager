@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { BrowserWindow } from 'electron';
+import { BrowserWindow, Notification } from 'electron';
 import Store from 'electron-store';
 import { SchwabService } from './schwab-service';
 import { Database } from './database';
@@ -387,6 +387,28 @@ export class SchwabStreamService {
       if (quote.last === 0 && item['3'] === undefined) continue;
 
       this.latestQuotes.set(symbol, quote);
+
+      // Check monitors for this symbol
+      if (this.db && quote.last > 0) {
+        try {
+          const triggered = this.db.checkMonitors(symbol, quote.last);
+          for (const monitor of triggered) {
+            const icon = monitor.direction === 'below' ? '⬇️' : '⬆️';
+            const notification = new Notification({
+              title: `${monitor.actionType === 'action_required' ? '⚠️ ' : ''}Monitor Alert: ${symbol}`,
+              body: `${icon} ${symbol} $${quote.last.toFixed(2)} crossed ${monitor.direction} $${monitor.priceLevel} — ${monitor.label}`,
+            });
+            notification.show();
+
+            // Also notify renderer
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('monitor:triggered', monitor);
+            }
+          }
+        } catch (e) {
+          console.error('Monitor check error:', e);
+        }
+      }
 
       // Push to renderer
       if (mainWindow && !mainWindow.isDestroyed()) {
