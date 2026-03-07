@@ -519,6 +519,9 @@ for sym, entry in response.items():
     q = entry.get('quote', entry)
     price = q.get('lastPrice') or q.get('mark') or 0
     volume = q.get('totalVolume') or 0
+    open_price = q.get('openPrice') or 0
+    high_price = q.get('highPrice') or 0
+    low_price = q.get('lowPrice') or 0
     if price <= 0:
         errors += 1
         continue
@@ -527,12 +530,12 @@ for sym, entry in response.items():
         continue
     row_id = str(uuid.uuid4())
     cur.execute('''
-        INSERT OR REPLACE INTO price_history (id, security_id, date, close_price, volume, fetched_at)
+        INSERT OR REPLACE INTO price_history (id, security_id, date, open_price, high_price, low_price, close_price, volume, fetched_at)
         VALUES (
             COALESCE((SELECT id FROM price_history WHERE security_id = ? AND date = ?), ?),
-            ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?
         )
-    ''', (sec_id, today, row_id, sec_id, today, price, volume, now))
+    ''', (sec_id, today, row_id, sec_id, today, open_price, high_price, low_price, price, volume, now))
     updated += 1
 
 conn.commit()
