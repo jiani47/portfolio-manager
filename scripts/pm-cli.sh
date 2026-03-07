@@ -745,6 +745,138 @@ for line in sys.stdin:
     sqlite3 "$DB" "UPDATE monitors SET status = 'active', triggered_at = NULL, updated_at = '$NOW' WHERE id = '$MON_ID';"
     echo "Monitor re-armed: $MON_ID"
     ;;
+  backfill)
+    # Backfill 3yr daily price history from Schwab API
+    # Usage: pm-cli.sh backfill [symbol]
+    if [ ! -f "$APP_CONFIG" ]; then
+      echo "ERROR: App config not found at $APP_CONFIG"
+      echo "Run the Electron app at least once first."
+      exit 1
+    fi
+
+    # Refresh Schwab access token (same logic as refresh command)
+    SCHWAB_CLIENT_ID=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientId',''))" 2>/dev/null)
+    SCHWAB_CLIENT_SECRET=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientSecret',''))" 2>/dev/null)
+    REFRESH_TOKEN=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshToken',''))" 2>/dev/null)
+    REFRESH_EXPIRES=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshTokenExpiresAt',0))" 2>/dev/null)
+
+    if [ -z "$SCHWAB_CLIENT_ID" ] || [ -z "$REFRESH_TOKEN" ]; then
+      echo "ERROR: Schwab not configured or not connected in the app."
+      exit 1
+    fi
+
+    NOW_MS=$(python3 -c "import time; print(int(time.time()*1000))")
+    if [ "$REFRESH_EXPIRES" -le "$NOW_MS" ] 2>/dev/null; then
+      echo "ERROR: Schwab refresh token expired. Reconnect in the app."
+      exit 1
+    fi
+
+    echo "Refreshing Schwab access token..."
+    BASIC_AUTH=$(printf "%s:%s" "$SCHWAB_CLIENT_ID" "$SCHWAB_CLIENT_SECRET" | base64)
+    TOKEN_RESPONSE=$(curl -s -X POST "$SCHWAB_TOKEN_URL" \
+      -H "Authorization: Basic $BASIC_AUTH" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "grant_type=refresh_token&refresh_token=$REFRESH_TOKEN")
+
+    ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null)
+
+    if [ -z "$ACCESS_TOKEN" ]; then
+      echo "ERROR: Failed to refresh access token."
+      echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error_description', d.get('error', 'Unknown error')))" 2>/dev/null
+      exit 1
+    fi
+
+    # Save new tokens back to config.json
+    python3 -c "
+import json, time
+with open('$APP_CONFIG') as f:
+    cfg = json.load(f)
+resp = json.loads('''$TOKEN_RESPONSE''')
+now = int(time.time() * 1000)
+tokens = cfg.get('settings', {}).get('schwabTokens', {})
+tokens['accessToken'] = resp['access_token']
+tokens['refreshToken'] = resp.get('refresh_token', tokens.get('refreshToken', ''))
+tokens['accessTokenExpiresAt'] = now + (resp.get('expires_in', 1800) * 1000)
+tokens['refreshTokenExpiresAt'] = now + (7 * 24 * 60 * 60 * 1000)
+tokens['tokenType'] = resp.get('token_type', 'Bearer')
+tokens['scope'] = resp.get('scope', tokens.get('scope'))
+cfg['settings']['schwabTokens'] = tokens
+with open('$APP_CONFIG', 'w') as f:
+    json.dump(cfg, f, indent=2)
+" 2>/dev/null
+    echo "Access token refreshed."
+
+    # Get symbols to backfill
+    if [ -n "$2" ]; then
+      SYMBOLS=$(echo "$2" | tr '[:lower:]' '[:upper:]')
+    else
+      SYMBOLS=$(sqlite3 "$DB" "
+        SELECT DISTINCT symbol FROM (
+          SELECT s.symbol FROM positions p JOIN securities s ON p.security_id = s.id
+          WHERE s.type != 'cash' AND s.symbol != ''
+          UNION
+          SELECT symbol FROM watchlist_items
+        ) ORDER BY symbol;
+      ")
+    fi
+
+    SYMBOL_COUNT=$(echo "$SYMBOLS" | wc -l | tr -d ' ')
+    echo "Backfilling 3yr price history for $SYMBOL_COUNT symbol(s)..."
+
+    NOW_TS=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+    for SYM in $SYMBOLS; do
+      HIST_RESPONSE=$(curl -s "${SCHWAB_API}/marketdata/v1/pricehistory?symbol=${SYM}&periodType=year&period=3&frequencyType=daily" \
+        -H "Authorization: Bearer ${ACCESS_TOKEN}")
+
+      CANDLE_COUNT=$(python3 -c "
+import json, sys, sqlite3, uuid
+from datetime import datetime, timezone
+
+response = json.loads('''${HIST_RESPONSE}''')
+candles = response.get('candles', [])
+db = '$DB'
+now = '$NOW_TS'
+
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+
+# Look up security_id
+cur.execute('SELECT id FROM securities WHERE symbol = ?', ('${SYM}',))
+row = cur.fetchone()
+if not row:
+    print('0 (security not found)')
+    conn.close()
+    sys.exit(0)
+sec_id = row[0]
+
+count = 0
+for c in candles:
+    epoch_ms = c.get('datetime', 0)
+    date_str = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
+    open_p = c.get('open', 0)
+    high_p = c.get('high', 0)
+    low_p = c.get('low', 0)
+    close_p = c.get('close', 0)
+    vol = c.get('volume', 0)
+    row_id = str(uuid.uuid4())
+    cur.execute('''
+        INSERT OR IGNORE INTO price_history (id, security_id, date, open_price, high_price, low_price, close_price, volume, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (row_id, sec_id, date_str, open_p, high_p, low_p, close_p, vol, now))
+    count += cur.rowcount
+
+conn.commit()
+conn.close()
+print(f'{len(candles)} candles ({count} new)')
+" 2>/dev/null)
+
+      echo "  Backfilling ${SYM}... ${CANDLE_COUNT}"
+      sleep 0.5
+    done
+
+    echo "Backfill complete."
+    ;;
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -775,5 +907,6 @@ for line in sys.stdin:
     echo "  monitor-dismiss     - Dismiss triggered monitor: <id>"
     echo "  monitor-rm          - Delete monitor: <id>"
     echo "  monitor-reset       - Re-arm monitor: <id>"
+    echo "  backfill [symbol]   - Backfill 3yr price history from Schwab (all symbols if no arg)"
     ;;
 esac
