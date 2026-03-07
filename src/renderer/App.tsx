@@ -13,6 +13,7 @@ import Insights from './pages/Insights';
 import Settings from './pages/Settings';
 import Import from './pages/Import';
 import Watchlists from './pages/Watchlists';
+import Monitors from './pages/Monitors';
 
 function App() {
   return (
@@ -29,6 +30,7 @@ function App() {
         <Route path="/orders" element={<Orders />} />
         <Route path="/insights" element={<Insights />} />
         <Route path="/watchlists" element={<Watchlists />} />
+        <Route path="/monitors" element={<Monitors />} />
         <Route path="/import" element={<Import />} />
         <Route path="/settings" element={<Settings />} />
       </Routes>

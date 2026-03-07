@@ -1662,3 +1662,41 @@ export function useWatchlists() {
 
   return { watchlists, items, loading, fetchWatchlists, fetchItems, createWatchlist, deleteWatchlist, addItem, updateItem, removeItem };
 }
+
+export function useMonitors() {
+  const [monitors, setMonitors] = useState<Monitor[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchMonitors = useCallback(async (status?: string) => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.listMonitors(status);
+      setMonitors(data);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const createMonitor = useCallback(async (data: Partial<Monitor>) => {
+    const m = await window.electronAPI.createMonitor(data);
+    setMonitors(prev => [...prev, m]);
+    return m;
+  }, []);
+
+  const dismissMonitor = useCallback(async (id: string) => {
+    const updated = await window.electronAPI.updateMonitorStatus(id, 'dismissed');
+    setMonitors(prev => prev.map(m => m.id === id ? updated : m));
+  }, []);
+
+  const resetMonitor = useCallback(async (id: string) => {
+    const updated = await window.electronAPI.updateMonitorStatus(id, 'active');
+    setMonitors(prev => prev.map(m => m.id === id ? updated : m));
+  }, []);
+
+  const deleteMonitor = useCallback(async (id: string) => {
+    await window.electronAPI.deleteMonitor(id);
+    setMonitors(prev => prev.filter(m => m.id !== id));
+  }, []);
+
+  return { monitors, loading, fetchMonitors, createMonitor, dismissMonitor, resetMonitor, deleteMonitor };
+}
