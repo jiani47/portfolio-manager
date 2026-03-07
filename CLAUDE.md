@@ -50,6 +50,11 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh watchlist-rm <list> <symbol>
 ./scripts/pm-cli.sh watchlist-create <name> [description]
 ./scripts/pm-cli.sh watchlist-delete <name>
+./scripts/pm-cli.sh monitors                # List active + triggered monitors
+./scripts/pm-cli.sh monitor-add <symbol> <above|below> <price> <label> [action_required]
+./scripts/pm-cli.sh monitor-dismiss <id>     # Dismiss a triggered monitor
+./scripts/pm-cli.sh monitor-rm <id>          # Delete a monitor
+./scripts/pm-cli.sh monitor-reset <id>       # Re-arm a monitor
 ```
 
 ## Daily PM Ritual
