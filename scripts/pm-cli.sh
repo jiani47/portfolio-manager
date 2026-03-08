@@ -1044,6 +1044,53 @@ for line in sys.stdin:
 " 2>/dev/null
     ;;
 
+  snapshot-position)
+    # Show one position's history over time
+    SYMBOL="$2"; DAYS="${3:-30}"
+    if [ -z "$SYMBOL" ]; then
+      echo "Usage: pm-cli.sh snapshot-position <symbol> [days]"
+      exit 1
+    fi
+    SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+
+    # Create table if not exists
+    sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+      id TEXT PRIMARY KEY, date TEXT NOT NULL, symbol TEXT NOT NULL,
+      quantity REAL NOT NULL, cost_basis REAL NOT NULL, close_price REAL NOT NULL,
+      market_value REAL NOT NULL, unrealized_gain REAL NOT NULL,
+      day_change REAL, day_pnl REAL, created_at TEXT NOT NULL, UNIQUE(date, symbol)
+    );"
+
+    echo "=== $SYMBOL Snapshot History (last $DAYS days) ==="
+    sqlite3 "$DB" "
+      SELECT date,
+             printf('%.2f', close_price) as price,
+             printf('%.2f', quantity) as qty,
+             printf('%.0f', market_value) as mv,
+             printf('%.0f', cost_basis) as cost,
+             printf('%.0f', unrealized_gain) as pnl,
+             printf('%.2f', CASE WHEN cost_basis > 0 THEN unrealized_gain / cost_basis * 100 ELSE 0 END) as pnl_pct,
+             printf('%.2f', COALESCE(day_change, 0)) as day_chg
+      FROM portfolio_snapshots
+      WHERE symbol = '$SYMBOL'
+      ORDER BY date DESC
+      LIMIT $DAYS;
+    " | python3 -c "
+import sys
+print(f'{\"Date\":<12} {\"Price\":>10} {\"Qty\":>10} {\"MV\":>10} {\"Cost\":>10} {\"P&L\":>10} {\"P&L%\":>8} {\"Day Chg\":>8}')
+print('-' * 82)
+for line in sys.stdin:
+    parts = line.strip().split('|')
+    if len(parts) < 8: continue
+    date, price, qty, mv, cost, pnl, pnl_pct, day_chg = parts
+    pnl_f = float(pnl)
+    pnl_arrow = '+' if pnl_f >= 0 else ''
+    day_f = float(day_chg)
+    day_arrow = '+' if day_f >= 0 else ''
+    print(f'{date:<12} \${float(price):>9,.2f} {float(qty):>10,.2f} \${float(mv):>9,.0f} \${float(cost):>9,.0f} {pnl_arrow}\${pnl_f:>8,.0f} {pnl_arrow}{float(pnl_pct):>6.1f}% {day_arrow}\${day_f:>.2f}')
+" 2>/dev/null
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
