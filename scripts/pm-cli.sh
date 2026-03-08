@@ -1004,6 +1004,46 @@ if row and row[0]:
 conn2.close()
 " 2>/dev/null
     ;;
+
+  snapshot-history)
+    # Show portfolio totals for last N days
+    DAYS="${2:-30}"
+
+    # Create table if not exists (in case it hasn't been created yet)
+    sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+      id TEXT PRIMARY KEY, date TEXT NOT NULL, symbol TEXT NOT NULL,
+      quantity REAL NOT NULL, cost_basis REAL NOT NULL, close_price REAL NOT NULL,
+      market_value REAL NOT NULL, unrealized_gain REAL NOT NULL,
+      day_change REAL, day_pnl REAL, created_at TEXT NOT NULL, UNIQUE(date, symbol)
+    );"
+
+    echo "=== Portfolio Snapshot History (last $DAYS days) ==="
+    sqlite3 "$DB" "
+      SELECT date,
+             printf('%.0f', SUM(market_value)) as total_mv,
+             printf('%.0f', SUM(cost_basis)) as total_cost,
+             printf('%.0f', SUM(unrealized_gain)) as total_pnl,
+             printf('%.0f', SUM(COALESCE(day_pnl, 0))) as day_pnl,
+             COUNT(*) as positions
+      FROM portfolio_snapshots
+      GROUP BY date
+      ORDER BY date DESC
+      LIMIT $DAYS;
+    " | python3 -c "
+import sys
+print(f'{\"Date\":<12} {\"Total MV\":>12} {\"Cost Basis\":>12} {\"Unreal P&L\":>12} {\"Day P&L\":>10} {\"Pos\":>4}')
+print('-' * 66)
+for line in sys.stdin:
+    parts = line.strip().split('|')
+    if len(parts) < 6: continue
+    date, mv, cost, pnl, dpnl, pos = parts
+    mv_f, cost_f, pnl_f, dpnl_f = float(mv), float(cost), float(pnl), float(dpnl)
+    pnl_arrow = '+' if pnl_f >= 0 else ''
+    dpnl_arrow = '+' if dpnl_f >= 0 else ''
+    print(f'{date:<12} \${mv_f:>11,.0f} \${cost_f:>11,.0f} {pnl_arrow}\${pnl_f:>10,.0f} {dpnl_arrow}\${dpnl_f:>8,.0f} {pos:>4}')
+" 2>/dev/null
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
