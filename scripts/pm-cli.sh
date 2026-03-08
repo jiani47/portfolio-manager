@@ -880,6 +880,130 @@ print(f'{len(candles)} candles ({count} new)')
 
     echo "Backfill complete."
     ;;
+  snapshot)
+    # Take end-of-day portfolio snapshot — one per day, aggregated by symbol
+    TODAY=$(date +"%Y-%m-%d")
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+    # Create table if not exists
+    sqlite3 "$DB" "
+      CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        id TEXT PRIMARY KEY,
+        date TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        quantity REAL NOT NULL,
+        cost_basis REAL NOT NULL,
+        close_price REAL NOT NULL,
+        market_value REAL NOT NULL,
+        unrealized_gain REAL NOT NULL,
+        day_change REAL,
+        day_pnl REAL,
+        created_at TEXT NOT NULL,
+        UNIQUE(date, symbol)
+      );
+      CREATE INDEX IF NOT EXISTS idx_snapshots_date ON portfolio_snapshots(date);
+      CREATE INDEX IF NOT EXISTS idx_snapshots_symbol ON portfolio_snapshots(symbol);
+    "
+
+    # Check if snapshot already exists for today
+    EXISTING=$(sqlite3 "$DB" "SELECT COUNT(*) FROM portfolio_snapshots WHERE date = '$TODAY';")
+    if [ "$EXISTING" -gt 0 ]; then
+      echo "Snapshot already exists for $TODAY ($EXISTING rows). Skipping."
+      exit 0
+    fi
+
+    python3 -c "
+import sqlite3, uuid, sys
+
+db = '$DB'
+today = '$TODAY'
+now = '$NOW'
+
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+
+# Get all positions aggregated by symbol, with latest close price
+cur.execute('''
+    SELECT s.symbol, s.type,
+           SUM(p.quantity) as total_qty,
+           SUM(p.cost_basis) as total_cost
+    FROM positions p
+    JOIN securities s ON p.security_id = s.id
+    GROUP BY s.symbol, s.type
+    HAVING total_qty != 0
+''')
+positions = cur.fetchall()
+
+count = 0
+for symbol, sec_type, qty, cost_basis in positions:
+    if sec_type == 'cash':
+        close_price = 1.0
+        market_value = qty
+        unrealized_gain = 0.0
+        day_change = None
+        day_pnl = None
+    else:
+        # Get today's close price
+        cur.execute('''
+            SELECT close_price FROM price_history ph
+            JOIN securities s ON ph.security_id = s.id
+            WHERE s.symbol = ? AND ph.date = (
+                SELECT MAX(date) FROM price_history ph2
+                JOIN securities s2 ON ph2.security_id = s2.id
+                WHERE s2.symbol = ?
+            )
+        ''', (symbol, symbol))
+        row = cur.fetchone()
+        if not row:
+            print(f'  WARNING: No price data for {symbol}, skipping')
+            continue
+        close_price = row[0]
+        market_value = qty * close_price
+        unrealized_gain = market_value - cost_basis
+
+        # Get previous day's close for day change
+        cur.execute('''
+            SELECT close_price FROM price_history ph
+            JOIN securities s ON ph.security_id = s.id
+            WHERE s.symbol = ? AND ph.date = (
+                SELECT MAX(date) FROM price_history ph2
+                JOIN securities s2 ON ph2.security_id = s2.id
+                WHERE s2.symbol = ? AND ph2.date < (
+                    SELECT MAX(date) FROM price_history ph3
+                    JOIN securities s3 ON ph3.security_id = s3.id
+                    WHERE s3.symbol = ?
+                )
+            )
+        ''', (symbol, symbol, symbol))
+        prev_row = cur.fetchone()
+        if prev_row:
+            prev_close = prev_row[0]
+            day_change = close_price - prev_close
+            day_pnl = day_change * qty
+        else:
+            day_change = None
+            day_pnl = None
+
+    row_id = str(uuid.uuid4())
+    cur.execute('''
+        INSERT INTO portfolio_snapshots (id, date, symbol, quantity, cost_basis, close_price, market_value, unrealized_gain, day_change, day_pnl, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (row_id, today, symbol, qty, cost_basis, close_price, market_value, unrealized_gain, day_change, day_pnl, now))
+    count += 1
+
+conn.commit()
+conn.close()
+print(f'Snapshot taken for {today}: {count} positions')
+# Recalculate from DB to get accurate totals
+conn2 = sqlite3.connect(db)
+c2 = conn2.cursor()
+c2.execute('SELECT SUM(market_value), SUM(unrealized_gain), SUM(COALESCE(day_pnl, 0)) FROM portfolio_snapshots WHERE date = ?', (today,))
+row = c2.fetchone()
+if row and row[0]:
+    print(f'  Total MV: \${row[0]:,.0f}  |  Unrealized P&L: \${row[1]:>+,.0f}  |  Day P&L: \${row[2]:>+,.0f}')
+conn2.close()
+" 2>/dev/null
+    ;;
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -911,5 +1035,8 @@ print(f'{len(candles)} candles ({count} new)')
     echo "  monitor-rm          - Delete monitor: <id>"
     echo "  monitor-reset       - Re-arm monitor: <id>"
     echo "  backfill [symbol]   - Backfill 3yr price history from Schwab (all symbols if no arg)"
+    echo "  snapshot            - Take EOD portfolio snapshot (one per day)"
+    echo "  snapshot-history [n]- Portfolio totals for last n days (default 30)"
+    echo "  snapshot-position   - Position history: <symbol> [days]"
     ;;
 esac
