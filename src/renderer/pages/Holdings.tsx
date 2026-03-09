@@ -328,16 +328,34 @@ export default function Holdings() {
     );
   };
 
-  const renderDayChange = (position: PositionWithPercent) => {
+  const getDayQuote = (position: PositionWithPercent) => {
     const security = position.security;
     const quote = security ? streamingQuotes.get(security.symbol) : undefined;
     if (!quote?.netChange && !quote?.netChangePct) return null;
+    return quote;
+  };
+
+  const renderPriceDayChange = (position: PositionWithPercent) => {
+    const quote = getDayQuote(position);
+    if (!quote) return null;
     const change = quote.netChange || 0;
-    const changePct = quote.netChangePct || 0;
     const isPositive = change >= 0;
     return (
       <div className={`text-xs ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
-        {isPositive ? '+' : ''}{changePct.toFixed(2)}%
+        {isPositive ? '+' : ''}{formatCurrency(change)}
+      </div>
+    );
+  };
+
+  const renderMvDayChange = (position: PositionWithPercent) => {
+    const quote = getDayQuote(position);
+    if (!quote) return null;
+    const change = quote.netChange || 0;
+    const mvChange = change * position.quantity;
+    const isPositive = mvChange >= 0;
+    return (
+      <div className={`text-xs ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
+        {isPositive ? '+' : ''}{formatCurrency(mvChange)}
       </div>
     );
   };
@@ -751,11 +769,11 @@ export default function Holdings() {
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="table-header">Symbol</th>
-                      <th className="table-header">Name</th>
                       <th className="table-header text-right">Weight</th>
                       <th className="table-header text-right">Qty</th>
+                      <th className="table-header text-right">Avg Cost</th>
                       <th className="table-header text-right">Price</th>
-                      <th className="table-header text-right">Mkt Val / Day</th>
+                      <th className="table-header text-right">Mkt Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
                       <th className="table-header text-right"></th>
                     </tr>
@@ -778,17 +796,20 @@ export default function Holdings() {
                           </div>
                           {renderTagBadges(position.tags)}
                         </td>
-                        <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
                         <td className="table-cell text-right font-semibold">
                           <span className={position.portfolioPercent >= 8 ? 'text-amber-700' : ''}>
                             {position.portfolioPercent.toFixed(1)}%
                           </span>
                         </td>
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
-                        <td className="table-cell text-right">{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</td>
+                        <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
+                        <td className="table-cell text-right">
+                          <div>{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</div>
+                          {renderPriceDayChange(position)}
+                        </td>
                         <td className="table-cell text-right">
                           <div>{position.marketValue ? formatCurrency(position.marketValue) : '-'}</div>
-                          {renderDayChange(position)}
+                          {renderMvDayChange(position)}
                         </td>
                         <td className="table-cell text-right">
                           {position.unrealizedGain !== undefined ? (
@@ -821,11 +842,11 @@ export default function Holdings() {
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="table-header">Symbol</th>
-                      <th className="table-header">Name</th>
                       <th className="table-header text-right">Weight</th>
                       <th className="table-header text-right">Qty</th>
+                      <th className="table-header text-right">Avg Cost</th>
                       <th className="table-header text-right">Price</th>
-                      <th className="table-header text-right">Mkt Val / Day</th>
+                      <th className="table-header text-right">Mkt Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
                       <th className="table-header text-right"></th>
                     </tr>
@@ -840,13 +861,16 @@ export default function Holdings() {
                           </div>
                           {renderTagBadges(position.tags)}
                         </td>
-                        <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
                         <td className="table-cell text-right font-medium">{position.portfolioPercent.toFixed(1)}%</td>
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
-                        <td className="table-cell text-right">{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</td>
+                        <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
+                        <td className="table-cell text-right">
+                          <div>{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</div>
+                          {renderPriceDayChange(position)}
+                        </td>
                         <td className="table-cell text-right">
                           <div>{position.marketValue ? formatCurrency(position.marketValue) : '-'}</div>
-                          {renderDayChange(position)}
+                          {renderMvDayChange(position)}
                         </td>
                         <td className="table-cell text-right">
                           {position.unrealizedGain !== undefined ? (
@@ -879,11 +903,11 @@ export default function Holdings() {
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="table-header">Symbol</th>
-                      <th className="table-header">Name</th>
                       <th className="table-header text-right">Weight</th>
                       <th className="table-header text-right">Qty</th>
+                      <th className="table-header text-right">Avg Cost</th>
                       <th className="table-header text-right">Price</th>
-                      <th className="table-header text-right">Mkt Val / Day</th>
+                      <th className="table-header text-right">Mkt Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
                       <th className="table-header text-right"></th>
                     </tr>
@@ -898,13 +922,16 @@ export default function Holdings() {
                           </div>
                           {renderTagBadges(position.tags)}
                         </td>
-                        <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
                         <td className="table-cell text-right text-gray-500">{position.portfolioPercent.toFixed(2)}%</td>
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
-                        <td className="table-cell text-right">{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</td>
+                        <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
+                        <td className="table-cell text-right">
+                          <div>{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</div>
+                          {renderPriceDayChange(position)}
+                        </td>
                         <td className="table-cell text-right">
                           <div>{position.marketValue ? formatCurrency(position.marketValue) : '-'}</div>
-                          {renderDayChange(position)}
+                          {renderMvDayChange(position)}
                         </td>
                         <td className="table-cell text-right">
                           {position.unrealizedGain !== undefined ? (
@@ -944,10 +971,10 @@ export default function Holdings() {
                     <thead className="bg-gray-50">
                       <tr>
                         <th className="table-header">Symbol</th>
-                        <th className="table-header">Name</th>
                         <th className="table-header text-right">Qty</th>
+                        <th className="table-header text-right">Avg Cost</th>
                         <th className="table-header text-right">Price</th>
-                        <th className="table-header text-right">Mkt Val / Day</th>
+                        <th className="table-header text-right">Mkt Value</th>
                         <th className="table-header text-right">Gain/Loss</th>
                         <th className="table-header text-right"></th>
                       </tr>
@@ -962,12 +989,15 @@ export default function Holdings() {
                             </div>
                             {renderTagBadges(position.tags)}
                           </td>
-                          <td className="table-cell text-gray-500 max-w-xs truncate">{position.security?.name || '-'}</td>
                           <td className="table-cell text-right text-gray-500">{position.quantity.toFixed(4)}</td>
-                          <td className="table-cell text-right">{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</td>
+                          <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
+                          <td className="table-cell text-right">
+                            <div>{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</div>
+                            {renderPriceDayChange(position)}
+                          </td>
                           <td className="table-cell text-right">
                             <div>{position.marketValue ? formatCurrency(position.marketValue) : '-'}</div>
-                            {renderDayChange(position)}
+                            {renderMvDayChange(position)}
                           </td>
                           <td className="table-cell text-right">
                             {position.unrealizedGain !== undefined ? (
