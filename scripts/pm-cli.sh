@@ -235,6 +235,66 @@ print()
 " 2>/dev/null
     fi
 
+    # Technical signals (notable only)
+    FMP_KEY=$(get_fmp_key)
+    if [ -n "$FMP_KEY" ]; then
+      TECH_SYMBOLS=$(sqlite3 "$DB" "
+        SELECT DISTINCT s.symbol FROM positions p
+        JOIN securities s ON p.security_id = s.id
+        WHERE s.type != 'cash' AND s.symbol != ''
+        ORDER BY s.symbol;
+      ")
+      TECH_SIGNALS=$(python3 - "$FMP_KEY" "$TECH_SYMBOLS" <<'PYEOF'
+import json, urllib.request, sys
+
+key = sys.argv[1]
+symbols = [s.strip() for s in sys.argv[2].strip().split('\n') if s.strip()]
+base = 'https://financialmodelingprep.com/stable/technical-indicators'
+
+def fetch(indicator, symbol, period):
+    url = f'{base}/{indicator}?symbol={symbol}&periodLength={period}&timeframe=1day&apikey={key}'
+    try:
+        data = json.loads(urllib.request.urlopen(url).read())
+        return data[0] if data else None
+    except:
+        return None
+
+signals = []
+for symbol in symbols:
+    sma50 = fetch('sma', symbol, 50)
+    sma200 = fetch('sma', symbol, 200)
+    rsi = fetch('rsi', symbol, 14)
+
+    if not sma50:
+        continue
+
+    price = sma50.get('close', 0)
+    s50 = sma50.get('sma', 0)
+    s200 = sma200.get('sma', 0) if sma200 else 0
+    rsi_val = rsi.get('rsi', 0) if rsi else 0
+
+    notes = []
+    if price < s200: notes.append(f'below 200 DMA (${s200:,.0f})')
+    elif price < s50: notes.append(f'below 50 DMA (${s50:,.0f})')
+    if rsi_val >= 70: notes.append(f'RSI {rsi_val:.0f} OVERBOUGHT')
+    elif rsi_val <= 30: notes.append(f'RSI {rsi_val:.0f} OVERSOLD')
+    elif rsi_val <= 40: notes.append(f'RSI {rsi_val:.0f}')
+
+    if notes:
+        signals.append(f'  {symbol:<6} ${price:>8,.2f}  {", ".join(notes)}')
+
+if signals:
+    for s in signals:
+        print(s)
+PYEOF
+)
+      if [ -n "$TECH_SIGNALS" ]; then
+        echo "=== Technical Signals ==="
+        echo "$TECH_SIGNALS"
+        echo ""
+      fi
+    fi
+
     echo "(Run 'pm-cli.sh refresh' to update prices. Use web search for news.)"
     echo "============================================"
     ;;
