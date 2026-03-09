@@ -21,6 +21,7 @@ const EQUITY_FIELDS: Record<number, keyof Omit<StreamingQuote, 'symbol' | 'times
 const SUBSCRIBE_FIELDS = '0,1,2,3,8,10,11,12,17,18,42';
 
 const SNAPSHOT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const POSITION_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MARKET_CHECK_INTERVAL_MS = 30 * 1000; // 30 seconds
 const MAX_RECONNECT_FAILURES = 5;
 const MAX_RECONNECT_DELAY_MS = 60 * 1000;
@@ -41,6 +42,7 @@ export class SchwabStreamService {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private marketCheckTimer: ReturnType<typeof setInterval> | null = null;
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
+  private positionSyncTimer: ReturnType<typeof setInterval> | null = null;
   private consecutiveFailures = 0;
   private reconnectDelay = 2000;
   private connectedSince: number | undefined;
@@ -227,6 +229,7 @@ export class SchwabStreamService {
   disconnect(): void {
     this.clearReconnectTimer();
     this.clearSnapshotTimer();
+    this.clearPositionSyncTimer();
 
     if (this.ws) {
       try {
@@ -346,8 +349,9 @@ export class SchwabStreamService {
           },
         });
 
-        // Start snapshot timer
+        // Start snapshot timer and position sync
         this.startSnapshotTimer();
+        this.startPositionSyncTimer();
       } else {
         console.error(`Schwab streaming LOGIN failed: code=${code}, msg=${content?.msg}`);
         this.ws?.close();
@@ -464,6 +468,45 @@ export class SchwabStreamService {
       } catch (err) {
         console.error('Failed to save streaming snapshots:', err);
       }
+    }
+  }
+
+  // --- Position Sync ---
+
+  private startPositionSyncTimer(): void {
+    this.clearPositionSyncTimer();
+    // Sync immediately on connect, then every 5 minutes
+    this.syncPositions();
+    this.positionSyncTimer = setInterval(() => {
+      this.syncPositions();
+    }, POSITION_SYNC_INTERVAL_MS);
+  }
+
+  private clearPositionSyncTimer(): void {
+    if (this.positionSyncTimer) {
+      clearInterval(this.positionSyncTimer);
+      this.positionSyncTimer = null;
+    }
+  }
+
+  private async syncPositions(): Promise<void> {
+    try {
+      const result = await this.schwabService.syncPositions(this.db);
+      if (result.success) {
+        console.log(`Position sync: ${result.positionsSynced} positions across ${result.accountsSynced} accounts`);
+        // Notify renderer to refresh its data
+        const mainWindow = this.getMainWindow();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('positions:synced', {
+            positionsSynced: result.positionsSynced,
+            accountsSynced: result.accountsSynced,
+          });
+        }
+      } else {
+        console.error('Position sync failed:', result.errors);
+      }
+    } catch (err) {
+      console.error('Position sync error:', err);
     }
   }
 
