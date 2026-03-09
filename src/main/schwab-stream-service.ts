@@ -143,6 +143,13 @@ export class SchwabStreamService {
 
       if (symbols.length === 0) return;
 
+      // Add market index proxies for dashboard
+      for (const idx of ['SPY', 'QQQ']) {
+        if (!symbols.includes(idx)) {
+          symbols.push(idx);
+        }
+      }
+
       await this.connect(symbols);
     } catch (err) {
       console.error('Failed to connect streaming:', err);

@@ -1,44 +1,35 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePortfolio, usePositions, useAccounts, useSecurities, useEarnings, useSettings, usePositionIntents } from '../hooks/useApi';
-import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip } from 'recharts';
-import type { Position, EarningsEvent } from '../../shared/types';
-import { format, addDays, parseISO } from 'date-fns';
+import { usePortfolio, usePositions, useSecurities, useSettings, usePositionIntents, useDailyRituals } from '../hooks/useApi';
+import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
+import type { StreamingQuote } from '../../shared/types';
+import { format } from 'date-fns';
 
-const COLORS = ['#0ea5e9', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#6366f1', '#ec4899', '#14b8a6'];
-
-type SortColumn = 'symbol' | 'account' | 'quantity' | 'costBasis' | 'marketValue' | 'gainLoss' | 'percentChange';
-type SortDirection = 'asc' | 'desc';
+const TIER_COLORS: Record<string, string> = {
+  'Core': '#3b82f6',
+  'Growth': '#10b981',
+  'Starter': '#f59e0b',
+  'Watchlist': '#f97316',
+};
 
 export default function Dashboard() {
-  const { summary, allocation, loading: portfolioLoading, fetchSummary } = usePortfolio();
+  const { summary, loading: portfolioLoading, fetchSummary } = usePortfolio();
   const { positions, loading: positionsLoading, fetchPositions } = usePositions();
-  const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities } = useSecurities();
-  const { earnings, loading: earningsLoading, fetchPortfolioEarnings } = useEarnings();
   const { settings, fetchSettings } = useSettings();
   const { intents, fetchIntents } = usePositionIntents();
-  const [sortColumn, setSortColumn] = useState<SortColumn>('marketValue');
-  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const { rituals, fetchRituals } = useDailyRituals();
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
-
-  const isDataProviderConfigured = settings?.dataProvider === 'schwab' || ((settings?.dataProvider === 'fmp' || settings?.dataProvider === 'massive') && settings?.dataProviderApiKey);
-
-  const fetchEarnings = useCallback(() => {
-    if (!isDataProviderConfigured) return;
-    // Fetch earnings from yesterday (to ensure today is included) through next 30 days
-    const fromDate = format(addDays(new Date(), -1), 'yyyy-MM-dd');
-    const endDate = format(addDays(new Date(), 30), 'yyyy-MM-dd');
-    fetchPortfolioEarnings(fromDate, endDate);
-  }, [isDataProviderConfigured, fetchPortfolioEarnings]);
+  const [sectorData, setSectorData] = useState<{ sector: string; change: number }[]>([]);
+  const [sectorDate, setSectorDate] = useState<string>('');
 
   useEffect(() => {
     fetchSummary();
     fetchPositions();
-    fetchAccounts();
     fetchSecurities();
     fetchSettings();
     fetchIntents();
-  }, [fetchSummary, fetchPositions, fetchAccounts, fetchSecurities, fetchSettings, fetchIntents]);
+    fetchRituals(1);
+  }, [fetchSummary, fetchPositions, fetchSecurities, fetchSettings, fetchIntents, fetchRituals]);
 
   // Listen for position sync events
   useEffect(() => {
@@ -50,114 +41,90 @@ export default function Dashboard() {
     return () => removeListener();
   }, [fetchPositions, fetchSummary]);
 
-  // Fetch earnings when data provider is configured and positions are loaded
+  // Fetch sector data from FMP
   useEffect(() => {
-    if (isDataProviderConfigured && positions.length > 0) {
-      fetchEarnings();
+    const fetchSectors = async () => {
+      try {
+        const fmpKey = settings?.dataProviderApiKey;
+        if (!fmpKey) return;
+
+        const today = format(new Date(), 'yyyy-MM-dd');
+        // Try today, then previous days
+        for (let i = 0; i < 4; i++) {
+          const d = new Date();
+          d.setDate(d.getDate() - i);
+          const dateStr = format(d, 'yyyy-MM-dd');
+          const resp = await fetch(`https://financialmodelingprep.com/stable/sector-performance-snapshot?date=${dateStr}&apikey=${fmpKey}`);
+          const data = await resp.json();
+          if (data && data.length > 0) {
+            // Aggregate across exchanges
+            const sectors: Record<string, number[]> = {};
+            for (const row of data) {
+              if (!sectors[row.sector]) sectors[row.sector] = [];
+              sectors[row.sector].push(row.averageChange);
+            }
+            const averaged = Object.entries(sectors)
+              .map(([sector, vals]) => ({ sector, change: vals.reduce((a, b) => a + b, 0) / vals.length }))
+              .sort((a, b) => b.change - a.change);
+            setSectorData(averaged);
+            setSectorDate(dateStr === today ? 'Today' : dateStr);
+            break;
+          }
+        }
+      } catch {
+        // Silently fail
+      }
+    };
+    if (settings?.dataProviderApiKey) {
+      fetchSectors();
     }
-  }, [isDataProviderConfigured, positions.length, fetchEarnings]);
+  }, [settings?.dataProviderApiKey]);
 
   const loading = portfolioLoading || positionsLoading;
+  const securityMap = useMemo(() => new Map(securities.map(s => [s.id, s])), [securities]);
 
-  const securityMap = new Map(securities.map(s => [s.id, s]));
-  const accountMap = new Map(accounts.map(a => [a.id, a]));
+  // Streaming quotes — include SPY and QQQ for indices
+  const symbolList = useMemo(() => {
+    const syms = positions
+      .map(p => securityMap.get(p.securityId))
+      .filter(s => s && s.type !== 'cash' && s.type !== 'option')
+      .map(s => s!.symbol);
+    if (!syms.includes('SPY')) syms.push('SPY');
+    if (!syms.includes('QQQ')) syms.push('QQQ');
+    return syms;
+  }, [positions, securityMap]);
+  const { quotes: streamingQuotes } = useStreamingQuotes(symbolList);
 
-  const handleSort = (column: SortColumn) => {
-    if (sortColumn === column) {
-      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortColumn(column);
-      setSortDirection('desc');
+  // Today's ritual
+  const todayRitual = useMemo(() => {
+    const today = format(new Date(), 'yyyy-MM-dd');
+    return rituals.find(r => r.date === today) || null;
+  }, [rituals]);
+
+  // Top movers from streaming data
+  const topMovers = useMemo(() => {
+    const movers: { symbol: string; price: number; change: number; changePct: number; tier?: string }[] = [];
+    for (const pos of positions) {
+      const security = securityMap.get(pos.securityId);
+      if (!security || security.type === 'cash') continue;
+      const quote = streamingQuotes.get(security.symbol);
+      if (!quote?.netChangePct) continue;
+      const intent = intents.get(pos.id);
+      movers.push({
+        symbol: security.symbol,
+        price: quote.last || 0,
+        change: quote.netChange || 0,
+        changePct: quote.netChangePct || 0,
+        tier: intent?.tier,
+      });
     }
-  };
+    movers.sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct));
+    return movers.slice(0, 8);
+  }, [positions, securityMap, streamingQuotes, intents]);
 
-  const sortedPositions = useMemo(() => {
-    const sorted = [...positions].sort((a, b) => {
-      let aVal: string | number;
-      let bVal: string | number;
-
-      switch (sortColumn) {
-        case 'symbol':
-          aVal = securityMap.get(a.securityId)?.symbol || '';
-          bVal = securityMap.get(b.securityId)?.symbol || '';
-          break;
-        case 'account':
-          aVal = accountMap.get(a.accountId)?.name || '';
-          bVal = accountMap.get(b.accountId)?.name || '';
-          break;
-        case 'quantity':
-          aVal = a.quantity;
-          bVal = b.quantity;
-          break;
-        case 'costBasis':
-          aVal = a.costBasis;
-          bVal = b.costBasis;
-          break;
-        case 'marketValue':
-          aVal = a.marketValue || 0;
-          bVal = b.marketValue || 0;
-          break;
-        case 'gainLoss':
-          aVal = a.unrealizedGain || 0;
-          bVal = b.unrealizedGain || 0;
-          break;
-        case 'percentChange':
-          aVal = a.unrealizedGainPercent || 0;
-          bVal = b.unrealizedGainPercent || 0;
-          break;
-        default:
-          return 0;
-      }
-
-      if (typeof aVal === 'string' && typeof bVal === 'string') {
-        return sortDirection === 'asc'
-          ? aVal.localeCompare(bVal)
-          : bVal.localeCompare(aVal);
-      }
-
-      return sortDirection === 'asc'
-        ? (aVal as number) - (bVal as number)
-        : (bVal as number) - (aVal as number);
-    });
-
-    return sorted;
-  }, [positions, sortColumn, sortDirection, securityMap, accountMap]);
-
-  const SortIcon = ({ column }: { column: SortColumn }) => {
-    if (sortColumn !== column) {
-      return <span className="ml-1 text-gray-300">↕</span>;
-    }
-    return <span className="ml-1">{sortDirection === 'asc' ? '↑' : '↓'}</span>;
-  };
-
-  const topPositions = positions
-    .sort((a, b) => (b.marketValue || 0) - (a.marketValue || 0))
-    .slice(0, 5);
-
-  const tierAllocation = useMemo(() => {
-    const tierMap = new Map<string, { value: number; count: number }>();
-    let noTierValue = 0;
-    let noTierCount = 0;
-
-    for (const p of positions) {
-      const security = securityMap.get(p.securityId);
-      if (security?.type === 'cash') continue;
-      const intent = intents.get(p.id);
-      const tier = intent?.tier;
-      const mv = p.marketValue || 0;
-      if (tier) {
-        const existing = tierMap.get(tier) || { value: 0, count: 0 };
-        existing.value += mv;
-        existing.count += 1;
-        tierMap.set(tier, existing);
-      } else {
-        noTierValue += mv;
-        noTierCount += 1;
-      }
-    }
-
-    return { tierMap, noTierValue, noTierCount };
-  }, [positions, intents, securityMap]);
+  // Market indices from streaming
+  const spyQuote = streamingQuotes.get('SPY');
+  const qqqQuote = streamingQuotes.get('QQQ');
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -172,6 +139,27 @@ export default function Dashboard() {
     return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
   };
 
+  const renderIndexCard = (label: string, quote: StreamingQuote | undefined) => {
+    if (!quote) {
+      return (
+        <div className="card">
+          <p className="stat-label">{label}</p>
+          <p className="stat-value text-gray-300">--</p>
+        </div>
+      );
+    }
+    const isPositive = (quote.netChange || 0) >= 0;
+    return (
+      <div className="card">
+        <p className="stat-label">{label}</p>
+        <p className="stat-value">{formatCurrency(quote.last)}</p>
+        <p className={`text-sm font-medium ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
+          {isPositive ? '+' : ''}{formatCurrency(quote.netChange || 0)} ({formatPercent(quote.netChangePct || 0)})
+        </p>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -182,7 +170,7 @@ export default function Dashboard() {
               Last synced: {lastSynced.toLocaleTimeString()}
             </span>
           )}
-          <button onClick={fetchSummary} className="btn-secondary text-sm">
+          <button onClick={() => { fetchSummary(); fetchPositions(); fetchRituals(1); }} className="btn-secondary text-sm">
             Refresh
           </button>
         </div>
@@ -194,322 +182,131 @@ export default function Dashboard() {
         </div>
       ) : (
         <>
-          {/* Summary Stats */}
+          {/* Market Indices + Portfolio Summary */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {renderIndexCard('S&P 500 (SPY)', spyQuote)}
+            {renderIndexCard('Nasdaq (QQQ)', qqqQuote)}
             <div className="card">
-              <p className="stat-label">Total Portfolio Value</p>
+              <p className="stat-label">Portfolio Value</p>
               <p className="stat-value">{formatCurrency(summary?.totalValue || 0)}</p>
-            </div>
-            <div className="card">
-              <p className="stat-label">Total Cost Basis</p>
-              <p className="stat-value">{formatCurrency(summary?.totalCostBasis || 0)}</p>
-            </div>
-            <div className="card">
-              <p className="stat-label">Unrealized Gain/Loss</p>
-              <p className={`stat-value ${(summary?.totalUnrealizedGain || 0) >= 0 ? 'positive' : 'negative'}`}>
-                {formatCurrency(summary?.totalUnrealizedGain || 0)}
-              </p>
-              <p className={`text-sm ${(summary?.totalUnrealizedGainPercent || 0) >= 0 ? 'positive' : 'negative'}`}>
-                {formatPercent(summary?.totalUnrealizedGainPercent || 0)}
+              <p className={`text-sm font-medium ${(summary?.totalUnrealizedGain || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                {formatCurrency(summary?.totalUnrealizedGain || 0)} ({formatPercent(summary?.totalUnrealizedGainPercent || 0)})
               </p>
             </div>
             <div className="card">
-              <p className="stat-label">Positions / Accounts</p>
-              <p className="stat-value">{summary?.positionCount || 0} / {summary?.accountCount || 0}</p>
+              <p className="stat-label">Positions</p>
+              <p className="stat-value">{summary?.positionCount || 0}</p>
+              <p className="text-sm text-gray-500">
+                Cost basis: {formatCurrency(summary?.totalCostBasis || 0)}
+              </p>
             </div>
           </div>
 
-          {/* Charts Row */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Asset Allocation Pie Chart */}
-            <div className="card">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Asset Allocation</h2>
-              {allocation.length > 0 ? (
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={allocation}
-                        dataKey="percentage"
-                        nameKey="category"
-                        cx="50%"
-                        cy="50%"
-                        outerRadius={80}
-                        label={({ category, percentage }) => `${category}: ${percentage.toFixed(1)}%`}
-                      >
-                        {allocation.map((_, index) => (
-                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value: number) => `${value.toFixed(1)}%`} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              ) : (
-                <div className="h-64 flex items-center justify-center text-gray-500">
-                  No positions to display
-                </div>
-              )}
-            </div>
-
-            {/* Top Holdings Bar Chart */}
-            <div className="card">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Top Holdings</h2>
-              {topPositions.length > 0 ? (
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart
-                      data={topPositions.map(p => ({
-                        symbol: securityMap.get(p.securityId)?.symbol || 'Unknown',
-                        value: p.marketValue || 0,
-                      }))}
-                      layout="vertical"
-                      margin={{ left: 60 }}
-                    >
-                      <XAxis type="number" tickFormatter={(v) => formatCurrency(v)} />
-                      <YAxis type="category" dataKey="symbol" />
-                      <Tooltip formatter={(value: number) => formatCurrency(value)} />
-                      <Bar dataKey="value" fill="#0ea5e9" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              ) : (
-                <div className="h-64 flex items-center justify-center text-gray-500">
-                  No positions to display
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Tier Allocation */}
-          {positions.length > 0 && (
-            <div className="card">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Tier Allocation</h2>
-              {(() => {
-                const { tierMap, noTierValue, noTierCount } = tierAllocation;
-                const total = Array.from(tierMap.values()).reduce((sum, t) => sum + t.value, 0) + noTierValue;
-                if (total === 0) return <div className="text-gray-500">No positions with market values</div>;
-                const entries = Array.from(tierMap.entries()).sort((a, b) => b[1].value - a[1].value);
-                const tierColors = ['#6366f1', '#8b5cf6', '#a78bfa', '#c4b5fd', '#818cf8'];
-                return (
-                  <div className="space-y-3">
-                    <div className="flex h-6 rounded-full overflow-hidden bg-gray-100">
-                      {entries.map(([tier, data], i) => (
-                        <div
-                          key={tier}
-                          style={{ width: `${(data.value / total) * 100}%`, backgroundColor: tierColors[i % tierColors.length] }}
-                          className="flex items-center justify-center text-xs text-white font-medium"
-                          title={`${tier}: ${formatCurrency(data.value)}`}
-                        >
-                          {(data.value / total) * 100 >= 8 ? tier : ''}
-                        </div>
-                      ))}
-                      {noTierValue > 0 && (
-                        <div
-                          style={{ width: `${(noTierValue / total) * 100}%` }}
-                          className="bg-gray-300 flex items-center justify-center text-xs text-gray-600 font-medium"
-                          title={`No tier: ${formatCurrency(noTierValue)}`}
-                        >
-                          {(noTierValue / total) * 100 >= 8 ? 'No tier' : ''}
-                        </div>
-                      )}
-                    </div>
-                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-                      {entries.map(([tier, data], i) => (
-                        <div key={tier} className="flex items-center gap-2 text-sm">
-                          <span className="w-3 h-3 rounded" style={{ backgroundColor: tierColors[i % tierColors.length] }} />
-                          <span className="font-medium">{tier}</span>
-                          <span className="text-gray-500">{((data.value / total) * 100).toFixed(1)}%</span>
-                          <span className="text-gray-400 text-xs">({data.count})</span>
-                        </div>
-                      ))}
-                      {noTierCount > 0 && (
-                        <div className="flex items-center gap-2 text-sm">
-                          <span className="w-3 h-3 rounded bg-gray-300" />
-                          <span className="font-medium text-gray-500">No tier</span>
-                          <span className="text-gray-500">{((noTierValue / total) * 100).toFixed(1)}%</span>
-                          <span className="text-gray-400 text-xs">({noTierCount})</span>
-                        </div>
+          {/* Today's Regime */}
+          <div className="card">
+            <h2 className="text-lg font-semibold text-gray-900 mb-3">Today's Regime</h2>
+            {todayRitual && (todayRitual.regimeRewarding || todayRitual.regimePunishing) ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <span className="text-xs font-medium text-gray-500 uppercase">Type</span>
+                    <div className="mt-1">
+                      {todayRitual.regimeType === 'trend' ? (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-md text-sm font-medium bg-blue-100 text-blue-800">Trend Day</span>
+                      ) : todayRitual.regimeType === 'sorting' ? (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-md text-sm font-medium bg-amber-100 text-amber-800">Sorting Day</span>
+                      ) : (
+                        <span className="text-gray-400 text-sm">Not set</span>
                       )}
                     </div>
                   </div>
-                );
-              })()}
-            </div>
-          )}
-
-          {/* Upcoming Earnings */}
-          {isDataProviderConfigured && (
-            <div className="card">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold text-gray-900">Upcoming Earnings</h2>
-                <button
-                  onClick={fetchEarnings}
-                  disabled={earningsLoading}
-                  className="btn-secondary text-sm"
-                >
-                  {earningsLoading ? 'Loading...' : 'Refresh'}
-                </button>
-              </div>
-              {earningsLoading ? (
-                <div className="text-center py-8 text-gray-500">Loading earnings...</div>
-              ) : earnings.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="table-header">Symbol</th>
-                        <th className="table-header">Date</th>
-                        <th className="table-header">Time</th>
-                        <th className="table-header text-right">EPS Est.</th>
-                        <th className="table-header text-right">EPS Actual</th>
-                        <th className="table-header text-right">Revenue Est.</th>
-                      </tr>
-                    </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
-                      {earnings
-                        .filter(e => e.date >= format(new Date(), 'yyyy-MM-dd')) // Today and future only
-                        .sort((a, b) => a.date.localeCompare(b.date))
-                        .slice(0, 10)
-                        .map((event, idx) => {
-                          const eventDate = parseISO(event.date);
-                          const isToday = format(new Date(), 'yyyy-MM-dd') === event.date;
-                          return (
-                            <tr
-                              key={`${event.symbol}-${event.date}-${idx}`}
-                              className={`hover:bg-gray-50 ${isToday ? 'bg-yellow-50' : ''}`}
-                            >
-                              <td className="table-cell font-medium">{event.symbol}</td>
-                              <td className="table-cell">
-                                <span className={isToday ? 'font-semibold text-yellow-700' : ''}>
-                                  {format(eventDate, 'MMM d, yyyy')}
-                                  {isToday && ' (Today)'}
-                                </span>
-                              </td>
-                              <td className="table-cell text-gray-500">
-                                {event.time === 'bmo' && 'Before Open'}
-                                {event.time === 'amc' && 'After Close'}
-                                {event.time === 'dmh' && 'During Hours'}
-                                {!event.time && '-'}
-                              </td>
-                              <td className="table-cell text-right">
-                                {event.epsEstimated !== undefined ? `$${event.epsEstimated.toFixed(2)}` : '-'}
-                              </td>
-                              <td className="table-cell text-right">
-                                {event.epsActual !== undefined ? (
-                                  <span className={event.epsActual >= (event.epsEstimated || 0) ? 'text-green-600' : 'text-red-600'}>
-                                    ${event.epsActual.toFixed(2)}
-                                  </span>
-                                ) : '-'}
-                              </td>
-                              <td className="table-cell text-right">
-                                {event.revenueEstimated !== undefined
-                                  ? `$${(event.revenueEstimated / 1e9).toFixed(2)}B`
-                                  : '-'}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                    </tbody>
-                  </table>
-                  {(() => {
-                    const filteredCount = earnings.filter(e => e.date >= format(new Date(), 'yyyy-MM-dd')).length;
-                    return filteredCount > 10 ? (
-                      <div className="text-center py-2 text-sm text-gray-500">
-                        Showing 10 of {filteredCount} upcoming earnings
-                      </div>
-                    ) : null;
-                  })()}
+                  <div>
+                    <span className="text-xs font-medium text-gray-500 uppercase">Rewarding</span>
+                    <p className="mt-1 text-sm text-green-700">{todayRitual.regimeRewarding || '-'}</p>
+                  </div>
+                  <div>
+                    <span className="text-xs font-medium text-gray-500 uppercase">Punishing</span>
+                    <p className="mt-1 text-sm text-red-700">{todayRitual.regimePunishing || '-'}</p>
+                  </div>
                 </div>
-              ) : (
-                <div className="text-center py-8 text-gray-500">
-                  No upcoming earnings for your holdings in the next 30 days
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Holdings Table */}
-          <div className="card">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">All Holdings</h2>
-            {positions.length > 0 ? (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th
-                        className="table-header cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('symbol')}
-                      >
-                        Symbol<SortIcon column="symbol" />
-                      </th>
-                      <th
-                        className="table-header cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('account')}
-                      >
-                        Account<SortIcon column="account" />
-                      </th>
-                      <th
-                        className="table-header text-right cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('quantity')}
-                      >
-                        Quantity<SortIcon column="quantity" />
-                      </th>
-                      <th
-                        className="table-header text-right cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('costBasis')}
-                      >
-                        Cost Basis<SortIcon column="costBasis" />
-                      </th>
-                      <th
-                        className="table-header text-right cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('marketValue')}
-                      >
-                        Market Value<SortIcon column="marketValue" />
-                      </th>
-                      <th
-                        className="table-header text-right cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('gainLoss')}
-                      >
-                        Gain/Loss<SortIcon column="gainLoss" />
-                      </th>
-                      <th
-                        className="table-header text-right cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('percentChange')}
-                      >
-                        % Change<SortIcon column="percentChange" />
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {sortedPositions.map((position) => {
-                      const security = securityMap.get(position.securityId);
-                      const account = accountMap.get(position.accountId);
-                      return (
-                        <tr key={position.id} className="hover:bg-gray-50">
-                          <td className="table-cell font-medium">{security?.symbol || 'Unknown'}</td>
-                          <td className="table-cell text-gray-500">{account?.name || 'Unknown'}</td>
-                          <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
-                          <td className="table-cell text-right">{formatCurrency(position.costBasis)}</td>
-                          <td className="table-cell text-right">{formatCurrency(position.marketValue || 0)}</td>
-                          <td className={`table-cell text-right ${(position.unrealizedGain || 0) >= 0 ? 'positive' : 'negative'}`}>
-                            {formatCurrency(position.unrealizedGain || 0)}
-                          </td>
-                          <td className={`table-cell text-right ${(position.unrealizedGainPercent || 0) >= 0 ? 'positive' : 'negative'}`}>
-                            {formatPercent(position.unrealizedGainPercent || 0)}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                {todayRitual.actionChosen && (
+                  <div className="border-t border-gray-100 pt-2">
+                    <span className="text-xs font-medium text-gray-500 uppercase">Action</span>
+                    <p className="mt-1 text-sm">
+                      <span className="font-medium capitalize">{todayRitual.actionChosen}</span>
+                      {todayRitual.actionDetail && <span className="text-gray-500"> — {todayRitual.actionDetail}</span>}
+                    </p>
+                  </div>
+                )}
               </div>
             ) : (
-              <div className="text-center py-12 text-gray-500">
-                <p>No holdings yet.</p>
-                <p className="text-sm mt-1">Add accounts and import transactions to get started.</p>
-              </div>
+              <p className="text-sm text-gray-400">No regime set today. Run the mid-morning ritual after 10:30am ET.</p>
             )}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Top Movers */}
+            <div className="card">
+              <h2 className="text-lg font-semibold text-gray-900 mb-3">Top Movers</h2>
+              {topMovers.length > 0 ? (
+                <div className="space-y-1">
+                  {topMovers.map(m => {
+                    const isPositive = m.changePct >= 0;
+                    const tierColor = m.tier ? (TIER_COLORS[m.tier] || '#9ca3af') : undefined;
+                    return (
+                      <div key={m.symbol} className="flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-50">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm w-12">{m.symbol}</span>
+                          {tierColor && (
+                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: tierColor }} title={m.tier} />
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <span className="text-sm">{formatCurrency(m.price)}</span>
+                          <span className={`ml-3 text-sm font-medium ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                            {formatPercent(m.changePct)}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-400">Waiting for streaming data...</p>
+              )}
+            </div>
+
+            {/* Sector Heatmap */}
+            <div className="card">
+              <h2 className="text-lg font-semibold text-gray-900 mb-1">Sector Performance</h2>
+              {sectorDate && <p className="text-xs text-gray-400 mb-3">{sectorDate}</p>}
+              {sectorData.length > 0 ? (
+                <div className="space-y-1.5">
+                  {sectorData.map(s => {
+                    const isPositive = s.change >= 0;
+                    const barWidth = Math.min(Math.abs(s.change) * 15, 100);
+                    return (
+                      <div key={s.sector} className="flex items-center gap-2">
+                        <span className="text-xs w-36 truncate text-gray-600">{s.sector}</span>
+                        <div className="flex-1 flex items-center">
+                          <div className="w-full h-4 bg-gray-50 rounded relative overflow-hidden">
+                            <div
+                              className={`h-full rounded ${isPositive ? 'bg-green-400' : 'bg-red-400'}`}
+                              style={{ width: `${barWidth}%`, opacity: 0.7 }}
+                            />
+                          </div>
+                        </div>
+                        <span className={`text-xs font-medium w-14 text-right ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                          {isPositive ? '+' : ''}{s.change.toFixed(2)}%
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-400">No sector data available</p>
+              )}
+            </div>
           </div>
         </>
       )}
