@@ -1269,6 +1269,122 @@ else:
     fi
     ;;
 
+  technicals)
+    # Show technical indicators for portfolio symbols via FMP API
+    FMP_KEY=$(get_fmp_key)
+    if [ -z "$FMP_KEY" ]; then
+      echo "ERROR: FMP API key not configured in ~/.pm-cli.conf"
+      exit 1
+    fi
+
+    SYMBOL="$2"
+    if [ -n "$SYMBOL" ]; then
+      # Single symbol detail view
+      SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+      echo "=== Technical Indicators: $SYMBOL ==="
+      python3 - "$SYMBOL" "$FMP_KEY" <<'PYEOF'
+import json, urllib.request, sys
+
+symbol = sys.argv[1]
+key = sys.argv[2]
+base = 'https://financialmodelingprep.com/stable/technical-indicators'
+
+def fetch(indicator, period):
+    url = f'{base}/{indicator}?symbol={symbol}&periodLength={period}&timeframe=1day&apikey={key}'
+    try:
+        data = json.loads(urllib.request.urlopen(url).read())
+        return data[0] if data else None
+    except:
+        return None
+
+sma20 = fetch('sma', 20)
+sma50 = fetch('sma', 50)
+sma200 = fetch('sma', 200)
+rsi = fetch('rsi', 14)
+
+if not sma20:
+    print(f'  No data available for {symbol}')
+    sys.exit(0)
+
+price = sma20.get('close', 0)
+s20 = sma20.get('sma', 0)
+s50 = sma50.get('sma', 0) if sma50 else 0
+s200 = sma200.get('sma', 0) if sma200 else 0
+rsi_val = rsi.get('rsi', 0) if rsi else 0
+
+print(f'  Price:    ${price:,.2f}')
+print(f'  20 DMA:   ${s20:,.2f}  ({"above" if price >= s20 else "BELOW"})')
+print(f'  50 DMA:   ${s50:,.2f}  ({"above" if price >= s50 else "BELOW"})')
+print(f'  200 DMA:  ${s200:,.2f}  ({"above" if price >= s200 else "BELOW"})')
+rsi_label = ''
+if rsi_val >= 70: rsi_label = '  ⚠️  OVERBOUGHT'
+elif rsi_val <= 30: rsi_label = '  ⚠️  OVERSOLD'
+elif rsi_val >= 60: rsi_label = '  (approaching overbought)'
+elif rsi_val <= 40: rsi_label = '  (approaching oversold)'
+else: rsi_label = '  (neutral)'
+print(f'  RSI(14):  {rsi_val:.1f}{rsi_label}')
+
+above_count = sum(1 for s in [s20, s50, s200] if price >= s)
+if above_count == 3: print(f'  Trend:    Strong uptrend (above all DMAs)')
+elif above_count == 0: print(f'  Trend:    Strong downtrend (below all DMAs)')
+elif price >= s200: print(f'  Trend:    Pullback in uptrend')
+else: print(f'  Trend:    Weakening / breakdown')
+PYEOF
+    else
+      # All portfolio symbols table
+      echo "=== Portfolio Technical Indicators ==="
+      SYMBOLS=$(sqlite3 "$DB" "
+        SELECT DISTINCT s.symbol FROM positions p
+        JOIN securities s ON p.security_id = s.id
+        WHERE s.type != 'cash' AND s.symbol != ''
+        ORDER BY s.symbol;
+      ")
+      python3 - "$FMP_KEY" "$SYMBOLS" <<'PYEOF'
+import json, urllib.request, sys
+
+key = sys.argv[1]
+symbols = [s.strip() for s in sys.argv[2].strip().split('\n') if s.strip()]
+base = 'https://financialmodelingprep.com/stable/technical-indicators'
+
+def fetch(indicator, symbol, period):
+    url = f'{base}/{indicator}?symbol={symbol}&periodLength={period}&timeframe=1day&apikey={key}'
+    try:
+        data = json.loads(urllib.request.urlopen(url).read())
+        return data[0] if data else None
+    except:
+        return None
+
+print(f'{"Symbol":<8} {"Price":>8} {"20 DMA":>8} {"50 DMA":>8} {"200 DMA":>9} {"RSI":>6}  Signal')
+print('-' * 72)
+
+for symbol in symbols:
+    sma20 = fetch('sma', symbol, 20)
+    sma50 = fetch('sma', symbol, 50)
+    sma200 = fetch('sma', symbol, 200)
+    rsi = fetch('rsi', symbol, 14)
+
+    if not sma20:
+        print(f'{symbol:<8} No data')
+        continue
+
+    price = sma20.get('close', 0)
+    s20 = sma20.get('sma', 0)
+    s50 = sma50.get('sma', 0) if sma50 else 0
+    s200 = sma200.get('sma', 0) if sma200 else 0
+    rsi_val = rsi.get('rsi', 0) if rsi else 0
+
+    signals = []
+    if price < s50: signals.append('< 50DMA')
+    if price < s200: signals.append('< 200DMA')
+    if rsi_val >= 70: signals.append('OB')
+    elif rsi_val <= 30: signals.append('OS')
+    signal_str = ', '.join(signals) if signals else ''
+
+    print(f'{symbol:<8} ${price:>7,.2f} ${s20:>7,.2f} ${s50:>7,.2f} ${s200:>8,.2f} {rsi_val:>5.1f}  {signal_str}')
+PYEOF
+    fi
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -1304,5 +1420,6 @@ else:
     echo "  snapshot-history [n]- Portfolio totals for last n days (default 30)"
     echo "  snapshot-position   - Position history: <symbol> [days]"
     echo "  news [symbol]       - Recent news (last 24h, or 7 days for specific symbol)"
+    echo "  technicals [symbol] - Technical indicators: SMA 20/50/200, RSI (via FMP)"
     ;;
 esac
