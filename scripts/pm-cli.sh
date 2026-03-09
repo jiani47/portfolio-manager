@@ -571,6 +571,80 @@ print(f'Updated {updated} prices, {errors} errors')
       done
       echo "========================="
     fi
+
+    # Fetch news from FMP
+    FMP_KEY=$(get_fmp_key)
+    if [ -n "$FMP_KEY" ]; then
+      # Create news table if not exists
+      sqlite3 "$DB" "
+        CREATE TABLE IF NOT EXISTS news (
+          id TEXT PRIMARY KEY,
+          symbol TEXT NOT NULL,
+          title TEXT NOT NULL,
+          snippet TEXT,
+          source TEXT,
+          url TEXT,
+          published_at TEXT NOT NULL,
+          fetched_at TEXT NOT NULL,
+          UNIQUE(symbol, title)
+        );
+        CREATE INDEX IF NOT EXISTS idx_news_symbol ON news(symbol);
+        CREATE INDEX IF NOT EXISTS idx_news_published ON news(published_at);
+      "
+
+      echo ""
+      echo "Fetching news from FMP..."
+
+      # FMP stable endpoint supports comma-separated symbols
+      # Fetch in batches of 10 symbols to avoid URL length limits
+      echo "$SYMBOLS" | paste -d',' - - - - - - - - - - | while read -r BATCH; do
+        [ -z "$BATCH" ] && continue
+        NEWS_RESPONSE=$(curl -s "${FMP_BASE}/stock-news?symbol=${BATCH}&limit=100&apikey=${FMP_KEY}" 2>/dev/null)
+
+        python3 -c "
+import json, sys, sqlite3, uuid
+
+db = '$DB'
+now = '$NOW'
+
+try:
+    data = json.loads('''${NEWS_RESPONSE}''')
+except:
+    sys.exit(0)
+
+if not isinstance(data, list):
+    sys.exit(0)
+
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+count = 0
+for article in data:
+    symbol = article.get('symbol', '')
+    title = article.get('title', '')
+    if not symbol or not title:
+        continue
+    snippet = article.get('text', '')[:500] if article.get('text') else None
+    source = article.get('site', '')
+    url = article.get('url', '')
+    published = article.get('publishedDate', now)
+    row_id = str(uuid.uuid4())
+    try:
+        cur.execute('''
+            INSERT OR IGNORE INTO news (id, symbol, title, snippet, source, url, published_at, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (row_id, symbol, title, snippet, source, url, published, now))
+        count += cur.rowcount
+    except:
+        pass
+conn.commit()
+conn.close()
+print(f'  Fetched {len(data)} articles, {count} new')
+" 2>/dev/null
+      done
+
+      # Clean up articles older than 30 days
+      sqlite3 "$DB" "DELETE FROM news WHERE published_at < datetime('now', '-30 days');"
+    fi
     ;;
   watchlists)
     sqlite3 -header -column "$DB" "
