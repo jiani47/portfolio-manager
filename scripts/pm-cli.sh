@@ -631,24 +631,22 @@ print(f'Updated {updated} prices, {errors} errors')
       echo ""
       echo "Fetching news from FMP..."
 
-      # FMP stable endpoint supports comma-separated symbols
-      # Fetch in batches of 10 symbols to avoid URL length limits
-      echo "$SYMBOLS" | paste -d',' - - - - - - - - - - | while read -r BATCH; do
-        [ -z "$BATCH" ] && continue
-        NEWS_RESPONSE=$(curl -s "${FMP_BASE}/stock-news?symbol=${BATCH}&limit=100&apikey=${FMP_KEY}" 2>/dev/null)
-
-        python3 -c "
+      # Fetch latest news firehose (10 pages x 50 = ~500 articles covering ~24h)
+      # Store all, filter to portfolio symbols when displaying
+      TOTAL_NEW=0
+      for PAGE in 0 1 2 3 4 5 6 7 8 9; do
+        NEW_COUNT=$(curl -s "${FMP_BASE}/news/stock-latest?page=${PAGE}&limit=50&apikey=${FMP_KEY}" 2>/dev/null | python3 -c "
 import json, sys, sqlite3, uuid
 
-db = '$DB'
-now = '$NOW'
+db = sys.argv[1]
+now = sys.argv[2]
 
 try:
-    data = json.loads('''${NEWS_RESPONSE}''')
+    data = json.load(sys.stdin)
 except:
     sys.exit(0)
 
-if not isinstance(data, list):
+if not isinstance(data, list) or len(data) == 0:
     sys.exit(0)
 
 conn = sqlite3.connect(db)
@@ -659,7 +657,7 @@ for article in data:
     title = article.get('title', '')
     if not symbol or not title:
         continue
-    snippet = article.get('text', '')[:500] if article.get('text') else None
+    snippet = (article.get('text', '') or '')[:500] or None
     source = article.get('site', '')
     url = article.get('url', '')
     published = article.get('publishedDate', now)
@@ -674,12 +672,21 @@ for article in data:
         pass
 conn.commit()
 conn.close()
-print(f'  Fetched {len(data)} articles, {count} new')
-" 2>/dev/null
+print(count)
+" "$DB" "$NOW" 2>/dev/null)
+        TOTAL_NEW=$((TOTAL_NEW + ${NEW_COUNT:-0}))
       done
+      echo "  Stored $TOTAL_NEW new articles"
 
-      # Clean up articles older than 30 days
-      sqlite3 "$DB" "DELETE FROM news WHERE published_at < datetime('now', '-30 days');"
+      # Archive articles older than 30 days to CSV, then remove from DB
+      ARCHIVE_DIR="$HOME/Library/Application Support/portfolio-manager/news-archive"
+      mkdir -p "$ARCHIVE_DIR"
+      ARCHIVE_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM news WHERE published_at < datetime('now', '-30 days');")
+      if [ "$ARCHIVE_COUNT" -gt 0 ]; then
+        sqlite3 -header -csv "$DB" "SELECT * FROM news WHERE published_at < datetime('now', '-30 days') ORDER BY published_at;" >> "$ARCHIVE_DIR/news-archive.csv"
+        sqlite3 "$DB" "DELETE FROM news WHERE published_at < datetime('now', '-30 days');"
+        echo "  Archived $ARCHIVE_COUNT old articles to news-archive/"
+      fi
     fi
     ;;
   watchlists)
