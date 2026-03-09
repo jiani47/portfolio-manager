@@ -225,6 +225,7 @@ declare global {
       // Streaming operations
       onStreamingQuote: (callback: (quote: StreamingQuote) => void) => () => void;
       onStreamingStatus: (callback: (status: string) => void) => () => void;
+      onPositionsSynced: (callback: (data: { positionsSynced: number; accountsSynced: number }) => void) => () => void;
       streamingStart: (symbols: string[]) => Promise<void>;
       streamingStop: () => Promise<void>;
       streamingGetStatus: () => Promise<StreamingState>;

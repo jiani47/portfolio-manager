@@ -190,6 +190,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('streaming:status', handler);
     return () => { ipcRenderer.removeListener('streaming:status', handler); };
   },
+  onPositionsSynced: (callback: (data: { positionsSynced: number; accountsSynced: number }) => void) => {
+    const handler = (_event: unknown, data: { positionsSynced: number; accountsSynced: number }) => callback(data);
+    ipcRenderer.on('positions:synced', handler);
+    return () => { ipcRenderer.removeListener('positions:synced', handler); };
+  },
 
   // Streaming control (renderer -> main)
   streamingStart: (symbols: string[]) => ipcRenderer.invoke('streaming:start', symbols),

@@ -19,6 +19,7 @@ export default function Dashboard() {
   const { intents, fetchIntents } = usePositionIntents();
   const [sortColumn, setSortColumn] = useState<SortColumn>('marketValue');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const [lastSynced, setLastSynced] = useState<Date | null>(null);
 
   const isDataProviderConfigured = settings?.dataProvider === 'schwab' || ((settings?.dataProvider === 'fmp' || settings?.dataProvider === 'massive') && settings?.dataProviderApiKey);
 
@@ -38,6 +39,16 @@ export default function Dashboard() {
     fetchSettings();
     fetchIntents();
   }, [fetchSummary, fetchPositions, fetchAccounts, fetchSecurities, fetchSettings, fetchIntents]);
+
+  // Listen for position sync events
+  useEffect(() => {
+    const removeListener = window.electronAPI.onPositionsSynced(() => {
+      setLastSynced(new Date());
+      fetchPositions();
+      fetchSummary();
+    });
+    return () => removeListener();
+  }, [fetchPositions, fetchSummary]);
 
   // Fetch earnings when data provider is configured and positions are loaded
   useEffect(() => {
@@ -165,9 +176,16 @@ export default function Dashboard() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <button onClick={fetchSummary} className="btn-secondary text-sm">
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          {lastSynced && (
+            <span className="text-xs text-gray-400">
+              Last synced: {lastSynced.toLocaleTimeString()}
+            </span>
+          )}
+          <button onClick={fetchSummary} className="btn-secondary text-sm">
+            Refresh
+          </button>
+        </div>
       </div>
 
       {loading ? (
