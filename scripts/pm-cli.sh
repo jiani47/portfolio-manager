@@ -1165,6 +1165,67 @@ for line in sys.stdin:
 " 2>/dev/null
     ;;
 
+  news)
+    # Show recent news, optionally filtered by symbol
+    SYMBOL="$2"
+
+    # Create table if not exists
+    sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS news (
+      id TEXT PRIMARY KEY, symbol TEXT NOT NULL, title TEXT NOT NULL,
+      snippet TEXT, source TEXT, url TEXT, published_at TEXT NOT NULL,
+      fetched_at TEXT NOT NULL, UNIQUE(symbol, title)
+    );"
+
+    if [ -n "$SYMBOL" ]; then
+      SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+      echo "=== News: $SYMBOL (last 7 days) ==="
+      sqlite3 "$DB" "
+        SELECT published_at, title, source, url
+        FROM news
+        WHERE symbol = '$SYMBOL'
+          AND published_at >= datetime('now', '-7 days')
+        ORDER BY published_at DESC
+        LIMIT 20;
+      " | python3 -c "
+import sys
+for line in sys.stdin:
+    parts = line.strip().split('|')
+    if len(parts) < 4: continue
+    pub, title, source, url = parts[0], parts[1], parts[2], parts[3]
+    time_str = pub[5:16] if len(pub) > 16 else pub
+    print(f'  {time_str}  [{source}] {title}')
+    print(f'             {url}')
+" 2>/dev/null
+    else
+      echo "=== Portfolio News (last 24h) ==="
+      sqlite3 "$DB" "
+        SELECT symbol, published_at, title, source, url
+        FROM news
+        WHERE published_at >= datetime('now', '-1 day')
+        ORDER BY symbol, published_at DESC;
+      " | python3 -c "
+import sys
+from collections import defaultdict
+by_symbol = defaultdict(list)
+for line in sys.stdin:
+    parts = line.strip().split('|')
+    if len(parts) < 5: continue
+    sym, pub, title, source, url = parts[0], parts[1], parts[2], parts[3], parts[4]
+    by_symbol[sym].append((pub, title, source, url))
+
+if not by_symbol:
+    print('  No news in the last 24 hours.')
+else:
+    for sym in sorted(by_symbol):
+        print(f'  --- {sym} ---')
+        for pub, title, source, url in by_symbol[sym]:
+            time_str = pub[11:16] if len(pub) > 16 else pub
+            print(f'    {time_str} [{source}] {title}')
+        print()
+" 2>/dev/null
+    fi
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -1199,5 +1260,6 @@ for line in sys.stdin:
     echo "  snapshot            - Take EOD portfolio snapshot (one per day)"
     echo "  snapshot-history [n]- Portfolio totals for last n days (default 30)"
     echo "  snapshot-position   - Position history: <symbol> [days]"
+    echo "  news [symbol]       - Recent news (last 24h, or 7 days for specific symbol)"
     ;;
 esac
