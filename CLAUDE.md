@@ -59,6 +59,7 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh snapshot              # Take EOD portfolio snapshot (one per day)
 ./scripts/pm-cli.sh snapshot-history [n]  # Portfolio totals for last n days (default 30)
 ./scripts/pm-cli.sh snapshot-position <symbol> [days]  # Position history over time
+./scripts/pm-cli.sh news [symbol]         # Recent news (24h all, 7d per symbol)
 ```
 
 ## Daily PM Ritual
