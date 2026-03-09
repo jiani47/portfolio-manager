@@ -61,6 +61,8 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh snapshot-position <symbol> [days]  # Position history over time
 ./scripts/pm-cli.sh news [symbol]         # Recent news (24h all, 7d per symbol)
 ./scripts/pm-cli.sh technicals [symbol]  # Technical indicators: SMA 20/50/200, RSI (via FMP)
+./scripts/pm-cli.sh levels [symbol]      # Support/resistance levels with risk/reward
+./scripts/pm-cli.sh levels-refresh [sym] # Recompute S/R from price history swing highs/lows
 ```
 
 ## Daily PM Ritual

@@ -295,6 +295,47 @@ PYEOF
       fi
     fi
 
+    # S/R Proximity Alerts (within 3% of a key level)
+    SR_ALERTS=$(python3 - "$DB" <<'PYEOF'
+import sqlite3, sys
+
+db = sys.argv[1]
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+
+cur.execute('''
+    SELECT DISTINCT s.symbol,
+           (SELECT ph.close_price FROM price_history ph
+            WHERE ph.security_id = s.id ORDER BY ph.date DESC LIMIT 1) as price
+    FROM positions p
+    JOIN securities s ON p.security_id = s.id
+    WHERE s.type != 'cash' AND s.symbol != ''
+    ORDER BY s.symbol
+''')
+
+alerts = []
+for symbol, price in cur.fetchall():
+    if not price:
+        continue
+    cur.execute("SELECT price, strength FROM price_levels WHERE symbol = ? ORDER BY ABS(price - ?) LIMIT 5", (symbol, price))
+    for level_price, strength in cur.fetchall():
+        pct = abs(price - level_price) / price * 100
+        if pct <= 3 and pct > 0.1:
+            direction = 'approaching resistance' if level_price > price else 'approaching support'
+            alerts.append(f'  {symbol:<6} ${price:>8,.2f}  {direction} ${level_price:,.2f} ({pct:.1f}% away, {strength}x tested)')
+
+if alerts:
+    for a in alerts:
+        print(a)
+conn.close()
+PYEOF
+)
+    if [ -n "$SR_ALERTS" ]; then
+      echo "=== S/R Proximity Alerts ==="
+      echo "$SR_ALERTS"
+      echo ""
+    fi
+
     echo "(Run 'pm-cli.sh refresh' to update prices. Use web search for news.)"
     echo "============================================"
     ;;
@@ -1445,6 +1486,290 @@ PYEOF
     fi
     ;;
 
+  levels-refresh)
+    # Recompute support/resistance levels from price_history swing highs/lows
+    SYMBOL="$2"
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+    # Create table if not exists
+    sqlite3 "$DB" "
+      CREATE TABLE IF NOT EXISTS price_levels (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        level_type TEXT NOT NULL,
+        price REAL NOT NULL,
+        strength INTEGER DEFAULT 1,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(symbol, level_type, price)
+      );
+      CREATE INDEX IF NOT EXISTS idx_price_levels_symbol ON price_levels(symbol);
+    "
+
+    if [ -n "$SYMBOL" ]; then
+      SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+      SYMBOLS="$SYMBOL"
+    else
+      SYMBOLS=$(sqlite3 "$DB" "
+        SELECT DISTINCT s.symbol FROM positions p
+        JOIN securities s ON p.security_id = s.id
+        WHERE s.type != 'cash' AND s.symbol != ''
+        ORDER BY s.symbol;
+      ")
+    fi
+
+    echo "=== Refreshing Support/Resistance Levels ==="
+    python3 - "$DB" "$NOW" "$SYMBOLS" <<'PYEOF'
+import sqlite3, uuid, sys
+from collections import defaultdict
+
+db = sys.argv[1]
+now = sys.argv[2]
+symbols = [s.strip() for s in sys.argv[3].strip().split('\n') if s.strip()]
+
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+
+for symbol in symbols:
+    # Get 6 months of OHLC data
+    cur.execute('''
+        SELECT ph.date, ph.high_price, ph.low_price, ph.close_price
+        FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = ? AND ph.date >= date('now', '-6 months')
+        ORDER BY ph.date ASC
+    ''', (symbol,))
+    rows = cur.fetchall()
+
+    if len(rows) < 15:
+        print(f'  {symbol}: insufficient data ({len(rows)} days)')
+        continue
+
+    dates = [r[0] for r in rows]
+    highs = [r[1] for r in rows]
+    lows = [r[2] for r in rows]
+    closes = [r[3] for r in rows]
+    current_price = closes[-1]
+    if current_price is None:
+        print(f'  {symbol}: no current price')
+        continue
+
+    # Find swing highs (high > 5 days before and after)
+    swing_highs = []
+    swing_lows = []
+    window = 5
+
+    for i in range(window, len(rows) - window):
+        h = highs[i]
+        if h is None:
+            continue
+        neighborhood_h = [highs[j] for j in range(i - window, i + window + 1) if j != i]
+        if any(v is None for v in neighborhood_h):
+            continue
+        if all(h >= v for v in neighborhood_h):
+            swing_highs.append(h)
+
+        l = lows[i]
+        if l is None:
+            continue
+        neighborhood_l = [lows[j] for j in range(i - window, i + window + 1) if j != i]
+        if any(v is None for v in neighborhood_l):
+            continue
+        if all(l <= v for v in neighborhood_l):
+            swing_lows.append(l)
+
+    # Cluster nearby levels within 2%
+    def cluster(levels, threshold=0.02):
+        if not levels:
+            return []
+        levels = sorted(levels)
+        clusters = []
+        current_cluster = [levels[0]]
+        for level in levels[1:]:
+            if (level - current_cluster[0]) / current_cluster[0] <= threshold:
+                current_cluster.append(level)
+            else:
+                avg = sum(current_cluster) / len(current_cluster)
+                clusters.append((round(avg, 2), len(current_cluster)))
+                current_cluster = [level]
+        avg = sum(current_cluster) / len(current_cluster)
+        clusters.append((round(avg, 2), len(current_cluster)))
+        return clusters
+
+    resistance_clusters = cluster(swing_highs)
+    support_clusters = cluster(swing_lows)
+
+    # Filter: resistance above current price, support below
+    resistance = [(p, s) for p, s in resistance_clusters if p > current_price]
+    support = [(p, s) for p, s in support_clusters if p < current_price]
+
+    # Sort: resistance ascending (nearest first), support descending (nearest first)
+    resistance.sort(key=lambda x: x[0])
+    support.sort(key=lambda x: -x[0])
+
+    # Keep top 5 each
+    resistance = resistance[:5]
+    support = support[:5]
+
+    # Clear old computed levels for this symbol
+    cur.execute("DELETE FROM price_levels WHERE symbol = ? AND source = 'swing'", (symbol,))
+
+    # Insert new levels
+    count = 0
+    for price, strength in resistance:
+        row_id = str(uuid.uuid4())
+        cur.execute('''
+            INSERT OR REPLACE INTO price_levels (id, symbol, level_type, price, strength, source, created_at, updated_at)
+            VALUES (?, ?, 'resistance', ?, ?, 'swing', ?, ?)
+        ''', (row_id, symbol, price, strength, now, now))
+        count += 1
+
+    for price, strength in support:
+        row_id = str(uuid.uuid4())
+        cur.execute('''
+            INSERT OR REPLACE INTO price_levels (id, symbol, level_type, price, strength, source, created_at, updated_at)
+            VALUES (?, ?, 'support', ?, ?, 'swing', ?, ?)
+        ''', (row_id, symbol, price, strength, now, now))
+        count += 1
+
+    print(f'  {symbol:<6} ${current_price:>8,.2f}  {len(support)}S / {len(resistance)}R levels')
+
+conn.commit()
+conn.close()
+print('Done.')
+PYEOF
+    ;;
+
+  levels)
+    # Show support/resistance levels with risk/reward
+    SYMBOL="$2"
+
+    # Create table if not exists
+    sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS price_levels (
+      id TEXT PRIMARY KEY, symbol TEXT NOT NULL, level_type TEXT NOT NULL,
+      price REAL NOT NULL, strength INTEGER DEFAULT 1, source TEXT NOT NULL,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(symbol, level_type, price)
+    );"
+
+    if [ -n "$SYMBOL" ]; then
+      SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+      # Detailed single-symbol view
+      echo "=== Support/Resistance: $SYMBOL ==="
+      LATEST_PRICE=$(sqlite3 "$DB" "
+        SELECT ph.close_price FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = '$SYMBOL'
+        ORDER BY ph.date DESC LIMIT 1;
+      ")
+      echo "  Current Price: \$$LATEST_PRICE"
+      echo ""
+      echo "  Resistance (above):"
+      sqlite3 "$DB" "
+        SELECT printf('%.2f', price), strength FROM price_levels
+        WHERE symbol = '$SYMBOL' AND level_type = 'resistance'
+        ORDER BY price ASC;
+      " | while IFS='|' read -r price str; do
+        echo "    R  \$$price  (${str}x tested)"
+      done
+      echo ""
+      echo "  Support (below):"
+      sqlite3 "$DB" "
+        SELECT printf('%.2f', price), strength FROM price_levels
+        WHERE symbol = '$SYMBOL' AND level_type = 'support'
+        ORDER BY price DESC;
+      " | while IFS='|' read -r price str; do
+        echo "    S  \$$price  (${str}x tested)"
+      done
+      echo ""
+      # Risk/reward
+      python3 - "$DB" "$SYMBOL" "$LATEST_PRICE" <<'PYEOF'
+import sqlite3, sys
+
+db, symbol, price = sys.argv[1], sys.argv[2], float(sys.argv[3])
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+
+cur.execute("SELECT price FROM price_levels WHERE symbol = ? AND level_type = 'support' ORDER BY price DESC LIMIT 1", (symbol,))
+s = cur.fetchone()
+cur.execute("SELECT price FROM price_levels WHERE symbol = ? AND level_type = 'resistance' ORDER BY price ASC LIMIT 1", (symbol,))
+r = cur.fetchone()
+
+if s and r:
+    support, resist = s[0], r[0]
+    downside = price - support
+    upside = resist - price
+    rr = upside / downside if downside > 0 else float('inf')
+    print(f'  Risk/Reward:')
+    print(f'    Upside to R1:   ${upside:>8,.2f}  ({upside/price*100:>+.1f}%)')
+    print(f'    Downside to S1: ${downside:>8,.2f}  ({-downside/price*100:>+.1f}%)')
+    print(f'    R:R Ratio:      {rr:.2f}x', end='')
+    if rr < 1: print('  ⚠️  Unfavorable')
+    elif rr >= 2: print('  ✓ Favorable')
+    else: print('')
+elif s:
+    print(f'  Nearest support: ${s[0]:,.2f} (no resistance levels found)')
+elif r:
+    print(f'  Nearest resistance: ${r[0]:,.2f} (no support levels found)')
+else:
+    print(f'  No levels computed. Run: pm-cli.sh levels-refresh {symbol}')
+conn.close()
+PYEOF
+    else
+      # All portfolio symbols summary
+      echo "=== Portfolio Support/Resistance & Risk/Reward ==="
+      python3 - "$DB" <<'PYEOF'
+import sqlite3, sys
+
+db = sys.argv[1]
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+
+# Get portfolio symbols with latest price
+cur.execute('''
+    SELECT DISTINCT s.symbol,
+           (SELECT ph.close_price FROM price_history ph
+            WHERE ph.security_id = s.id ORDER BY ph.date DESC LIMIT 1) as price
+    FROM positions p
+    JOIN securities s ON p.security_id = s.id
+    WHERE s.type != 'cash' AND s.symbol != ''
+    ORDER BY s.symbol
+''')
+positions = cur.fetchall()
+
+print(f'{"Symbol":<8} {"Price":>8} {"S1":>8} {"R1":>8} {"Downside":>9} {"Upside":>8} {"R:R":>5}  Flag')
+print('-' * 72)
+
+for symbol, price in positions:
+    if not price:
+        continue
+
+    cur.execute("SELECT price FROM price_levels WHERE symbol = ? AND level_type = 'support' ORDER BY price DESC LIMIT 1", (symbol,))
+    s = cur.fetchone()
+    cur.execute("SELECT price FROM price_levels WHERE symbol = ? AND level_type = 'resistance' ORDER BY price ASC LIMIT 1", (symbol,))
+    r = cur.fetchone()
+
+    s1 = f'${s[0]:>7,.2f}' if s else '     —'
+    r1 = f'${r[0]:>7,.2f}' if r else '     —'
+
+    if s and r:
+        downside = price - s[0]
+        upside = r[0] - price
+        rr = upside / downside if downside > 0 else 99
+        ds_pct = f'{-downside/price*100:.1f}%'
+        us_pct = f'{upside/price*100:.1f}%'
+        rr_str = f'{rr:.1f}x'
+        flag = '⚠️ R:R<1' if rr < 1 else ''
+    else:
+        ds_pct, us_pct, rr_str, flag = '—', '—', '—', 'no levels'
+
+    print(f'{symbol:<8} ${price:>7,.2f} {s1} {r1} {ds_pct:>9} {us_pct:>8} {rr_str:>5}  {flag}')
+
+conn.close()
+PYEOF
+    fi
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -1481,5 +1806,7 @@ PYEOF
     echo "  snapshot-position   - Position history: <symbol> [days]"
     echo "  news [symbol]       - Recent news (last 24h, or 7 days for specific symbol)"
     echo "  technicals [symbol] - Technical indicators: SMA 20/50/200, RSI (via FMP)"
+    echo "  levels [symbol]     - Support/resistance levels with risk/reward"
+    echo "  levels-refresh [sym]- Recompute S/R from price history (all if no arg)"
     ;;
 esac
