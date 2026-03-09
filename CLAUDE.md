@@ -63,40 +63,33 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh technicals [symbol]  # Technical indicators: SMA 20/50/200, RSI (via FMP)
 ./scripts/pm-cli.sh levels [symbol]      # Support/resistance levels with risk/reward
 ./scripts/pm-cli.sh levels-refresh [sym] # Recompute S/R from price history swing highs/lows
+./scripts/pm-cli.sh sectors [date]       # Sector performance heatmap (via FMP)
 ```
 
 ## Daily PM Ritual
 
-Run with the user in conversation. Four passes, 20-25 minutes total. Do this before the opening bell.
+Run with the user in conversation. Three phases across the day.
 
-### Pass 0 — Morning Briefing (2 min)
-1. Run `pm-cli.sh briefing` to pull market indices, portfolio quotes, and news
-2. Summarize: what's moving, any overnight news on holdings, index direction
-3. This gives context for the regime read — don't skip it
+### Pre-Market (~5 min, before open)
+1. Run `pm-cli.sh briefing` — overnight news, futures, portfolio quotes, S/R proximity, technical signals
+2. Summarize: what's moving, any overnight news that challenges a thesis
+3. Flag tier misalignments — only surface if a position size is misaligned with its tier (e.g. Starter grown to Growth-sized)
+4. No regime read yet — pre-market liquidity is thin, can't determine what's being rewarded/punished
 
-### Pass 1 — Regime Read (5 min)
-1. Ask: "What's being rewarded today? What's being punished?"
-2. Ask: "Trend day or sorting day?"
+### Mid-Morning (~10 min, after 10:30am)
+1. Run `pm-cli.sh sectors` to pull sector performance heatmap from FMP
+2. Regime read — based on actual price action, sector rotation, breadth:
+   - "What's being rewarded? What's being punished?" (informed by sector data)
+   - "Trend day or sorting day?"
 3. Record via: `pm-cli.sh ritual-set regime_rewarding "..."`, `ritual-set regime_punishing "..."`, `ritual-set regime_type trend|sorting`
-4. If sorting day: note that adds are disabled.
+4. If sorting day: adds are disabled
+5. Decision gate (now informed by regime):
+   - "One action today: reduce, re-tier, add, or nothing?"
+   - Record: `pm-cli.sh ritual-set action_chosen "reduce|retier|add|nothing"`
+   - If action chosen, record detail: `pm-cli.sh ritual-set action_detail "..."`
+   - Enforce: action must be regime-consistent
 
-### Pass 2 — Portfolio Alignment (10 min)
-1. Run `pm-cli.sh positions` to show current state
-2. Walk through positions by tier, ask:
-   - "Still the right tier?"
-   - "Is the market treating this the way you expect?"
-   - "Any position acting out of character?"
-3. Update intents if tier/thesis changes: `pm-cli.sh set-intent ...` (auto-logs the change)
-4. Show risk shape (run `pm-cli.sh summary`)
-5. At end: `pm-cli.sh intent-changes-today` to review what changed
-
-### Pass 3 — Decision Gate (5-10 min)
-1. Ask: "One action today: reduce, re-tier, add, or nothing?"
-2. Record: `pm-cli.sh ritual-set action_chosen "reduce|retier|add|nothing"`
-3. If action chosen, ask for detail and record: `pm-cli.sh ritual-set action_detail "..."`
-4. Enforce: action must be regime-consistent and tier-consistent
-
-### Journal (end of day)
+### EOD
 1. Ask: "One sentence — today I did/didn't act because ___"
 2. Record: `pm-cli.sh ritual-set journal "..."`
 

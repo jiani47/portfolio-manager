@@ -1486,6 +1486,80 @@ PYEOF
     fi
     ;;
 
+  sectors)
+    # Show sector performance heatmap via FMP API
+    FMP_KEY=$(get_fmp_key)
+    if [ -z "$FMP_KEY" ]; then
+      echo "ERROR: FMP API key not configured in ~/.pm-cli.conf"
+      exit 1
+    fi
+
+    DATE="${2:-$(date +%Y-%m-%d)}"
+    echo "=== Sector Performance: $DATE ==="
+
+    python3 - "$FMP_KEY" "$DATE" <<'PYEOF'
+import json, urllib.request, sys
+
+key, date = sys.argv[1], sys.argv[2]
+
+url = f'https://financialmodelingprep.com/stable/sector-performance-snapshot?date={date}&apikey={key}'
+try:
+    data = json.loads(urllib.request.urlopen(url).read())
+except:
+    print("  Failed to fetch sector data")
+    sys.exit(1)
+
+if not data:
+    # Try previous trading day
+    from datetime import datetime, timedelta
+    dt = datetime.strptime(date, '%Y-%m-%d')
+    for i in range(1, 4):
+        prev = (dt - timedelta(days=i)).strftime('%Y-%m-%d')
+        url2 = f'https://financialmodelingprep.com/stable/sector-performance-snapshot?date={prev}&apikey={key}'
+        try:
+            data = json.loads(urllib.request.urlopen(url2).read())
+            if data:
+                print(f'  (Using {prev} — today not yet available)')
+                break
+        except:
+            continue
+
+if not data:
+    print("  No sector data available")
+    sys.exit(0)
+
+# Aggregate across exchanges (NYSE + NASDAQ)
+sectors = {}
+for row in data:
+    sector = row['sector']
+    chg = row['averageChange']
+    if sector not in sectors:
+        sectors[sector] = []
+    sectors[sector].append(chg)
+
+# Average across exchanges
+sector_avg = {s: sum(v)/len(v) for s, v in sectors.items()}
+
+# Sort by performance (best to worst)
+ranked = sorted(sector_avg.items(), key=lambda x: -x[1])
+
+print(f'  {"Sector":<25} {"Change":>8}')
+print(f'  {"-"*25} {"-"*8}')
+for sector, chg in ranked:
+    bar = '█' * int(abs(chg) * 2)
+    if chg >= 0:
+        print(f'  {sector:<25} {chg:>+7.2f}%  \033[32m{bar}\033[0m')
+    else:
+        print(f'  {sector:<25} {chg:>+7.2f}%  \033[31m{bar}\033[0m')
+
+print()
+top = ranked[:3]
+bottom = ranked[-3:]
+print(f'  Rewarded: {", ".join(s for s,_ in top)}')
+print(f'  Punished: {", ".join(s for s,_ in bottom)}')
+PYEOF
+    ;;
+
   levels-refresh)
     # Recompute support/resistance levels from price_history swing highs/lows
     SYMBOL="$2"
@@ -1808,5 +1882,6 @@ PYEOF
     echo "  technicals [symbol] - Technical indicators: SMA 20/50/200, RSI (via FMP)"
     echo "  levels [symbol]     - Support/resistance levels with risk/reward"
     echo "  levels-refresh [sym]- Recompute S/R from price history (all if no arg)"
+    echo "  sectors [date]      - Sector performance heatmap (via FMP)"
     ;;
 esac
