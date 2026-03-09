@@ -199,6 +199,42 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
       echo ""
     fi
 
+    # Overnight news (last 24h) — portfolio holdings only
+    NEWS_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM news WHERE published_at >= datetime('now', '-1 day');" 2>/dev/null)
+    if [ "$NEWS_COUNT" -gt 0 ] 2>/dev/null; then
+      echo "=== Overnight News ==="
+      sqlite3 "$DB" "
+        SELECT n.symbol, n.published_at, n.title, n.source
+        FROM news n
+        JOIN (
+          SELECT DISTINCT s.symbol FROM positions p
+          JOIN securities s ON p.security_id = s.id
+          WHERE s.type != 'cash'
+        ) portfolio ON n.symbol = portfolio.symbol
+        WHERE n.published_at >= datetime('now', '-1 day')
+        ORDER BY n.symbol, n.published_at DESC;
+      " | python3 -c "
+import sys
+from collections import defaultdict
+by_symbol = defaultdict(list)
+for line in sys.stdin:
+    parts = line.strip().split('|')
+    if len(parts) < 4: continue
+    sym, pub, title, source = parts[0], parts[1], parts[2], parts[3]
+    by_symbol[sym].append((pub, title, source))
+
+for sym in sorted(by_symbol):
+    articles = by_symbol[sym]
+    print(f'  {sym} ({len(articles)} articles)')
+    for pub, title, source in articles[:3]:
+        time_str = pub[11:16] if len(pub) > 16 else pub
+        print(f'    {time_str} [{source}] {title}')
+    if len(articles) > 3:
+        print(f'    ... and {len(articles) - 3} more (run: pm-cli.sh news {sym})')
+print()
+" 2>/dev/null
+    fi
+
     echo "(Run 'pm-cli.sh refresh' to update prices. Use web search for news.)"
     echo "============================================"
     ;;
