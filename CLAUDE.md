@@ -55,6 +55,9 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh monitor-dismiss <id>     # Dismiss a triggered monitor
 ./scripts/pm-cli.sh monitor-rm <id>          # Delete a monitor
 ./scripts/pm-cli.sh monitor-reset <id>       # Re-arm a monitor
+./scripts/pm-cli.sh monitor-add-note <sym> <label> [date]  # Fundamental monitor (no price trigger)
+./scripts/pm-cli.sh earnings [days]          # Upcoming earnings for portfolio (default 14 days)
+./scripts/pm-cli.sh analytics [days]         # Portfolio analytics: beta, sharpe, drawdown (default 90)
 ./scripts/pm-cli.sh backfill [symbol]        # Backfill 3yr price history from Schwab (all if no arg)
 ./scripts/pm-cli.sh snapshot              # Take EOD portfolio snapshot (one per day)
 ./scripts/pm-cli.sh snapshot-history [n]  # Portfolio totals for last n days (default 30)

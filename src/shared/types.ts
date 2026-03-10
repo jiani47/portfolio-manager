@@ -7,6 +7,7 @@ export interface Account {
   accountNumber?: string;
   accountType: 'brokerage' | 'ira' | 'roth_ira' | '401k' | 'other';
   book?: 'investing' | 'trading';
+  cashBalance?: number;
   currency: string;
   createdAt: string;
   updatedAt: string;
@@ -616,9 +617,12 @@ export interface Monitor {
   label: string;
   actionType: 'informational' | 'action_required';
   status: 'active' | 'triggered' | 'dismissed';
+  monitorType?: 'price' | 'earnings' | 'fundamental';
   linkedPositionId?: string;
   linkedWatchlistItemId?: string;
   triggeredAt?: string;
+  reminderDate?: string;
+  expiresAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -650,4 +654,28 @@ export interface SchwabOrder {
   enteredTime: string;
   closedTime?: string;
   description?: string;
+}
+
+// Portfolio analytics
+export interface PortfolioAnalytics {
+  beta: number;
+  weightedBeta: number;
+  volatility: number;
+  sharpeRatio: number;
+  maxDrawdown: number;
+  maxDrawdownDate: string;
+  currentDrawdown: number;
+  annualizedReturn: number;
+  totalReturn: number;
+  benchmarkReturn: number;
+  dataPoints: number;
+  periodDays: number;
+}
+
+export interface PositionBeta {
+  symbol: string;
+  beta: number;
+  correlation: number;
+  weight: number;
+  weightedBeta: number;
 }

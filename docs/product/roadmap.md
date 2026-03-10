@@ -103,17 +103,21 @@ One-sentence journal stored in ritual record.
 - [x] Monitors page in app (view, add, dismiss, delete)
 - [x] Seeded 18 monitors from thesis doc price levels
 
-### 4.2 Watchlist Proximity Monitors (planned)
-- [ ] Upgrade existing 5% briefing alert to real-time monitor system
-- [ ] Alert when watchlist items approach target entry price
+### 4.2 Watchlist Proximity Monitors ✅
+- [x] Auto-create price monitors from watchlist items with target entry prices
+- [x] Linked via `linked_watchlist_item_id` FK — auto-sync on add/update/remove
+- [x] Real-time alerting via existing WebSocket streaming + extended hours polling
 
-### 4.3 Earnings Date Monitors (planned)
-- [ ] Remind N days before earnings to review thesis
-- [ ] Pull earnings dates from data provider
+### 4.3 Earnings Date Monitors ✅
+- [x] `pm-cli.sh earnings [days]` — upcoming earnings for portfolio symbols (FMP API)
+- [x] Auto-create earnings monitors (expires day after earnings) via `syncEarningsMonitors()`
+- [x] Earnings section in morning briefing
+- [x] Monitors auto-cleaned after expiration
 
-### 4.4 Manual/Fundamental Monitors (planned)
-- [ ] Free-text reminders surfaced during ritual
-- [ ] Track fundamental conditions (e.g., "KKR non-accruals rising")
+### 4.4 Manual/Fundamental Monitors ✅
+- [x] `pm-cli.sh monitor-add-note <symbol> <label> [reminder_date]`
+- [x] Fundamental reminders surfaced in morning briefing when due
+- [x] Monitors page updated with type filter (Price/Earnings/Fundamental) and multi-type add form
 
 ### 4.5 External Push (planned)
 - [ ] Slack, SMS, or webhook for remote alerting
@@ -272,7 +276,8 @@ Over time, surface patterns:
 | **2.5** | ✅ Done | Tags cleanup, thesis docs | Data quality before building more |
 | **3** | ✅ Done | Watchlists | Organized pipeline for future positions |
 | **4.1** | ✅ Done | Price monitors | Real-time price alerts with desktop notifications |
-| **4.2-4.5** | Planned | Other monitors | Watchlist proximity, earnings, fundamental, external push |
+| **4.2-4.4** | ✅ Done | Other monitors | Watchlist proximity, earnings, fundamental monitors |
+| **4.5** | Planned | External push | Slack, SMS, webhook alerting |
 | **5** | ✅ Done | Data infrastructure | Backfill, snapshots, news feed |
 | **6** | ✅ Done | Technical analysis | Support/resistance, indicators, risk/reward |
 | **7** | Planned | Pre-trade checklists | Gates action with process |

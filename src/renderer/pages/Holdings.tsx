@@ -108,7 +108,7 @@ export default function Holdings() {
   const { quotes: streamingQuotes, status: streamStatus } = useStreamingQuotes(symbolList);
 
   // Calculate positions with portfolio percentage and group them
-  const { concentratedPositions, normalPositions, smallPositions, watchlistPositions, totalMarketValue, totalCash } = useMemo(() => {
+  const { concentratedPositions, normalPositions, smallPositions, watchlistPositions, cashPositions, totalMarketValue, totalCash } = useMemo(() => {
     let filtered = selectedAccount
       ? positions.filter(p => p.accountId === selectedAccount)
       : positions;
@@ -171,6 +171,7 @@ export default function Holdings() {
       normalPositions: normal,
       smallPositions: small,
       watchlistPositions: watchlist,
+      cashPositions,
       totalMarketValue: total,
       totalCash: cashTotal,
     };
@@ -946,6 +947,40 @@ export default function Holdings() {
                         </td>
                       </tr>
                     ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Cash Positions */}
+          {cashPositions.length > 0 && (
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 mb-3">Cash</h2>
+              <div className="card overflow-hidden p-0">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="table-header">Account</th>
+                      <th className="table-header text-right">Balance</th>
+                      <th className="table-header text-right">% of Portfolio</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {cashPositions.map((position) => (
+                      <tr key={position.id} className="hover:bg-gray-50">
+                        <td className="table-cell font-medium">{position.account?.name || 'Unknown'}</td>
+                        <td className="table-cell text-right">{formatCurrency(position.quantity)}</td>
+                        <td className="table-cell text-right text-gray-500">{position.portfolioPercent.toFixed(1)}%</td>
+                      </tr>
+                    ))}
+                    <tr className="bg-gray-50 font-semibold">
+                      <td className="table-cell">Total Cash</td>
+                      <td className="table-cell text-right">{formatCurrency(totalCash)}</td>
+                      <td className="table-cell text-right text-gray-500">
+                        {totalMarketValue > 0 ? ((totalCash / totalMarketValue) * 100).toFixed(1) : '0.0'}%
+                      </td>
+                    </tr>
                   </tbody>
                 </table>
               </div>

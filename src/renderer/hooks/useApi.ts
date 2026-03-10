@@ -46,6 +46,8 @@ import type {
   Watchlist,
   WatchlistItem,
   Monitor,
+  PortfolioAnalytics,
+  PositionBeta,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -174,6 +176,12 @@ declare global {
       deleteMonitor: (id: string) => Promise<void>;
       checkMonitors: (symbol: string, price: number) => Promise<Monitor[]>;
       getTriggeredMonitors: () => Promise<Monitor[]>;
+      getDueReminderMonitors: () => Promise<Monitor[]>;
+      getEarningsMonitors: () => Promise<Monitor[]>;
+
+      // Analytics
+      getPortfolioAnalytics: (days?: number) => Promise<PortfolioAnalytics | null>;
+      getPositionBetas: (days?: number) => Promise<PositionBeta[]>;
 
       // Decision log operations
       getDecisionLogs: (filters?: DecisionLogFilters) => Promise<DecisionLog[]>;
@@ -226,6 +234,7 @@ declare global {
       onStreamingQuote: (callback: (quote: StreamingQuote) => void) => () => void;
       onStreamingStatus: (callback: (status: string) => void) => () => void;
       onPositionsSynced: (callback: (data: { positionsSynced: number; accountsSynced: number }) => void) => () => void;
+      getFmpApiKey: () => Promise<string | null>;
       streamingStart: (symbols: string[]) => Promise<void>;
       streamingStop: () => Promise<void>;
       streamingGetStatus: () => Promise<StreamingState>;
@@ -1700,4 +1709,26 @@ export function useMonitors() {
   }, []);
 
   return { monitors, loading, fetchMonitors, createMonitor, dismissMonitor, resetMonitor, deleteMonitor };
+}
+
+export function useAnalytics() {
+  const [analytics, setAnalytics] = useState<PortfolioAnalytics | null>(null);
+  const [positionBetas, setPositionBetas] = useState<PositionBeta[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchAnalytics = useCallback(async (days?: number) => {
+    setLoading(true);
+    try {
+      const [data, betas] = await Promise.all([
+        window.electronAPI.getPortfolioAnalytics(days),
+        window.electronAPI.getPositionBetas(days),
+      ]);
+      setAnalytics(data);
+      setPositionBetas(betas);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { analytics, positionBetas, loading, fetchAnalytics };
 }

@@ -24,6 +24,8 @@ export default function Transactions() {
   const [showImportModal, setShowImportModal] = useState(false);
   const [filterAccount, setFilterAccount] = useState<string>('');
   const [filterType, setFilterType] = useState<string>('');
+  const [filterSymbol, setFilterSymbol] = useState<string>('');
+  const [filterSide, setFilterSide] = useState<string>('');
   const [formData, setFormData] = useState({
     accountId: '',
     symbol: '',
@@ -46,9 +48,22 @@ export default function Transactions() {
   const securityMap = new Map(securities.map(s => [s.id, s]));
   const accountMap = new Map(accounts.map(a => [a.id, a]));
 
+  // Unique symbols for filter dropdown
+  const uniqueSymbols = Array.from(
+    new Set(transactions.map(t => securityMap.get(t.securityId)?.symbol).filter(Boolean))
+  ).sort() as string[];
+
   const filteredTransactions = transactions.filter(t => {
     if (filterAccount && t.accountId !== filterAccount) return false;
     if (filterType && t.type !== filterType) return false;
+    if (filterSymbol) {
+      const sym = securityMap.get(t.securityId)?.symbol;
+      if (sym !== filterSymbol) return false;
+    }
+    if (filterSide) {
+      if (filterSide === 'buy' && t.type !== 'buy') return false;
+      if (filterSide === 'sell' && t.type !== 'sell') return false;
+    }
     return true;
   });
 
@@ -170,6 +185,25 @@ export default function Transactions() {
               {account.name}
             </option>
           ))}
+        </select>
+        <select
+          className="select w-48"
+          value={filterSymbol}
+          onChange={(e) => setFilterSymbol(e.target.value)}
+        >
+          <option value="">All Tickers</option>
+          {uniqueSymbols.map((sym) => (
+            <option key={sym} value={sym}>{sym}</option>
+          ))}
+        </select>
+        <select
+          className="select w-36"
+          value={filterSide}
+          onChange={(e) => setFilterSide(e.target.value)}
+        >
+          <option value="">All Sides</option>
+          <option value="buy">Buy</option>
+          <option value="sell">Sell</option>
         </select>
         <select
           className="select w-48"

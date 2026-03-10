@@ -17,7 +17,8 @@ const navItems = [
   { path: '/daily-ritual', label: 'Daily Ritual', icon: RitualIcon },
   { path: '/watchlists', label: 'Watchlists', icon: WatchlistIcon },
   { path: '/monitors', label: 'Monitors', icon: MonitorIcon },
-  { path: '/insights', label: 'AI Insights', icon: InsightsIcon },
+  { path: '/active-management', label: 'Active Mgmt', icon: ActiveMgmtIcon },
+  { path: '/analytics', label: 'Analytics', icon: AnalyticsIcon },
   { path: '/import', label: 'Import Data', icon: ImportIcon },
   { path: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
@@ -169,10 +170,26 @@ function MonitorIcon({ className }: { className?: string }) {
   );
 }
 
+function ActiveMgmtIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+    </svg>
+  );
+}
+
 function JournalIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+    </svg>
+  );
+}
+
+function AnalyticsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
     </svg>
   );
 }

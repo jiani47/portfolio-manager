@@ -357,6 +357,13 @@ export class Database {
       // Column already exists
     }
 
+    // Migration: add cash_balance column to accounts
+    try {
+      this.db.exec(`ALTER TABLE accounts ADD COLUMN cash_balance REAL DEFAULT 0`);
+    } catch {
+      // Column already exists
+    }
+
     // Position intents table
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS position_intents (
@@ -465,6 +472,23 @@ export class Database {
       CREATE INDEX IF NOT EXISTS idx_monitors_symbol ON monitors(symbol);
       CREATE INDEX IF NOT EXISTS idx_monitors_status ON monitors(status);
     `);
+
+    // Migration: add monitor_type, reminder_date, expires_at to monitors
+    const monitorCols = [
+      ['monitor_type', "TEXT NOT NULL DEFAULT 'price'"],
+      ['reminder_date', 'TEXT'],
+      ['expires_at', 'TEXT'],
+    ];
+    for (const [col, type] of monitorCols) {
+      try {
+        this.db.exec(`ALTER TABLE monitors ADD COLUMN ${col} ${type}`);
+      } catch {
+        // Column already exists
+      }
+    }
+
+    // Sync watchlist monitors on startup
+    this.syncWatchlistMonitors();
   }
 
   close(): void {
@@ -516,6 +540,7 @@ export class Database {
     if (account.accountType !== undefined) { fields.push('account_type = ?'); values.push(account.accountType); }
     if (account.currency !== undefined) { fields.push('currency = ?'); values.push(account.currency); }
     if (account.book !== undefined) { fields.push('book = ?'); values.push(account.book || null); }
+    if (account.cashBalance !== undefined) { fields.push('cash_balance = ?'); values.push(account.cashBalance); }
 
     values.push(id);
     const stmt = this.db.prepare(`UPDATE accounts SET ${fields.join(', ')} WHERE id = ?`);
@@ -1719,7 +1744,9 @@ export class Database {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, watchlistId, symbol, securityId, data.notes || null,
       data.targetEntryPrice || null, data.targetExitPrice || null, data.thesisSnippet || null, now, now);
-    return this.getWatchlistItem(id)!;
+    const item = this.getWatchlistItem(id)!;
+    this.syncWatchlistMonitors();
+    return item;
   }
 
   getWatchlistItem(id: string): WatchlistItem | null {
@@ -1739,11 +1766,15 @@ export class Database {
     if (data.thesisSnippet !== undefined) { fields.push('thesis_snippet = ?'); values.push(data.thesisSnippet); }
     values.push(id);
     this.db.prepare(`UPDATE watchlist_items SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-    return this.getWatchlistItem(id)!;
+    const item = this.getWatchlistItem(id)!;
+    this.syncWatchlistMonitors();
+    return item;
   }
 
   removeWatchlistItem(id: string): void {
     if (!this.db) throw new Error('Database not initialized');
+    // Delete any linked monitors first
+    this.db.prepare('DELETE FROM monitors WHERE linked_watchlist_item_id = ?').run(id);
     this.db.prepare('DELETE FROM watchlist_items WHERE id = ?').run(id);
   }
 
@@ -1776,18 +1807,22 @@ export class Database {
     priceLevel: number;
     label: string;
     actionType?: 'informational' | 'action_required';
+    monitorType?: 'price' | 'earnings' | 'fundamental';
     linkedPositionId?: string;
     linkedWatchlistItemId?: string;
+    reminderDate?: string;
+    expiresAt?: string;
   }): Monitor {
     if (!this.db) throw new Error('Database not initialized');
     const id = uuidv4();
     const now = new Date().toISOString();
     this.db.prepare(`
-      INSERT INTO monitors (id, symbol, direction, price_level, label, action_type, status, linked_position_id, linked_watchlist_item_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+      INSERT INTO monitors (id, symbol, direction, price_level, label, action_type, monitor_type, status, linked_position_id, linked_watchlist_item_id, reminder_date, expires_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
     `).run(id, data.symbol.toUpperCase(), data.direction, data.priceLevel, data.label,
-      data.actionType || 'informational', data.linkedPositionId || null,
-      data.linkedWatchlistItemId || null, now, now);
+      data.actionType || 'informational', data.monitorType || 'price',
+      data.linkedPositionId || null, data.linkedWatchlistItemId || null,
+      data.reminderDate || null, data.expiresAt || null, now, now);
     return this.getMonitor(id)!;
   }
 
@@ -1813,8 +1848,8 @@ export class Database {
   checkMonitors(symbol: string, price: number): Monitor[] {
     if (!this.db) throw new Error('Database not initialized');
     const active = this.db.prepare(
-      'SELECT * FROM monitors WHERE symbol = ? AND status = ?'
-    ).all(symbol.toUpperCase(), 'active').map(this.mapRowToMonitor);
+      "SELECT * FROM monitors WHERE symbol = ? AND status = 'active' AND (monitor_type = 'price' OR monitor_type IS NULL)"
+    ).all(symbol.toUpperCase()).map(this.mapRowToMonitor);
 
     const triggered: Monitor[] = [];
     const now = new Date().toISOString();
@@ -1829,6 +1864,164 @@ export class Database {
       }
     }
     return triggered;
+  }
+
+  cleanExpiredMonitors(): number {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db.prepare("DELETE FROM monitors WHERE expires_at IS NOT NULL AND expires_at < date('now')").run();
+    return result.changes;
+  }
+
+  getDueReminderMonitors(): Monitor[] {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare(
+      "SELECT * FROM monitors WHERE monitor_type = 'fundamental' AND status = 'active' AND reminder_date IS NOT NULL AND reminder_date <= date('now') ORDER BY symbol"
+    ).all().map(this.mapRowToMonitor);
+  }
+
+  getEarningsMonitors(): Monitor[] {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare(
+      "SELECT * FROM monitors WHERE monitor_type = 'earnings' AND status = 'active' ORDER BY expires_at, symbol"
+    ).all().map(this.mapRowToMonitor);
+  }
+
+  syncWatchlistMonitors(): void {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Get all watchlist items with target entry prices
+    const items = this.db.prepare(
+      'SELECT * FROM watchlist_items WHERE target_entry_price IS NOT NULL'
+    ).all().map(this.mapRowToWatchlistItem);
+
+    // Get all existing watchlist-linked monitors
+    const linkedMonitors = this.db.prepare(
+      'SELECT * FROM monitors WHERE linked_watchlist_item_id IS NOT NULL'
+    ).all().map(this.mapRowToMonitor);
+
+    const linkedMap = new Map(linkedMonitors.map(m => [m.linkedWatchlistItemId!, m]));
+    const itemIds = new Set(items.map(i => i.id));
+
+    // Create/update monitors for watchlist items with targets
+    for (const item of items) {
+      const existing = linkedMap.get(item.id);
+      if (!existing) {
+        // Create new monitor
+        this.createMonitor({
+          symbol: item.symbol,
+          direction: 'below',
+          priceLevel: item.targetEntryPrice!,
+          label: `Watchlist target: ${item.symbol} @ $${item.targetEntryPrice!.toFixed(2)}`,
+          actionType: 'informational',
+          monitorType: 'price',
+          linkedWatchlistItemId: item.id,
+        });
+      } else if (existing.priceLevel !== item.targetEntryPrice) {
+        // Update price level
+        const now = new Date().toISOString();
+        this.db!.prepare(
+          'UPDATE monitors SET price_level = ?, label = ?, updated_at = ? WHERE id = ?'
+        ).run(item.targetEntryPrice!, `Watchlist target: ${item.symbol} @ $${item.targetEntryPrice!.toFixed(2)}`, now, existing.id);
+      }
+    }
+
+    // Delete orphaned monitors (linked item deleted or target cleared)
+    for (const monitor of linkedMonitors) {
+      if (!itemIds.has(monitor.linkedWatchlistItemId!)) {
+        this.deleteMonitor(monitor.id);
+      }
+    }
+  }
+
+  syncEarningsMonitors(events: Array<{ symbol: string; date: string; time?: string }>): void {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Clean expired first
+    this.cleanExpiredMonitors();
+
+    // Get portfolio symbols
+    const positions = this.listPositions();
+    const securities = this.listSecurities();
+    const secMap = new Map(securities.map(s => [s.id, s]));
+    const portfolioSymbols = new Set(
+      positions.filter(p => {
+        const sec = secMap.get(p.securityId);
+        return sec && sec.type !== 'cash';
+      }).map(p => secMap.get(p.securityId)!.symbol)
+    );
+
+    // Get existing earnings monitors
+    const existingEarnings = this.db.prepare(
+      "SELECT * FROM monitors WHERE monitor_type = 'earnings' AND status = 'active'"
+    ).all().map(this.mapRowToMonitor);
+    const existingKeys = new Set(existingEarnings.map(m => `${m.symbol}:${m.label}`));
+
+    for (const event of events) {
+      const sym = event.symbol.toUpperCase();
+      if (!portfolioSymbols.has(sym)) continue;
+
+      const timeLabel = event.time === 'bmo' ? 'Before Open' : event.time === 'amc' ? 'After Close' : '';
+      const label = `Earnings: ${sym} on ${event.date}${timeLabel ? ` (${timeLabel})` : ''}`;
+      const key = `${sym}:${label}`;
+
+      if (existingKeys.has(key)) continue;
+
+      // Compute expires_at as day after earnings
+      const earningsDate = new Date(event.date + 'T00:00:00');
+      earningsDate.setDate(earningsDate.getDate() + 1);
+      const expiresAt = earningsDate.toISOString().split('T')[0];
+
+      this.createMonitor({
+        symbol: sym,
+        direction: 'below',
+        priceLevel: 0,
+        label,
+        actionType: 'informational',
+        monitorType: 'earnings',
+        expiresAt,
+      });
+    }
+  }
+
+  // Analytics query methods
+
+  getSnapshotDailyTotals(days: number = 90): Array<{ date: string; totalMv: number; totalCost: number }> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.prepare(`
+      SELECT date, SUM(market_value) as total_mv, SUM(cost_basis) as total_cost
+      FROM portfolio_snapshots
+      GROUP BY date
+      ORDER BY date DESC
+      LIMIT ?
+    `).all(days) as Array<{ date: string; total_mv: number; total_cost: number }>;
+    return rows.reverse().map(r => ({ date: r.date, totalMv: r.total_mv, totalCost: r.total_cost }));
+  }
+
+  getPriceHistoryBySymbol(symbol: string, days: number = 90): PriceHistory[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const sec = this.db.prepare('SELECT id FROM securities WHERE symbol = ?').get(symbol.toUpperCase()) as { id: string } | undefined;
+    if (!sec) return [];
+    return this.db.prepare(
+      'SELECT * FROM price_history WHERE security_id = ? ORDER BY date DESC LIMIT ?'
+    ).all(sec.id, days).map(this.mapRowToPriceHistory).reverse();
+  }
+
+  getPositionWeights(): Array<{ symbol: string; marketValue: number; weight: number }> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.prepare(`
+      SELECT s.symbol, SUM(p.market_value) as market_value
+      FROM positions p
+      JOIN securities s ON p.security_id = s.id
+      WHERE p.quantity > 0 AND s.type != 'cash'
+      GROUP BY s.symbol
+      ORDER BY market_value DESC
+    `).all() as Array<{ symbol: string; market_value: number }>;
+    const total = rows.reduce((sum, r) => sum + r.market_value, 0);
+    return rows.map(r => ({
+      symbol: r.symbol,
+      marketValue: r.market_value,
+      weight: total > 0 ? r.market_value / total : 0,
+    }));
   }
 
   getTriggeredMonitors(): Monitor[] {
@@ -1878,6 +2071,9 @@ export class Database {
       linkedPositionId: r.linked_position_id as string | undefined,
       linkedWatchlistItemId: r.linked_watchlist_item_id as string | undefined,
       triggeredAt: r.triggered_at as string | undefined,
+      monitorType: (r.monitor_type as string | undefined) as Monitor['monitorType'],
+      reminderDate: r.reminder_date as string | undefined,
+      expiresAt: r.expires_at as string | undefined,
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,
     };
@@ -1892,6 +2088,7 @@ export class Database {
       accountNumber: r.account_number as string | undefined,
       accountType: r.account_type as Account['accountType'],
       book: r.book as Account['book'] | undefined,
+      cashBalance: r.cash_balance as number | undefined,
       currency: r.currency as string,
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,

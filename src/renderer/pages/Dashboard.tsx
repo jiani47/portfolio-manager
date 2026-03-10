@@ -21,6 +21,7 @@ export default function Dashboard() {
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [sectorData, setSectorData] = useState<{ sector: string; change: number }[]>([]);
   const [sectorDate, setSectorDate] = useState<string>('');
+  const [fmpKey, setFmpKey] = useState<string | null>(null);
 
   useEffect(() => {
     fetchSummary();
@@ -29,6 +30,7 @@ export default function Dashboard() {
     fetchSettings();
     fetchIntents();
     fetchRituals(1);
+    window.electronAPI.getFmpApiKey().then(setFmpKey);
   }, [fetchSummary, fetchPositions, fetchSecurities, fetchSettings, fetchIntents, fetchRituals]);
 
   // Listen for position sync events
@@ -45,7 +47,6 @@ export default function Dashboard() {
   useEffect(() => {
     const fetchSectors = async () => {
       try {
-        const fmpKey = settings?.dataProviderApiKey;
         if (!fmpKey) return;
 
         const today = format(new Date(), 'yyyy-MM-dd');
@@ -75,10 +76,10 @@ export default function Dashboard() {
         // Silently fail
       }
     };
-    if (settings?.dataProviderApiKey) {
+    if (fmpKey) {
       fetchSectors();
     }
-  }, [settings?.dataProviderApiKey]);
+  }, [fmpKey]);
 
   const loading = portfolioLoading || positionsLoading;
   const securityMap = useMemo(() => new Map(securities.map(s => [s.id, s])), [securities]);
@@ -101,12 +102,30 @@ export default function Dashboard() {
     return rituals.find(r => r.date === today) || null;
   }, [rituals]);
 
-  // Top movers from streaming data
+  // Portfolio day performance from streaming data
+  const portfolioDayChange = useMemo(() => {
+    let totalChange = 0;
+    const seen = new Set<string>();
+    for (const pos of positions) {
+      const security = securityMap.get(pos.securityId);
+      if (!security || security.type === 'cash') continue;
+      const quote = streamingQuotes.get(security.symbol);
+      if (!quote?.netChange) continue;
+      // Each position contributes its own quantity * price change
+      totalChange += (quote.netChange || 0) * pos.quantity;
+    }
+    return totalChange;
+  }, [positions, securityMap, streamingQuotes]);
+
+  // Top movers from streaming data (deduped by symbol)
   const topMovers = useMemo(() => {
+    const seen = new Set<string>();
     const movers: { symbol: string; price: number; change: number; changePct: number; tier?: string }[] = [];
     for (const pos of positions) {
       const security = securityMap.get(pos.securityId);
       if (!security || security.type === 'cash') continue;
+      if (seen.has(security.symbol)) continue;
+      seen.add(security.symbol);
       const quote = streamingQuotes.get(security.symbol);
       if (!quote?.netChangePct) continue;
       const intent = intents.get(pos.id);
@@ -189,16 +208,13 @@ export default function Dashboard() {
             <div className="card">
               <p className="stat-label">Portfolio Value</p>
               <p className="stat-value">{formatCurrency(summary?.totalValue || 0)}</p>
-              <p className={`text-sm font-medium ${(summary?.totalUnrealizedGain || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                {formatCurrency(summary?.totalUnrealizedGain || 0)} ({formatPercent(summary?.totalUnrealizedGainPercent || 0)})
-              </p>
-            </div>
-            <div className="card">
-              <p className="stat-label">Positions</p>
-              <p className="stat-value">{summary?.positionCount || 0}</p>
-              <p className="text-sm text-gray-500">
-                Cost basis: {formatCurrency(summary?.totalCostBasis || 0)}
-              </p>
+              {portfolioDayChange !== 0 ? (
+                <p className={`text-sm font-medium ${portfolioDayChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  {portfolioDayChange >= 0 ? '+' : ''}{formatCurrency(portfolioDayChange)} today
+                </p>
+              ) : (
+                <p className="text-sm text-gray-400">{summary?.positionCount || 0} positions</p>
+              )}
             </div>
           </div>
 

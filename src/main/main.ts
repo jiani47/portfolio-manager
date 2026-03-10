@@ -8,6 +8,7 @@ import { FMPService } from './fmp-service';
 import { MassiveService } from './massive-service';
 import { SchwabService } from './schwab-service';
 import { SchwabStreamService } from './schwab-stream-service';
+import { AnalyticsService } from './analytics-service';
 import Store from 'electron-store';
 import { AppSettings } from '../shared/types';
 
@@ -103,8 +104,11 @@ async function initializeApp() {
   streamService = new SchwabStreamService(schwabService, database, store, () => mainWindow);
   streamService.startMarketHoursScheduler();
 
+  // Initialize analytics service
+  const analyticsService = new AnalyticsService(database);
+
   // Setup IPC handlers
-  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, schwabService, streamService, store);
+  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, schwabService, streamService, store, analyticsService);
 }
 
 app.whenReady().then(async () => {

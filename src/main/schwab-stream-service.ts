@@ -23,6 +23,7 @@ const SUBSCRIBE_FIELDS = '0,1,2,3,8,10,11,12,17,18,42';
 const SNAPSHOT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const POSITION_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MARKET_CHECK_INTERVAL_MS = 30 * 1000; // 30 seconds
+const EXTENDED_HOURS_POLL_INTERVAL_MS = 60 * 1000; // 1 minute
 const MAX_RECONNECT_FAILURES = 5;
 const MAX_RECONNECT_DELAY_MS = 60 * 1000;
 
@@ -43,6 +44,7 @@ export class SchwabStreamService {
   private marketCheckTimer: ReturnType<typeof setInterval> | null = null;
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
   private positionSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private extendedHoursPollTimer: ReturnType<typeof setInterval> | null = null;
   private consecutiveFailures = 0;
   private reconnectDelay = 2000;
   private connectedSince: number | undefined;
@@ -83,14 +85,30 @@ export class SchwabStreamService {
     const isSchwabProvider = settings?.dataProvider === 'schwab';
     const isConnectedToSchwab = this.schwabService.isConnected();
     const marketOpen = this.isMarketOpen();
+    const extendedHours = this.isExtendedHours();
 
     if (marketOpen && isSchwabProvider && isConnectedToSchwab) {
+      // Regular market hours: use WebSocket streaming
+      this.stopExtendedHoursPolling();
       if (this.status === 'disconnected' || this.status === 'outside_hours') {
         this.connectWithPortfolioSymbols();
       }
     } else if (!marketOpen && (this.status === 'connected' || this.status === 'connecting')) {
       this.disconnect();
       this.setStatus('outside_hours');
+      // Start extended hours polling if applicable
+      if (extendedHours && isSchwabProvider && isConnectedToSchwab) {
+        this.startExtendedHoursPolling();
+      }
+    } else if (!marketOpen && isSchwabProvider && isConnectedToSchwab) {
+      if (extendedHours) {
+        this.startExtendedHoursPolling();
+      } else {
+        this.stopExtendedHoursPolling();
+      }
+      if (this.status === 'disconnected') {
+        this.setStatus('outside_hours');
+      }
     } else if (!marketOpen && this.status === 'disconnected') {
       this.setStatus('outside_hours');
     }
@@ -119,6 +137,162 @@ export class SchwabStreamService {
     const marketClose = 16 * 60; // 16:00 ET
 
     return timeInMinutes >= marketOpen && timeInMinutes < marketClose;
+  }
+
+  private isExtendedHours(): boolean {
+    const now = new Date();
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      hour: 'numeric',
+      minute: 'numeric',
+      hour12: false,
+      weekday: 'short',
+    });
+
+    const parts = formatter.formatToParts(now);
+    const weekday = parts.find(p => p.type === 'weekday')?.value;
+    const hour = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+    const minute = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10);
+
+    if (!weekday || ['Sat', 'Sun'].includes(weekday)) return false;
+
+    const timeInMinutes = hour * 60 + minute;
+    const preMarketOpen = 4 * 60;       // 4:00 AM ET
+    const marketOpen = 9 * 60 + 30;     // 9:30 AM ET
+    const marketClose = 16 * 60;        // 4:00 PM ET
+    const postMarketClose = 20 * 60;    // 8:00 PM ET
+
+    return (timeInMinutes >= preMarketOpen && timeInMinutes < marketOpen) ||
+           (timeInMinutes >= marketClose && timeInMinutes < postMarketClose);
+  }
+
+  private startExtendedHoursPolling(): void {
+    if (this.extendedHoursPollTimer) return; // Already polling
+
+    console.log('Schwab: starting extended hours polling (every 60s)');
+    this.pollExtendedHoursQuotes(); // Poll immediately
+    this.extendedHoursPollTimer = setInterval(() => {
+      this.pollExtendedHoursQuotes();
+    }, EXTENDED_HOURS_POLL_INTERVAL_MS);
+  }
+
+  private stopExtendedHoursPolling(): void {
+    if (this.extendedHoursPollTimer) {
+      clearInterval(this.extendedHoursPollTimer);
+      this.extendedHoursPollTimer = null;
+      console.log('Schwab: stopped extended hours polling');
+    }
+  }
+
+  private async pollExtendedHoursQuotes(): Promise<void> {
+    try {
+      // Build symbol list from portfolio
+      const positions = this.db.listPositions();
+      const securities = this.db.listSecurities();
+      const securityMap = new Map(securities.map(s => [s.id, s]));
+
+      const symbols: string[] = [];
+      this.symbolSecurityMap.clear();
+
+      for (const pos of positions) {
+        const security = securityMap.get(pos.securityId);
+        if (security && security.type !== 'cash' && security.type !== 'option') {
+          if (!this.symbolSecurityMap.has(security.symbol)) {
+            symbols.push(security.symbol);
+            this.symbolSecurityMap.set(security.symbol, security.id);
+          }
+        }
+      }
+
+      for (const idx of ['SPY', 'QQQ']) {
+        if (!symbols.includes(idx)) symbols.push(idx);
+      }
+
+      if (symbols.length === 0) return;
+
+      // Fetch quotes via REST API — includes extendedHoursQuote
+      await this.schwabService.ensureTokenFresh();
+
+      const batchSize = 40;
+      const mainWindow = this.getMainWindow();
+
+      for (let i = 0; i < symbols.length; i += batchSize) {
+        const batch = symbols.slice(i, i + batchSize);
+        try {
+          const symbolsParam = batch.map(s => encodeURIComponent(s)).join(',');
+          const response = await this.schwabService.fetchMarketDataApi(
+            `/marketdata/v1/quotes?symbols=${symbolsParam}&fields=quote,extended`
+          );
+          if (!response.ok) continue;
+
+          const data = await response.json();
+
+          for (const sym of batch) {
+            const entry = data[sym.toUpperCase()];
+            if (!entry) continue;
+
+            const regularQuote = entry.quote || entry;
+            const extQuote = entry.extended || entry.extendedHoursQuote;
+
+            // Use extended hours price if available, otherwise regular
+            const last = extQuote?.lastPrice ?? regularQuote?.lastPrice ?? regularQuote?.mark ?? 0;
+            const netChange = extQuote?.netChange ?? regularQuote?.netChange ?? 0;
+            const netChangePct = extQuote?.netPercentChange ?? regularQuote?.netPercentChange ?? 0;
+
+            if (last === 0) continue;
+
+            const quote: StreamingQuote = {
+              symbol: sym.toUpperCase(),
+              last,
+              netChange,
+              netChangePct,
+              bid: extQuote?.bidPrice ?? regularQuote?.bidPrice,
+              ask: extQuote?.askPrice ?? regularQuote?.askPrice,
+              volume: extQuote?.totalVolume ?? regularQuote?.totalVolume,
+              high: regularQuote?.highPrice,
+              low: regularQuote?.lowPrice,
+              close: regularQuote?.closePrice,
+              open: regularQuote?.openPrice,
+              timestamp: Date.now(),
+            };
+
+            this.latestQuotes.set(sym.toUpperCase(), quote);
+
+            // Check monitors
+            if (this.db && quote.last > 0) {
+              try {
+                const triggered = this.db.checkMonitors(sym.toUpperCase(), quote.last);
+                for (const monitor of triggered) {
+                  const icon = monitor.direction === 'below' ? '⬇️' : '⬆️';
+                  const notification = new Notification({
+                    title: `${monitor.actionType === 'action_required' ? '⚠️ ' : ''}Monitor Alert: ${sym.toUpperCase()}`,
+                    body: `${icon} ${sym.toUpperCase()} $${quote.last.toFixed(2)} crossed ${monitor.direction} $${monitor.priceLevel} — ${monitor.label}`,
+                  });
+                  notification.show();
+
+                  if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('monitor:triggered', monitor);
+                  }
+                }
+              } catch (e) {
+                console.error('Monitor check error:', e);
+              }
+            }
+
+            // Push to renderer
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('streaming:quote', quote);
+            }
+          }
+        } catch {
+          // Skip failed batches
+        }
+      }
+
+      console.log(`Schwab extended hours: polled ${symbols.length} quotes`);
+    } catch (err) {
+      console.error('Extended hours poll error:', err);
+    }
   }
 
   private async connectWithPortfolioSymbols(): Promise<void> {
@@ -237,6 +411,7 @@ export class SchwabStreamService {
     this.clearReconnectTimer();
     this.clearSnapshotTimer();
     this.clearPositionSyncTimer();
+    this.stopExtendedHoursPolling();
 
     if (this.ws) {
       try {

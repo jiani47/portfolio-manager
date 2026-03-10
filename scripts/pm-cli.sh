@@ -191,6 +191,26 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
         AND ph.close_price <= wi.target_entry_price * 1.05
       ORDER BY (ph.close_price - wi.target_entry_price) / wi.target_entry_price;
     ")
+    # Fundamental reminders due today
+    FUND_REMINDERS=$(sqlite3 "$DB" "SELECT symbol, label, reminder_date FROM monitors WHERE monitor_type = 'fundamental' AND status = 'active' AND reminder_date IS NOT NULL AND reminder_date <= date('now') ORDER BY symbol;" 2>/dev/null)
+    if [ -n "$FUND_REMINDERS" ]; then
+      echo "=== Fundamental Reminders ==="
+      echo "$FUND_REMINDERS" | while IFS='|' read -r sym label rdate; do
+        echo "  $sym — $label (since $rdate)"
+      done
+      echo ""
+    fi
+
+    # Upcoming earnings (next 7 days) from monitors table
+    EARN_MONITORS=$(sqlite3 "$DB" "SELECT symbol, label, expires_at FROM monitors WHERE monitor_type = 'earnings' AND status = 'active' ORDER BY expires_at, symbol;" 2>/dev/null)
+    if [ -n "$EARN_MONITORS" ]; then
+      echo "=== Upcoming Earnings ==="
+      echo "$EARN_MONITORS" | while IFS='|' read -r sym label expires; do
+        echo "  $label"
+      done
+      echo ""
+    fi
+
     if [ -n "$WL_ALERTS" ]; then
       echo "=== Watchlist Alerts (within 5% of target) ==="
       echo "$WL_ALERTS" | while IFS='|' read -r wl sym target price vs; do
@@ -966,6 +986,274 @@ for line in sys.stdin:
     sqlite3 "$DB" "UPDATE monitors SET status = 'active', triggered_at = NULL, updated_at = '$NOW' WHERE id = '$MON_ID';"
     echo "Monitor re-armed: $MON_ID"
     ;;
+
+  monitor-add-note)
+    MON_SYMBOL="$2"
+    MON_LABEL="$3"
+    MON_REMINDER="$4"
+    if [ -z "$MON_SYMBOL" ] || [ -z "$MON_LABEL" ]; then
+      echo "Usage: pm-cli.sh monitor-add-note <symbol> <label> [reminder_date]"
+      echo "  Creates a fundamental/note monitor (no price trigger)"
+      echo "  reminder_date: YYYY-MM-DD (default: today)"
+      exit 1
+    fi
+    MON_SYMBOL=$(echo "$MON_SYMBOL" | tr '[:lower:]' '[:upper:]')
+    if [ -z "$MON_REMINDER" ]; then
+      MON_REMINDER=$(date +%Y-%m-%d)
+    fi
+    MON_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    sqlite3 "$DB" "INSERT INTO monitors (id, symbol, direction, price_level, label, action_type, monitor_type, status, reminder_date, created_at, updated_at) VALUES ('$MON_ID', '$MON_SYMBOL', 'below', 0, '$MON_LABEL', 'informational', 'fundamental', 'active', '$MON_REMINDER', '$NOW', '$NOW');"
+    echo "Fundamental monitor created: $MON_SYMBOL — $MON_LABEL (reminder: $MON_REMINDER)"
+    ;;
+
+  earnings)
+    # Show upcoming earnings for portfolio symbols
+    DAYS="${2:-14}"
+    FROM_DATE=$(date +%Y-%m-%d)
+    TO_DATE=$(date -v+${DAYS}d +%Y-%m-%d 2>/dev/null || date -d "+${DAYS} days" +%Y-%m-%d 2>/dev/null)
+
+    # Get FMP API key
+    if [ -f "$HOME/.pm-cli.conf" ]; then
+      FMP_KEY=$(grep '^FMP_API_KEY=' "$HOME/.pm-cli.conf" | cut -d= -f2)
+    fi
+    if [ -z "$FMP_KEY" ]; then
+      echo "ERROR: FMP_API_KEY not set in ~/.pm-cli.conf"
+      exit 1
+    fi
+
+    # Get portfolio symbols (comma-separated for safe passing)
+    SYMBOLS=$(sqlite3 "$DB" "SELECT GROUP_CONCAT(DISTINCT s.symbol) FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type != 'cash' AND p.quantity > 0;")
+
+    echo "=== Upcoming Earnings (next ${DAYS} days) ==="
+    echo ""
+
+    # Fetch earnings calendar from FMP
+    python3 <<PYEOF
+import urllib.request, json, sys
+
+fmp_key = "$FMP_KEY"
+from_date = "$FROM_DATE"
+to_date = "$TO_DATE"
+symbols_csv = "$SYMBOLS"
+portfolio_symbols = set(symbols_csv.split(',')) if symbols_csv else set()
+
+if not portfolio_symbols:
+    print("No portfolio positions found.")
+    sys.exit(0)
+
+url = f"https://financialmodelingprep.com/stable/earnings-calendar?from={from_date}&to={to_date}&apikey={fmp_key}"
+try:
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read())
+except Exception as e:
+    print(f"Error fetching earnings: {e}")
+    sys.exit(1)
+
+# Filter to portfolio symbols
+matches = [e for e in data if e.get('symbol', '').upper() in portfolio_symbols]
+
+if not matches:
+    print("No upcoming earnings for portfolio symbols.")
+    sys.exit(0)
+
+matches.sort(key=lambda x: x.get('date', ''))
+print(f"{'Date':<12} {'Symbol':<8} {'Time':<14} {'EPS Est':>10}")
+print("-" * 46)
+for e in matches:
+    date = e.get('date', 'N/A')
+    symbol = e.get('symbol', 'N/A')
+    time_raw = e.get('time', '')
+    if time_raw == 'bmo':
+        time_label = 'Before Open'
+    elif time_raw == 'amc':
+        time_label = 'After Close'
+    else:
+        time_label = time_raw or 'TBD'
+    eps_est = e.get('epsEstimated')
+    eps_str = f"  \${eps_est:.2f}" if eps_est is not None else '       N/A'
+    print(f"{date:<12} {symbol:<8} {time_label:<14} {eps_str:>10}")
+PYEOF
+    ;;
+
+  analytics)
+    # Portfolio analytics: beta, sharpe, volatility, drawdown
+    DAYS="${2:-90}"
+    echo "=== Portfolio Analytics (${DAYS}-day) ==="
+    echo ""
+
+    python3 <<PYEOF
+import sqlite3, math, sys
+
+db = sqlite3.connect("$DB")
+
+# Get daily portfolio totals from snapshots
+rows = db.execute("""
+    SELECT date, SUM(market_value) as total_mv
+    FROM portfolio_snapshots
+    GROUP BY date
+    ORDER BY date DESC
+    LIMIT ?
+""", (int("$DAYS") + 1,)).fetchall()
+
+if len(rows) < 3:
+    print("Not enough snapshot data. Run 'pm-cli.sh snapshot' daily to build history.")
+    print(f"Currently have {len(rows)} data points (need at least 3).")
+    sys.exit(0)
+
+rows.reverse()  # oldest first
+dates = [r[0] for r in rows]
+mvs = [r[1] for r in rows]
+
+# Portfolio daily returns
+p_returns = []
+for i in range(1, len(mvs)):
+    if mvs[i-1] > 0:
+        p_returns.append((dates[i], (mvs[i] - mvs[i-1]) / mvs[i-1]))
+
+# SPY daily returns
+spy_sec = db.execute("SELECT id FROM securities WHERE symbol = 'SPY'").fetchone()
+if not spy_sec:
+    print("SPY not found in securities. Run 'pm-cli.sh backfill SPY' first.")
+    sys.exit(1)
+
+spy_rows = db.execute("""
+    SELECT date, close_price FROM price_history
+    WHERE security_id = ? ORDER BY date DESC LIMIT ?
+""", (spy_sec[0], int("$DAYS") + 1)).fetchall()
+spy_rows.reverse()
+spy_dates = [r[0] for r in spy_rows]
+spy_prices = [r[1] for r in spy_rows]
+
+b_returns = []
+for i in range(1, len(spy_prices)):
+    if spy_prices[i-1] > 0:
+        b_returns.append((spy_dates[i], (spy_prices[i] - spy_prices[i-1]) / spy_prices[i-1]))
+
+# Align dates
+b_map = {d: r for d, r in b_returns}
+aligned_p = []
+aligned_b = []
+for d, r in p_returns:
+    if d in b_map:
+        aligned_p.append(r)
+        aligned_b.append(b_map[d])
+
+n = len(aligned_p)
+if n < 3:
+    print(f"Not enough aligned data points ({n}). Need at least 3.")
+    sys.exit(0)
+
+# Beta
+mean_p = sum(aligned_p) / n
+mean_b = sum(aligned_b) / n
+cov = sum((aligned_p[i] - mean_p) * (aligned_b[i] - mean_b) for i in range(n))
+var_b = sum((aligned_b[i] - mean_b) ** 2 for i in range(n))
+beta = cov / var_b if var_b > 0 else 1.0
+
+# Volatility (annualized)
+var_p = sum((r - mean_p) ** 2 for r in aligned_p) / (n - 1)
+volatility = math.sqrt(var_p) * math.sqrt(252)
+
+# Returns
+total_return = (mvs[-1] - mvs[0]) / mvs[0] if mvs[0] > 0 else 0
+ann_return = (1 + total_return) ** (252 / len(p_returns)) - 1 if len(p_returns) > 0 else 0
+spy_total = (spy_prices[-1] - spy_prices[0]) / spy_prices[0] if spy_prices[0] > 0 else 0
+
+# Sharpe
+rfr = 0.05
+sharpe = (ann_return - rfr) / volatility if volatility > 0 else 0
+
+# Drawdown
+peak = float('-inf')
+max_dd = 0
+max_dd_date = ''
+for i, mv in enumerate(mvs):
+    if mv > peak:
+        peak = mv
+    dd = (peak - mv) / peak if peak > 0 else 0
+    if dd > max_dd:
+        max_dd = dd
+        max_dd_date = dates[i]
+
+current_dd = (peak - mvs[-1]) / peak if peak > 0 else 0
+
+# Position betas
+print(f"  Beta (vs SPY):      {beta:>8.2f}")
+print(f"  Sharpe Ratio:       {sharpe:>8.2f}")
+print(f"  Volatility (ann):   {volatility*100:>7.1f}%")
+print(f"  Max Drawdown:       {-max_dd*100:>7.1f}%  ({max_dd_date})")
+print(f"  Current Drawdown:   {-current_dd*100:>7.1f}%")
+print(f"  Total Return:       {total_return*100:>7.1f}%")
+print(f"  Annualized Return:  {ann_return*100:>7.1f}%")
+print(f"  SPY Return:         {spy_total*100:>7.1f}%")
+print(f"  Data Points:        {n:>8d}")
+print()
+
+# Per-position betas
+pos_rows = db.execute("""
+    SELECT s.symbol, SUM(p.market_value) as mv
+    FROM positions p JOIN securities s ON p.security_id = s.id
+    WHERE p.quantity > 0 AND s.type != 'cash'
+    GROUP BY s.symbol ORDER BY mv DESC
+""").fetchall()
+
+total_mv = sum(r[1] for r in pos_rows) if pos_rows else 0
+
+print(f"{'Symbol':<8} {'Beta':>6} {'Corr':>6} {'Weight':>7} {'Wtd Beta':>9}")
+print("-" * 38)
+total_wtd_beta = 0
+for sym, mv in pos_rows:
+    sec = db.execute("SELECT id FROM securities WHERE symbol = ?", (sym,)).fetchone()
+    if not sec:
+        continue
+    prices = db.execute("""
+        SELECT date, close_price FROM price_history
+        WHERE security_id = ? ORDER BY date DESC LIMIT ?
+    """, (sec[0], int("$DAYS") + 1)).fetchall()
+    prices.reverse()
+    if len(prices) < 10:
+        continue
+    s_returns = {}
+    for i in range(1, len(prices)):
+        if prices[i-1][1] > 0:
+            s_returns[prices[i][0]] = (prices[i][1] - prices[i-1][1]) / prices[i-1][1]
+
+    al_s = []
+    al_b2 = []
+    for d, r in p_returns:
+        if d in s_returns and d in b_map:
+            al_s.append(s_returns[d])
+            al_b2.append(b_map[d])
+
+    if len(al_s) < 10:
+        continue
+
+    nn = len(al_s)
+    ms = sum(al_s) / nn
+    mb = sum(al_b2) / nn
+    cov_s = sum((al_s[i] - ms) * (al_b2[i] - mb) for i in range(nn))
+    var_bs = sum((al_b2[i] - mb) ** 2 for i in range(nn))
+    pos_beta = cov_s / var_bs if var_bs > 0 else 1.0
+
+    # correlation
+    var_ss = sum((al_s[i] - ms) ** 2 for i in range(nn))
+    denom = math.sqrt(var_ss * var_bs)
+    corr = cov_s / denom if denom > 0 else 0
+
+    weight = mv / total_mv if total_mv > 0 else 0
+    wtd = pos_beta * weight
+    total_wtd_beta += wtd
+    print(f"{sym:<8} {pos_beta:>6.2f} {corr:>6.2f} {weight*100:>6.1f}% {wtd:>9.3f}")
+
+print("-" * 38)
+print(f"{'Total':<8} {'':>6} {'':>6} {'100.0':>6}% {total_wtd_beta:>9.3f}")
+
+db.close()
+PYEOF
+    ;;
+
   backfill)
     # Backfill 3yr daily price history from Schwab API
     # Usage: pm-cli.sh backfill [symbol]
@@ -1844,6 +2132,189 @@ PYEOF
     fi
     ;;
 
+  sync-transactions)
+    # Sync transactions from Schwab API
+    DAYS=${2:-30}
+    if [ ! -f "$APP_CONFIG" ]; then
+      echo "ERROR: App config not found at $APP_CONFIG"
+      exit 1
+    fi
+
+    # Refresh Schwab access token
+    SCHWAB_CLIENT_ID=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientId',''))" 2>/dev/null)
+    SCHWAB_CLIENT_SECRET=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientSecret',''))" 2>/dev/null)
+    REFRESH_TOKEN=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshToken',''))" 2>/dev/null)
+    REFRESH_EXPIRES=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshTokenExpiresAt',0))" 2>/dev/null)
+
+    if [ -z "$SCHWAB_CLIENT_ID" ] || [ -z "$REFRESH_TOKEN" ]; then
+      echo "ERROR: Schwab not configured or not connected in the app."
+      exit 1
+    fi
+
+    NOW_MS=$(python3 -c "import time; print(int(time.time()*1000))")
+    if [ "$REFRESH_EXPIRES" -le "$NOW_MS" ] 2>/dev/null; then
+      echo "ERROR: Schwab refresh token expired. Reconnect in the app."
+      exit 1
+    fi
+
+    echo "Refreshing Schwab access token..."
+    BASIC_AUTH=$(printf "%s:%s" "$SCHWAB_CLIENT_ID" "$SCHWAB_CLIENT_SECRET" | base64)
+    TOKEN_RESPONSE=$(curl -s -X POST "$SCHWAB_TOKEN_URL" \
+      -H "Authorization: Basic $BASIC_AUTH" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "grant_type=refresh_token&refresh_token=$REFRESH_TOKEN")
+
+    ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null)
+
+    if [ -z "$ACCESS_TOKEN" ]; then
+      echo "ERROR: Failed to refresh access token."
+      echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error_description', d.get('error', 'Unknown error')))" 2>/dev/null
+      exit 1
+    fi
+
+    # Save new tokens back to config.json
+    python3 -c "
+import json, time
+with open('$APP_CONFIG') as f:
+    cfg = json.load(f)
+resp = json.loads('''$TOKEN_RESPONSE''')
+now = int(time.time() * 1000)
+tokens = cfg.get('settings', {}).get('schwabTokens', {})
+tokens['accessToken'] = resp['access_token']
+tokens['refreshToken'] = resp.get('refresh_token', tokens.get('refreshToken', ''))
+tokens['accessTokenExpiresAt'] = now + (resp.get('expires_in', 1800) * 1000)
+tokens['refreshTokenExpiresAt'] = now + (7 * 24 * 60 * 60 * 1000)
+tokens['tokenType'] = resp.get('token_type', 'Bearer')
+tokens['scope'] = resp.get('scope', tokens.get('scope'))
+cfg['settings']['schwabTokens'] = tokens
+with open('$APP_CONFIG', 'w') as f:
+    json.dump(cfg, f, indent=2)
+" 2>/dev/null
+    echo "Access token refreshed."
+
+    # Get account hashes
+    echo "Fetching account numbers..."
+    ACCOUNTS_RESPONSE=$(curl -s "${SCHWAB_API}/trader/v1/accounts/accountNumbers" \
+      -H "Authorization: Bearer ${ACCESS_TOKEN}")
+
+    # Fetch and import transactions for each account
+    python3 << PYEOF
+import json, sys, sqlite3, uuid, urllib.request, urllib.parse
+from datetime import datetime, timedelta, timezone
+
+db_path = "$DB"
+access_token = "$ACCESS_TOKEN"
+schwab_api = "$SCHWAB_API"
+days = $DAYS
+
+accounts = json.loads('''$ACCOUNTS_RESPONSE''')
+if not isinstance(accounts, list):
+    print(f"ERROR: Failed to fetch accounts: {accounts}")
+    sys.exit(1)
+
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+
+# Build security map
+sec_map = {}
+cur.execute('SELECT id, symbol FROM securities')
+for row in cur.fetchall():
+    sec_map[row[1]] = row[0]
+
+# Build account map (account_number -> account_id in our DB)
+acct_map = {}
+cur.execute('SELECT id, account_number FROM accounts')
+for row in cur.fetchall():
+    acct_map[row[1]] = row[0]
+
+end_date = datetime.now(timezone.utc)
+start_date = end_date - timedelta(days=days)
+start_str = start_date.strftime('%Y-%m-%dT00:00:00.000Z')
+end_str = end_date.strftime('%Y-%m-%dT23:59:59.000Z')
+
+total_synced = 0
+total_skipped = 0
+
+for acct in accounts:
+    acct_num = acct['accountNumber']
+    acct_hash = acct['hashValue']
+    acct_id = acct_map.get(acct_num)
+    if not acct_id:
+        print(f"  Skipping account {acct_num} (not in DB)")
+        continue
+
+    params = urllib.parse.urlencode({
+        'startDate': start_str,
+        'endDate': end_str,
+        'types': 'TRADE,DIVIDEND_OR_INTEREST,RECEIVE_AND_DELIVER',
+    })
+    url = f"{schwab_api}/trader/v1/accounts/{acct_hash}/transactions?{params}"
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {access_token}'})
+    resp = urllib.request.urlopen(req)
+    txns = json.loads(resp.read())
+
+    print(f"  Account {acct_num}: {len(txns)} transactions from Schwab")
+
+    for txn in txns:
+        items = txn.get('transferItems', [])
+        if not items:
+            continue
+
+        for item in items:
+            instrument = item.get('instrument', {})
+            symbol = instrument.get('symbol')
+            if not symbol:
+                continue
+
+            # Map transaction type
+            txn_type_raw = txn.get('type', '')
+            net_amount = txn.get('netAmount', 0)
+            if txn_type_raw == 'TRADE':
+                txn_type = 'buy' if net_amount < 0 else 'sell'
+            elif txn_type_raw == 'DIVIDEND_OR_INTEREST':
+                txn_type = 'dividend' if net_amount > 0 else 'interest'
+            elif txn_type_raw == 'RECEIVE_AND_DELIVER':
+                txn_type = 'transfer_in' if net_amount >= 0 else 'transfer_out'
+            else:
+                txn_type = 'transfer_in' if net_amount >= 0 else 'transfer_out'
+
+            date_str = (txn.get('tradeDate') or txn.get('time', '')).split('T')[0]
+
+            # Find or create security
+            sec_id = sec_map.get(symbol)
+            if not sec_id:
+                asset_type = instrument.get('assetType', 'EQUITY')
+                type_map = {'EQUITY': 'stock', 'MUTUAL_FUND': 'mutual_fund', 'ETF': 'etf',
+                            'OPTION': 'option', 'FIXED_INCOME': 'bond', 'CASH_EQUIVALENT': 'cash'}
+                sec_type = type_map.get(asset_type, 'other')
+                sec_id = str(uuid.uuid4())
+                cur.execute('INSERT INTO securities (id, symbol, name, type, currency, created_at, updated_at) VALUES (?,?,?,?,?,datetime("now"),datetime("now"))',
+                    (sec_id, symbol, instrument.get('description', symbol), sec_type, 'USD'))
+                sec_map[symbol] = sec_id
+
+            # Dedup check
+            cur.execute('''SELECT amount FROM transactions
+                WHERE account_id = ? AND security_id = ? AND type = ? AND date = ?''',
+                (acct_id, sec_id, txn_type, date_str))
+            existing_amounts = [r[0] for r in cur.fetchall()]
+            if any(abs(a - net_amount) < 0.01 for a in existing_amounts):
+                total_skipped += 1
+                continue
+
+            qty = abs(item.get('amount', 0))
+            price = item.get('price', 0)
+
+            cur.execute('''INSERT INTO transactions (id, account_id, security_id, type, date, quantity, price, amount, fees, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,0,datetime("now"),datetime("now"))''',
+                (str(uuid.uuid4()), acct_id, sec_id, txn_type, date_str, qty, price, net_amount))
+            total_synced += 1
+
+conn.commit()
+conn.close()
+print(f"\nSynced {total_synced} new transactions ({total_skipped} duplicates skipped)")
+PYEOF
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -1874,6 +2345,9 @@ PYEOF
     echo "  monitor-dismiss     - Dismiss triggered monitor: <id>"
     echo "  monitor-rm          - Delete monitor: <id>"
     echo "  monitor-reset       - Re-arm monitor: <id>"
+    echo "  monitor-add-note    - Add fundamental monitor: <symbol> <label> [reminder_date]"
+    echo "  earnings [days]     - Upcoming earnings for portfolio symbols (default 14 days)"
+    echo "  analytics [days]    - Portfolio analytics: beta, sharpe, volatility, drawdown (default 90)"
     echo "  backfill [symbol]   - Backfill 3yr price history from Schwab (all symbols if no arg)"
     echo "  snapshot            - Take EOD portfolio snapshot (one per day)"
     echo "  snapshot-history [n]- Portfolio totals for last n days (default 30)"
@@ -1883,5 +2357,6 @@ PYEOF
     echo "  levels [symbol]     - Support/resistance levels with risk/reward"
     echo "  levels-refresh [sym]- Recompute S/R from price history (all if no arg)"
     echo "  sectors [date]      - Sector performance heatmap (via FMP)"
+    echo "  sync-transactions [days] - Sync transactions from Schwab (default 30 days)"
     ;;
 esac

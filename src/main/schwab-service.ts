@@ -16,6 +16,11 @@ interface SchwabAccount {
     accountNumber: string;
     type: string;
     positions?: SchwabPosition[];
+    currentBalances?: {
+      cashBalance?: number;
+      liquidationValue?: number;
+      totalCash?: number;
+    };
   };
 }
 
@@ -305,6 +310,11 @@ export class SchwabService {
     return response;
   }
 
+  async fetchMarketDataApi(path: string): Promise<Response> {
+    await this.waitForMarketRateLimit();
+    return this.fetchApi(path);
+  }
+
   async getAccountNumbers(): Promise<SchwabAccountNumber[]> {
     const response = await this.fetchApi('/trader/v1/accounts/accountNumbers');
     if (!response.ok) {
@@ -360,6 +370,41 @@ export class SchwabService {
           // Find or create account
           const account = this.findOrCreateAccount(db, schwabAcct.accountNumber, schwabAcct.type);
           accountsSynced++;
+
+          // Sync account-level cash balance
+          const cashBalance = schwabAcct.currentBalances?.cashBalance
+            ?? schwabAcct.currentBalances?.totalCash
+            ?? 0;
+          if (cashBalance > 0) {
+            db.updateAccount(account.id, { cashBalance });
+
+            // Also upsert cash position record
+            let cashSecurity = db.findSecurityBySymbol('USD');
+            if (!cashSecurity) {
+              cashSecurity = db.createSecurity({
+                symbol: 'USD',
+                name: 'US Dollar Cash',
+                type: 'cash',
+                currency: 'USD',
+              });
+            }
+            const existingCashPos = db.findPositionByAccountAndSecurity(account.id, cashSecurity.id);
+            if (existingCashPos) {
+              db.updatePosition(existingCashPos.id, {
+                quantity: cashBalance,
+                costBasis: cashBalance,
+                lastUpdated: new Date().toISOString(),
+              });
+            } else {
+              db.createPosition({
+                accountId: account.id,
+                securityId: cashSecurity.id,
+                quantity: cashBalance,
+                costBasis: cashBalance,
+                lastUpdated: new Date().toISOString(),
+              });
+            }
+          }
 
           if (!schwabAcct.positions) continue;
 

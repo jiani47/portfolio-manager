@@ -10,6 +10,7 @@ import { MassiveService } from './massive-service';
 import { SchwabService } from './schwab-service';
 import { SchwabStreamService } from './schwab-stream-service';
 import { parserRegistry, transactionParserRegistry, lotDetailsParserRegistry } from './parsers';
+import { AnalyticsService } from './analytics-service';
 import { AppSettings, ExcelImportResult, RefreshPricesResult } from '../shared/types';
 
 export function setupIpcHandlers(
@@ -21,7 +22,8 @@ export function setupIpcHandlers(
   massiveService: MassiveService,
   schwabService: SchwabService,
   streamService: SchwabStreamService | null,
-  store: Store<{ settings: AppSettings }>
+  store: Store<{ settings: AppSettings }>,
+  analyticsService?: AnalyticsService
 ): void {
   // Account handlers
   ipcMain.handle('db:accounts:list', () => db.listAccounts());
@@ -365,6 +367,8 @@ export function setupIpcHandlers(
   ipcMain.handle('db:monitors:delete', (_, id) => db.deleteMonitor(id));
   ipcMain.handle('db:monitors:check', (_, symbol, price) => db.checkMonitors(symbol, price));
   ipcMain.handle('db:monitors:triggered', () => db.getTriggeredMonitors());
+  ipcMain.handle('db:monitors:due-reminders', () => db.getDueReminderMonitors());
+  ipcMain.handle('db:monitors:earnings', () => db.getEarningsMonitors());
 
   // Decision log handlers
   ipcMain.handle('db:decision-logs:list', (_, filters) => db.listDecisionLogs(filters));
@@ -619,7 +623,14 @@ export function setupIpcHandlers(
       return [];
     }
 
-    return fmpService.getEarningsForSymbols(symbols, fromDate, toDate);
+    const earnings = await fmpService.getEarningsForSymbols(symbols, fromDate, toDate);
+    // Auto-sync earnings monitors
+    try {
+      db.syncEarningsMonitors(earnings);
+    } catch (e) {
+      console.error('Failed to sync earnings monitors:', e);
+    }
+    return earnings;
   });
 
   // Massive data provider handlers
@@ -1037,5 +1048,29 @@ export function setupIpcHandlers(
 
   ipcMain.handle('streaming:update-symbols', async (_, symbols: string[]) => {
     streamService?.updateSymbols(symbols);
+  });
+
+  // Analytics handlers
+  ipcMain.handle('analytics:portfolio', (_, days?: number) => {
+    if (!analyticsService) return null;
+    return analyticsService.getPortfolioAnalytics(days);
+  });
+
+  ipcMain.handle('analytics:position-betas', (_, days?: number) => {
+    if (!analyticsService) return [];
+    return analyticsService.getPositionBetas(days);
+  });
+
+  // Config helpers
+  ipcMain.handle('config:get-fmp-key', () => {
+    try {
+      const homedir = require('os').homedir();
+      const confPath = require('path').join(homedir, '.pm-cli.conf');
+      const content = fs.readFileSync(confPath, 'utf-8');
+      const match = content.match(/^FMP_API_KEY=(.+)$/m);
+      return match ? match[1].trim() : null;
+    } catch {
+      return null;
+    }
   });
 }

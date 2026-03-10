@@ -124,6 +124,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteMonitor: (id: string) => ipcRenderer.invoke('db:monitors:delete', id),
   checkMonitors: (symbol: string, price: number) => ipcRenderer.invoke('db:monitors:check', symbol, price),
   getTriggeredMonitors: () => ipcRenderer.invoke('db:monitors:triggered'),
+  getDueReminderMonitors: () => ipcRenderer.invoke('db:monitors:due-reminders'),
+  getEarningsMonitors: () => ipcRenderer.invoke('db:monitors:earnings'),
+
+  // Analytics
+  getPortfolioAnalytics: (days?: number) => ipcRenderer.invoke('analytics:portfolio', days),
+  getPositionBetas: (days?: number) => ipcRenderer.invoke('analytics:position-betas', days),
 
   // Decision log operations
   getDecisionLogs: (filters?: unknown) => ipcRenderer.invoke('db:decision-logs:list', filters),
@@ -195,6 +201,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('positions:synced', handler);
     return () => { ipcRenderer.removeListener('positions:synced', handler); };
   },
+
+  // Config helpers
+  getFmpApiKey: () => ipcRenderer.invoke('config:get-fmp-key'),
 
   // Streaming control (renderer -> main)
   streamingStart: (symbols: string[]) => ipcRenderer.invoke('streaming:start', symbols),
