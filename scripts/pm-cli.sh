@@ -2505,6 +2505,118 @@ print(json.dumps(order))
     fi
     ;;
 
+  orders)
+    schwab_ensure_token
+
+    SHOW_ALL=0
+    if [ "${2:-}" = "all" ]; then
+      SHOW_ALL=1
+    fi
+
+    # Fetch account numbers
+    ACCTS_JSON=$(curl -s "${SCHWAB_API}/trader/v1/accounts/accountNumbers" \
+      -H "Authorization: Bearer ${ACCESS_TOKEN}")
+
+    python3 - "$ACCESS_TOKEN" "$SCHWAB_API" "$SHOW_ALL" "$ACCTS_JSON" <<'PYEOF'
+import sys, json, urllib.request, datetime
+
+token = sys.argv[1]
+api = sys.argv[2]
+show_all = sys.argv[3] == "1"
+accts = json.loads(sys.argv[4])
+
+now = datetime.datetime.now(datetime.timezone.utc)
+from_date = (now - datetime.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+to_date = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+all_orders = []
+
+for acct in accts:
+    acct_num = acct.get("accountNumber", "")
+    acct_hash = acct.get("hashValue", "")
+    if not acct_hash:
+        continue
+
+    url = f"{api}/trader/v1/accounts/{acct_hash}/orders?fromEnteredTime={from_date}&toEnteredTime={to_date}"
+    if not show_all:
+        url += "&status=WORKING"
+
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        resp = urllib.request.urlopen(req)
+        orders = json.loads(resp.read())
+    except Exception as e:
+        print(f"Warning: failed to fetch orders for ...{acct_num[-4:]}: {e}", file=sys.stderr)
+        continue
+
+    for o in orders:
+        legs = o.get("orderLegCollection", [])
+        symbol = legs[0]["instrument"]["symbol"] if legs else "?"
+        side = legs[0].get("instruction", "?") if legs else "?"
+        qty = int(legs[0].get("quantity", 0)) if legs else 0
+        filled = int(o.get("filledQuantity", 0))
+        order_type = o.get("orderType", "?")
+        price = o.get("price") or o.get("stopPrice") or ""
+        if price:
+            price = f"${float(price):.2f}"
+        duration = o.get("duration", "?")
+        status = o.get("status", "?")
+        entered = o.get("enteredTime", "")[:19].replace("T", " ")
+        order_id = str(o.get("orderId", "?"))
+        all_orders.append((entered, order_id, acct_num[-4:], symbol, side, qty, filled, order_type, price, duration, status))
+
+# Sort by entered time descending
+all_orders.sort(key=lambda x: x[0], reverse=True)
+
+if not all_orders:
+    label = "open" if not show_all else ""
+    print(f"No {label} orders found.")
+    sys.exit(0)
+
+# Print table
+hdr = f"{'ORDER_ID':>12}  {'ACCT':>4}  {'SYMBOL':<6}  {'SIDE':<5}  {'QTY':>5}  {'FILL':>4}  {'TYPE':<6}  {'PRICE':>10}  {'DUR':<3}  {'STATUS':<12}  {'ENTERED':<19}"
+print(hdr)
+print("-" * len(hdr))
+for row in all_orders:
+    entered, oid, acct4, sym, side, qty, filled, otype, price, dur, status = row
+    # Shorten side
+    side_short = {"BUY": "BUY", "SELL": "SELL", "BUY_TO_COVER": "BTC", "SELL_SHORT": "SS"}.get(side, side)
+    print(f"{oid:>12}  {acct4:>4}  {sym:<6}  {side_short:<5}  {qty:>5}  {filled:>4}  {otype:<6}  {price:>10}  {dur:<3}  {status:<12}  {entered:<19}")
+PYEOF
+    ;;
+
+  cancel-order)
+    ORDER_ID="${2:-}"
+    if [ -z "$ORDER_ID" ]; then
+      echo "Usage: pm-cli.sh cancel-order <orderId>"
+      exit 1
+    fi
+
+    schwab_ensure_token
+
+    # Fetch account numbers
+    ACCTS_JSON=$(curl -s "${SCHWAB_API}/trader/v1/accounts/accountNumbers" \
+      -H "Authorization: Bearer ${ACCESS_TOKEN}")
+
+    # Try DELETE on each account until one succeeds
+    FOUND=0
+    for ACCT_HASH in $(echo "$ACCTS_JSON" | python3 -c "import json,sys; [print(a['hashValue']) for a in json.load(sys.stdin)]" 2>/dev/null); do
+      HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+        "${SCHWAB_API}/trader/v1/accounts/${ACCT_HASH}/orders/${ORDER_ID}" \
+        -H "Authorization: Bearer ${ACCESS_TOKEN}")
+      if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "204" ]; then
+        echo "Order $ORDER_ID cancelled successfully."
+        FOUND=1
+        break
+      fi
+    done
+
+    if [ "$FOUND" -eq 0 ]; then
+      echo "ERROR: Order $ORDER_ID not found or could not be cancelled."
+      exit 1
+    fi
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -2550,5 +2662,7 @@ print(json.dumps(order))
     echo "  sync-transactions [days] - Sync transactions from Schwab (default 30 days)"
     echo "  buy                - Buy: <qty> <symbol> at|market|stop <price> <DAY|GTC> [account]"
     echo "  sell               - Sell: <qty> <symbol> at|market|stop <price> <DAY|GTC> [account]"
+    echo "  orders [all]       - List open/working orders (or all orders in last 7 days)"
+    echo "  cancel-order <id>  - Cancel an open order by order ID"
     ;;
 esac
