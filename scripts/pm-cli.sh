@@ -2352,6 +2352,159 @@ print(f"\nSynced {total_synced} new transactions ({total_skipped} duplicates ski
 PYEOF
     ;;
 
+  buy|sell)
+    ACTION=$(echo "$1" | tr '[:lower:]' '[:upper:]')
+    INSTRUCTION="$ACTION"
+    QTY="$2"
+    SYMBOL=$(echo "$3" | tr '[:lower:]' '[:upper:]')
+    ORDER_TYPE_IND="$4"
+
+    if [ -z "$QTY" ] || [ -z "$SYMBOL" ] || [ -z "$ORDER_TYPE_IND" ]; then
+      echo "Usage: pm-cli.sh buy|sell <qty> <symbol> at <price> <DAY|GTC> [account]"
+      echo "       pm-cli.sh buy|sell <qty> <symbol> market <DAY|GTC> [account]"
+      echo "       pm-cli.sh buy|sell <qty> <symbol> stop <price> <DAY|GTC> [account]"
+      exit 1
+    fi
+
+    # Parse based on order type indicator
+    case "$ORDER_TYPE_IND" in
+      at)
+        ORDER_TYPE="LIMIT"
+        PRICE="$5"
+        DURATION=$(echo "$6" | tr '[:lower:]' '[:upper:]')
+        ACCT_HINT="$7"
+        if [ -z "$PRICE" ] || [ -z "$DURATION" ]; then
+          echo "Usage: pm-cli.sh $1 <qty> <symbol> at <price> <DAY|GTC> [account]"
+          exit 1
+        fi
+        ;;
+      market)
+        ORDER_TYPE="MARKET"
+        PRICE=""
+        DURATION=$(echo "$5" | tr '[:lower:]' '[:upper:]')
+        ACCT_HINT="$6"
+        if [ -z "$DURATION" ]; then
+          echo "Usage: pm-cli.sh $1 <qty> <symbol> market <DAY|GTC> [account]"
+          exit 1
+        fi
+        ;;
+      stop)
+        ORDER_TYPE="STOP"
+        PRICE="$5"
+        DURATION=$(echo "$6" | tr '[:lower:]' '[:upper:]')
+        ACCT_HINT="$7"
+        if [ -z "$PRICE" ] || [ -z "$DURATION" ]; then
+          echo "Usage: pm-cli.sh $1 <qty> <symbol> stop <price> <DAY|GTC> [account]"
+          exit 1
+        fi
+        ;;
+      *)
+        echo "ERROR: Unknown order type '$ORDER_TYPE_IND'. Use: at, market, or stop"
+        exit 1
+        ;;
+    esac
+
+    # Validate duration
+    if [ "$DURATION" != "DAY" ] && [ "$DURATION" != "GTC" ]; then
+      echo "ERROR: Duration must be DAY or GTC (got '$DURATION')"
+      exit 1
+    fi
+
+    # Resolve account
+    resolve_account "$INSTRUCTION" "$SYMBOL" "$ACCT_HINT"
+    if [ $? -ne 0 ]; then
+      exit 1
+    fi
+
+    ACCT_NAME=$(sqlite3 "$DB" "SELECT name FROM accounts WHERE account_number LIKE '%$RESOLVED_ACCOUNT' LIMIT 1")
+
+    # Print order summary
+    echo "==============================="
+    echo "  ORDER SUMMARY"
+    echo "==============================="
+    echo "  Action:   $INSTRUCTION"
+    echo "  Symbol:   $SYMBOL"
+    echo "  Quantity: $QTY"
+    echo "  Type:     $ORDER_TYPE"
+    if [ "$ORDER_TYPE" = "LIMIT" ]; then
+      echo "  Price:    \$$PRICE"
+    elif [ "$ORDER_TYPE" = "STOP" ]; then
+      echo "  Stop:     \$$PRICE"
+    fi
+    echo "  Duration: $DURATION"
+    echo "  Account:  $ACCT_NAME ($RESOLVED_ACCOUNT)"
+    echo "==============================="
+
+    # Check for --confirm flag
+    CONFIRMED=0
+    for arg in "$@"; do
+      if [ "$arg" = "--confirm" ]; then
+        CONFIRMED=1
+        break
+      fi
+    done
+
+    if [ "$CONFIRMED" -eq 0 ]; then
+      printf "Place order? [y/N] "
+      read -r REPLY
+      if [ "$REPLY" != "y" ] && [ "$REPLY" != "Y" ]; then
+        echo "Order cancelled."
+        exit 0
+      fi
+    fi
+
+    # Authenticate and get account hash
+    schwab_ensure_token
+    schwab_get_account_hash "$RESOLVED_ACCOUNT"
+    if [ -z "$ACCOUNT_HASH" ]; then
+      exit 1
+    fi
+
+    # Build order JSON
+    ORDER_JSON=$(python3 -c "
+import json
+order = {
+    'orderType': '$ORDER_TYPE',
+    'session': 'NORMAL',
+    'duration': '$DURATION',
+    'orderStrategyType': 'SINGLE',
+    'orderLegCollection': [{
+        'instruction': '$INSTRUCTION',
+        'quantity': $QTY,
+        'instrument': {
+            'symbol': '$SYMBOL',
+            'assetType': 'EQUITY'
+        }
+    }]
+}
+if '$ORDER_TYPE' == 'LIMIT':
+    order['price'] = '$PRICE'
+elif '$ORDER_TYPE' == 'STOP':
+    order['stopPrice'] = '$PRICE'
+print(json.dumps(order))
+")
+
+    # Place order
+    HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+      "${SCHWAB_API}/trader/v1/accounts/${ACCOUNT_HASH}/orders" \
+      -H "Authorization: ${TOKEN_TYPE} ${ACCESS_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "$ORDER_JSON")
+
+    HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
+    HTTP_STATUS=$(echo "$HTTP_RESPONSE" | tail -1)
+
+    if [ "$HTTP_STATUS" = "201" ]; then
+      echo "Order placed successfully."
+    else
+      echo "ERROR: Order failed (HTTP $HTTP_STATUS)"
+      if [ -n "$HTTP_BODY" ]; then
+        echo "$HTTP_BODY" | python3 -m json.tool 2>/dev/null || echo "$HTTP_BODY"
+      fi
+      exit 1
+    fi
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -2395,5 +2548,7 @@ PYEOF
     echo "  levels-refresh [sym]- Recompute S/R from price history (all if no arg)"
     echo "  sectors [date]      - Sector performance heatmap (via FMP)"
     echo "  sync-transactions [days] - Sync transactions from Schwab (default 30 days)"
+    echo "  buy                - Buy: <qty> <symbol> at|market|stop <price> <DAY|GTC> [account]"
+    echo "  sell               - Sell: <qty> <symbol> at|market|stop <price> <DAY|GTC> [account]"
     ;;
 esac
