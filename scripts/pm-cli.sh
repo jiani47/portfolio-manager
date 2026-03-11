@@ -21,6 +21,143 @@ get_fmp_key() {
   get_config "FMP_API_KEY"
 }
 
+# Ensure we have a valid Schwab access token.
+# Sets global vars: ACCESS_TOKEN, TOKEN_TYPE
+schwab_ensure_token() {
+  if [ ! -f "$APP_CONFIG" ]; then
+    echo "ERROR: App config not found at $APP_CONFIG"
+    echo "Run the Electron app at least once first."
+    exit 1
+  fi
+
+  # Extract Schwab credentials and tokens from config.json
+  SCHWAB_CLIENT_ID=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientId',''))" 2>/dev/null)
+  SCHWAB_CLIENT_SECRET=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientSecret',''))" 2>/dev/null)
+  REFRESH_TOKEN=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshToken',''))" 2>/dev/null)
+  REFRESH_EXPIRES=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshTokenExpiresAt',0))" 2>/dev/null)
+
+  if [ -z "$SCHWAB_CLIENT_ID" ] || [ -z "$REFRESH_TOKEN" ]; then
+    echo "ERROR: Schwab not configured or not connected in the app."
+    echo "Open the app and connect to Schwab first."
+    exit 1
+  fi
+
+  # Check refresh token expiry
+  NOW_MS=$(python3 -c "import time; print(int(time.time()*1000))")
+  if [ "$REFRESH_EXPIRES" -le "$NOW_MS" ] 2>/dev/null; then
+    echo "ERROR: Schwab refresh token expired. Reconnect in the app."
+    exit 1
+  fi
+
+  # Get new access token
+  echo "Refreshing Schwab access token..."
+  BASIC_AUTH=$(printf "%s:%s" "$SCHWAB_CLIENT_ID" "$SCHWAB_CLIENT_SECRET" | base64)
+  TOKEN_RESPONSE=$(curl -s -X POST "$SCHWAB_TOKEN_URL" \
+    -H "Authorization: Basic $BASIC_AUTH" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=refresh_token&refresh_token=$REFRESH_TOKEN")
+
+  ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null)
+  TOKEN_TYPE=$(echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token_type','Bearer'))" 2>/dev/null)
+
+  if [ -z "$ACCESS_TOKEN" ]; then
+    echo "ERROR: Failed to refresh access token."
+    echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error_description', d.get('error', 'Unknown error')))" 2>/dev/null
+    exit 1
+  fi
+
+  # Save new tokens back to config.json so the app picks them up too
+  python3 -c "
+import json, time
+with open('$APP_CONFIG') as f:
+    cfg = json.load(f)
+resp = json.loads('''$TOKEN_RESPONSE''')
+now = int(time.time() * 1000)
+tokens = cfg.get('settings', {}).get('schwabTokens', {})
+tokens['accessToken'] = resp['access_token']
+tokens['refreshToken'] = resp.get('refresh_token', tokens.get('refreshToken', ''))
+tokens['accessTokenExpiresAt'] = now + (resp.get('expires_in', 1800) * 1000)
+tokens['refreshTokenExpiresAt'] = now + (7 * 24 * 60 * 60 * 1000)
+tokens['tokenType'] = resp.get('token_type', 'Bearer')
+tokens['scope'] = resp.get('scope', tokens.get('scope'))
+cfg['settings']['schwabTokens'] = tokens
+with open('$APP_CONFIG', 'w') as f:
+    json.dump(cfg, f, indent=2)
+" 2>/dev/null
+  echo "Access token refreshed."
+}
+
+# Get account hash for a Schwab account number
+# Usage: schwab_get_account_hash <account_number_suffix>
+# Sets global var: ACCOUNT_HASH
+schwab_get_account_hash() {
+  local ACCT_NUM="$1"
+  local ACCTS_JSON
+  ACCTS_JSON=$(curl -s "${SCHWAB_API}/trader/v1/accounts/accountNumbers" \
+    -H "Authorization: Bearer ${ACCESS_TOKEN}")
+
+  ACCOUNT_HASH=$(echo "$ACCTS_JSON" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for acct in data:
+    if acct.get('accountNumber','').endswith('$ACCT_NUM'):
+        print(acct['hashValue'])
+        sys.exit(0)
+print('')
+" 2>/dev/null)
+
+  if [ -z "$ACCOUNT_HASH" ]; then
+    echo "ERROR: Could not find account hash for account ending in $ACCT_NUM"
+    return 1
+  fi
+}
+
+# Resolve which account to use for a trade
+# Usage: resolve_account <BUY|SELL> <symbol> [account_hint]
+# Sets global var: RESOLVED_ACCOUNT (account number)
+resolve_account() {
+  local INSTRUCTION="$1"
+  local SYMBOL="$2"
+  local HINT="$3"
+
+  if [ -n "$HINT" ]; then
+    # Try to match by name (case-insensitive) or account_number suffix
+    RESOLVED_ACCOUNT=$(sqlite3 "$DB" "
+      SELECT account_number FROM accounts
+      WHERE LOWER(name) LIKE LOWER('%${HINT}%')
+         OR account_number LIKE '%${HINT}'
+      LIMIT 1;
+    ")
+    if [ -z "$RESOLVED_ACCOUNT" ]; then
+      echo "ERROR: No account found matching '$HINT'"
+      return 1
+    fi
+  elif [ "$INSTRUCTION" = "SELL" ]; then
+    # Find which account holds the symbol
+    RESOLVED_ACCOUNT=$(sqlite3 "$DB" "
+      SELECT a.account_number FROM positions p
+      JOIN securities s ON p.security_id = s.id
+      JOIN accounts a ON p.account_id = a.id
+      WHERE UPPER(s.symbol) = UPPER('$SYMBOL')
+        AND p.quantity > 0;
+    ")
+    local ACCT_COUNT
+    ACCT_COUNT=$(echo "$RESOLVED_ACCOUNT" | grep -c .)
+    if [ "$ACCT_COUNT" -gt 1 ]; then
+      echo "ERROR: Multiple accounts hold $SYMBOL. Specify account with hint."
+      echo "Accounts: $RESOLVED_ACCOUNT"
+      return 1
+    fi
+    if [ -z "$RESOLVED_ACCOUNT" ]; then
+      echo "ERROR: No account holds $SYMBOL"
+      return 1
+    fi
+  else
+    # BUY with no hint: default to 8819
+    RESOLVED_ACCOUNT="8819"
+  fi
+}
+
 case "$1" in
   morning)
     # Combined: refresh prices + briefing + ritual status
@@ -566,67 +703,7 @@ PYEOF
     ;;
   refresh)
     # Refresh prices via Schwab API using tokens from Electron app config
-    if [ ! -f "$APP_CONFIG" ]; then
-      echo "ERROR: App config not found at $APP_CONFIG"
-      echo "Run the Electron app at least once first."
-      exit 1
-    fi
-
-    # Extract Schwab credentials and tokens from config.json
-    SCHWAB_CLIENT_ID=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientId',''))" 2>/dev/null)
-    SCHWAB_CLIENT_SECRET=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientSecret',''))" 2>/dev/null)
-    REFRESH_TOKEN=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshToken',''))" 2>/dev/null)
-    REFRESH_EXPIRES=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshTokenExpiresAt',0))" 2>/dev/null)
-
-    if [ -z "$SCHWAB_CLIENT_ID" ] || [ -z "$REFRESH_TOKEN" ]; then
-      echo "ERROR: Schwab not configured or not connected in the app."
-      echo "Open the app and connect to Schwab first."
-      exit 1
-    fi
-
-    # Check refresh token expiry
-    NOW_MS=$(python3 -c "import time; print(int(time.time()*1000))")
-    if [ "$REFRESH_EXPIRES" -le "$NOW_MS" ] 2>/dev/null; then
-      echo "ERROR: Schwab refresh token expired. Reconnect in the app."
-      exit 1
-    fi
-
-    # Get new access token
-    echo "Refreshing Schwab access token..."
-    BASIC_AUTH=$(printf "%s:%s" "$SCHWAB_CLIENT_ID" "$SCHWAB_CLIENT_SECRET" | base64)
-    TOKEN_RESPONSE=$(curl -s -X POST "$SCHWAB_TOKEN_URL" \
-      -H "Authorization: Basic $BASIC_AUTH" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "grant_type=refresh_token&refresh_token=$REFRESH_TOKEN")
-
-    ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null)
-    TOKEN_TYPE=$(echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token_type','Bearer'))" 2>/dev/null)
-
-    if [ -z "$ACCESS_TOKEN" ]; then
-      echo "ERROR: Failed to refresh access token."
-      echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error_description', d.get('error', 'Unknown error')))" 2>/dev/null
-      exit 1
-    fi
-
-    # Save new tokens back to config.json so the app picks them up too
-    python3 -c "
-import json, time
-with open('$APP_CONFIG') as f:
-    cfg = json.load(f)
-resp = json.loads('''$TOKEN_RESPONSE''')
-now = int(time.time() * 1000)
-tokens = cfg.get('settings', {}).get('schwabTokens', {})
-tokens['accessToken'] = resp['access_token']
-tokens['refreshToken'] = resp.get('refresh_token', tokens.get('refreshToken', ''))
-tokens['accessTokenExpiresAt'] = now + (resp.get('expires_in', 1800) * 1000)
-tokens['refreshTokenExpiresAt'] = now + (7 * 24 * 60 * 60 * 1000)
-tokens['tokenType'] = resp.get('token_type', 'Bearer')
-tokens['scope'] = resp.get('scope', tokens.get('scope'))
-cfg['settings']['schwabTokens'] = tokens
-with open('$APP_CONFIG', 'w') as f:
-    json.dump(cfg, f, indent=2)
-" 2>/dev/null
-    echo "Access token refreshed."
+    schwab_ensure_token
 
     # Get all non-cash symbols from positions + watchlist items
     SYMBOLS=$(sqlite3 "$DB" "
@@ -1098,22 +1175,14 @@ rows = db.execute("""
     LIMIT ?
 """, (int("$DAYS") + 1,)).fetchall()
 
-if len(rows) < 3:
-    print("Not enough snapshot data. Run 'pm-cli.sh snapshot' daily to build history.")
+has_snapshots = len(rows) >= 3
+if not has_snapshots:
+    print("Not enough snapshot data for portfolio-level analytics.")
     print(f"Currently have {len(rows)} data points (need at least 3).")
-    sys.exit(0)
+    print("Run 'pm-cli.sh snapshot' daily to build history.")
+    print()
 
-rows.reverse()  # oldest first
-dates = [r[0] for r in rows]
-mvs = [r[1] for r in rows]
-
-# Portfolio daily returns
-p_returns = []
-for i in range(1, len(mvs)):
-    if mvs[i-1] > 0:
-        p_returns.append((dates[i], (mvs[i] - mvs[i-1]) / mvs[i-1]))
-
-# SPY daily returns
+# SPY daily returns (needed for both portfolio and position betas)
 spy_sec = db.execute("SELECT id FROM securities WHERE symbol = 'SPY'").fetchone()
 if not spy_sec:
     print("SPY not found in securities. Run 'pm-cli.sh backfill SPY' first.")
@@ -1132,80 +1201,88 @@ for i in range(1, len(spy_prices)):
     if spy_prices[i-1] > 0:
         b_returns.append((spy_dates[i], (spy_prices[i] - spy_prices[i-1]) / spy_prices[i-1]))
 
-# Align dates
 b_map = {d: r for d, r in b_returns}
-aligned_p = []
-aligned_b = []
-for d, r in p_returns:
-    if d in b_map:
-        aligned_p.append(r)
-        aligned_b.append(b_map[d])
 
-n = len(aligned_p)
-if n < 3:
-    print(f"Not enough aligned data points ({n}). Need at least 3.")
-    sys.exit(0)
+# Portfolio-level analytics (requires snapshots)
+if has_snapshots:
+    rows.reverse()  # oldest first
+    dates = [r[0] for r in rows]
+    mvs = [r[1] for r in rows]
 
-# Beta
-mean_p = sum(aligned_p) / n
-mean_b = sum(aligned_b) / n
-cov = sum((aligned_p[i] - mean_p) * (aligned_b[i] - mean_b) for i in range(n))
-var_b = sum((aligned_b[i] - mean_b) ** 2 for i in range(n))
-beta = cov / var_b if var_b > 0 else 1.0
+    p_returns = []
+    for i in range(1, len(mvs)):
+        if mvs[i-1] > 0:
+            p_returns.append((dates[i], (mvs[i] - mvs[i-1]) / mvs[i-1]))
 
-# Volatility (annualized)
-var_p = sum((r - mean_p) ** 2 for r in aligned_p) / (n - 1)
-volatility = math.sqrt(var_p) * math.sqrt(252)
+    aligned_p = []
+    aligned_b = []
+    for d, r in p_returns:
+        if d in b_map:
+            aligned_p.append(r)
+            aligned_b.append(b_map[d])
 
-# Returns
-total_return = (mvs[-1] - mvs[0]) / mvs[0] if mvs[0] > 0 else 0
-ann_return = (1 + total_return) ** (252 / len(p_returns)) - 1 if len(p_returns) > 0 else 0
-spy_total = (spy_prices[-1] - spy_prices[0]) / spy_prices[0] if spy_prices[0] > 0 else 0
+    n = len(aligned_p)
+    if n >= 3:
+        mean_p = sum(aligned_p) / n
+        mean_b = sum(aligned_b) / n
+        cov = sum((aligned_p[i] - mean_p) * (aligned_b[i] - mean_b) for i in range(n))
+        var_b = sum((aligned_b[i] - mean_b) ** 2 for i in range(n))
+        beta = cov / var_b if var_b > 0 else 1.0
 
-# Sharpe
-rfr = 0.05
-sharpe = (ann_return - rfr) / volatility if volatility > 0 else 0
+        var_p = sum((r - mean_p) ** 2 for r in aligned_p) / (n - 1)
+        volatility = math.sqrt(var_p) * math.sqrt(252)
 
-# Drawdown
-peak = float('-inf')
-max_dd = 0
-max_dd_date = ''
-for i, mv in enumerate(mvs):
-    if mv > peak:
-        peak = mv
-    dd = (peak - mv) / peak if peak > 0 else 0
-    if dd > max_dd:
-        max_dd = dd
-        max_dd_date = dates[i]
+        total_return = (mvs[-1] - mvs[0]) / mvs[0] if mvs[0] > 0 else 0
+        ann_return = (1 + total_return) ** (252 / len(p_returns)) - 1 if len(p_returns) > 0 else 0
+        spy_total = (spy_prices[-1] - spy_prices[0]) / spy_prices[0] if spy_prices[0] > 0 else 0
 
-current_dd = (peak - mvs[-1]) / peak if peak > 0 else 0
+        rfr = 0.05
+        sharpe = (ann_return - rfr) / volatility if volatility > 0 else 0
 
-# Position betas
-print(f"  Beta (vs SPY):      {beta:>8.2f}")
-print(f"  Sharpe Ratio:       {sharpe:>8.2f}")
-print(f"  Volatility (ann):   {volatility*100:>7.1f}%")
-print(f"  Max Drawdown:       {-max_dd*100:>7.1f}%  ({max_dd_date})")
-print(f"  Current Drawdown:   {-current_dd*100:>7.1f}%")
-print(f"  Total Return:       {total_return*100:>7.1f}%")
-print(f"  Annualized Return:  {ann_return*100:>7.1f}%")
-print(f"  SPY Return:         {spy_total*100:>7.1f}%")
-print(f"  Data Points:        {n:>8d}")
-print()
+        peak = float('-inf')
+        max_dd = 0
+        max_dd_date = ''
+        for i, mv in enumerate(mvs):
+            if mv > peak:
+                peak = mv
+            dd = (peak - mv) / peak if peak > 0 else 0
+            if dd > max_dd:
+                max_dd = dd
+                max_dd_date = dates[i]
 
-# Per-position betas
+        current_dd = (peak - mvs[-1]) / peak if peak > 0 else 0
+
+        print(f"  Beta (vs SPY):      {beta:>8.2f}")
+        print(f"  Sharpe Ratio:       {sharpe:>8.2f}")
+        print(f"  Volatility (ann):   {volatility*100:>7.1f}%")
+        print(f"  Max Drawdown:       {-max_dd*100:>7.1f}%  ({max_dd_date})")
+        print(f"  Current Drawdown:   {-current_dd*100:>7.1f}%")
+        print(f"  Total Return:       {total_return*100:>7.1f}%")
+        print(f"  Annualized Return:  {ann_return*100:>7.1f}%")
+        print(f"  SPY Return:         {spy_total*100:>7.1f}%")
+        print(f"  Data Points:        {n:>8d}")
+        print()
+
+# Per-position betas (works with just price history, no snapshots needed)
 pos_rows = db.execute("""
-    SELECT s.symbol, SUM(p.market_value) as mv
+    SELECT s.symbol,
+      SUM(p.quantity * COALESCE(
+        (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = s.id ORDER BY ph.date DESC LIMIT 1),
+        p.current_price,
+        p.cost_basis / NULLIF(p.quantity, 0)
+      )) as mv
     FROM positions p JOIN securities s ON p.security_id = s.id
     WHERE p.quantity > 0 AND s.type != 'cash'
     GROUP BY s.symbol ORDER BY mv DESC
 """).fetchall()
 
-total_mv = sum(r[1] for r in pos_rows) if pos_rows else 0
+total_mv = sum(r[1] or 0 for r in pos_rows) if pos_rows else 0
 
 print(f"{'Symbol':<8} {'Beta':>6} {'Corr':>6} {'Weight':>7} {'Wtd Beta':>9}")
 print("-" * 38)
 total_wtd_beta = 0
-for sym, mv in pos_rows:
+for sym, mv_raw in pos_rows:
+    mv = mv_raw or 0
     sec = db.execute("SELECT id FROM securities WHERE symbol = ?", (sym,)).fetchone()
     if not sec:
         continue
@@ -1223,8 +1300,8 @@ for sym, mv in pos_rows:
 
     al_s = []
     al_b2 = []
-    for d, r in p_returns:
-        if d in s_returns and d in b_map:
+    for d in sorted(s_returns.keys()):
+        if d in b_map:
             al_s.append(s_returns[d])
             al_b2.append(b_map[d])
 
@@ -1258,63 +1335,7 @@ PYEOF
   backfill)
     # Backfill 3yr daily price history from Schwab API
     # Usage: pm-cli.sh backfill [symbol]
-    if [ ! -f "$APP_CONFIG" ]; then
-      echo "ERROR: App config not found at $APP_CONFIG"
-      echo "Run the Electron app at least once first."
-      exit 1
-    fi
-
-    # Refresh Schwab access token (same logic as refresh command)
-    SCHWAB_CLIENT_ID=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientId',''))" 2>/dev/null)
-    SCHWAB_CLIENT_SECRET=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientSecret',''))" 2>/dev/null)
-    REFRESH_TOKEN=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshToken',''))" 2>/dev/null)
-    REFRESH_EXPIRES=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshTokenExpiresAt',0))" 2>/dev/null)
-
-    if [ -z "$SCHWAB_CLIENT_ID" ] || [ -z "$REFRESH_TOKEN" ]; then
-      echo "ERROR: Schwab not configured or not connected in the app."
-      exit 1
-    fi
-
-    NOW_MS=$(python3 -c "import time; print(int(time.time()*1000))")
-    if [ "$REFRESH_EXPIRES" -le "$NOW_MS" ] 2>/dev/null; then
-      echo "ERROR: Schwab refresh token expired. Reconnect in the app."
-      exit 1
-    fi
-
-    echo "Refreshing Schwab access token..."
-    BASIC_AUTH=$(printf "%s:%s" "$SCHWAB_CLIENT_ID" "$SCHWAB_CLIENT_SECRET" | base64)
-    TOKEN_RESPONSE=$(curl -s -X POST "$SCHWAB_TOKEN_URL" \
-      -H "Authorization: Basic $BASIC_AUTH" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "grant_type=refresh_token&refresh_token=$REFRESH_TOKEN")
-
-    ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null)
-
-    if [ -z "$ACCESS_TOKEN" ]; then
-      echo "ERROR: Failed to refresh access token."
-      echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error_description', d.get('error', 'Unknown error')))" 2>/dev/null
-      exit 1
-    fi
-
-    # Save new tokens back to config.json
-    python3 -c "
-import json, time
-with open('$APP_CONFIG') as f:
-    cfg = json.load(f)
-resp = json.loads('''$TOKEN_RESPONSE''')
-now = int(time.time() * 1000)
-tokens = cfg.get('settings', {}).get('schwabTokens', {})
-tokens['accessToken'] = resp['access_token']
-tokens['refreshToken'] = resp.get('refresh_token', tokens.get('refreshToken', ''))
-tokens['accessTokenExpiresAt'] = now + (resp.get('expires_in', 1800) * 1000)
-tokens['refreshTokenExpiresAt'] = now + (7 * 24 * 60 * 60 * 1000)
-tokens['tokenType'] = resp.get('token_type', 'Bearer')
-tokens['scope'] = resp.get('scope', tokens.get('scope'))
-cfg['settings']['schwabTokens'] = tokens
-with open('$APP_CONFIG', 'w') as f:
-    json.dump(cfg, f, indent=2)
-" 2>/dev/null
-    echo "Access token refreshed."
+    schwab_ensure_token
 
     # Get symbols to backfill
     if [ -n "$2" ]; then
@@ -1880,10 +1901,15 @@ PYEOF
       SYMBOLS="$SYMBOL"
     else
       SYMBOLS=$(sqlite3 "$DB" "
-        SELECT DISTINCT s.symbol FROM positions p
-        JOIN securities s ON p.security_id = s.id
-        WHERE s.type != 'cash' AND s.symbol != ''
-        ORDER BY s.symbol;
+        SELECT DISTINCT symbol FROM (
+          SELECT s.symbol FROM positions p
+          JOIN securities s ON p.security_id = s.id
+          WHERE s.type != 'cash' AND s.symbol != ''
+          UNION
+          SELECT wi.symbol FROM watchlist_items wi
+          WHERE wi.symbol != ''
+        )
+        ORDER BY symbol;
       ")
     fi
 
@@ -2201,62 +2227,7 @@ PYEOF
   sync-transactions)
     # Sync transactions from Schwab API
     DAYS=${2:-30}
-    if [ ! -f "$APP_CONFIG" ]; then
-      echo "ERROR: App config not found at $APP_CONFIG"
-      exit 1
-    fi
-
-    # Refresh Schwab access token
-    SCHWAB_CLIENT_ID=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientId',''))" 2>/dev/null)
-    SCHWAB_CLIENT_SECRET=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabClientSecret',''))" 2>/dev/null)
-    REFRESH_TOKEN=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshToken',''))" 2>/dev/null)
-    REFRESH_EXPIRES=$(python3 -c "import json; cfg=json.load(open('$APP_CONFIG')); print(cfg.get('settings',{}).get('schwabTokens',{}).get('refreshTokenExpiresAt',0))" 2>/dev/null)
-
-    if [ -z "$SCHWAB_CLIENT_ID" ] || [ -z "$REFRESH_TOKEN" ]; then
-      echo "ERROR: Schwab not configured or not connected in the app."
-      exit 1
-    fi
-
-    NOW_MS=$(python3 -c "import time; print(int(time.time()*1000))")
-    if [ "$REFRESH_EXPIRES" -le "$NOW_MS" ] 2>/dev/null; then
-      echo "ERROR: Schwab refresh token expired. Reconnect in the app."
-      exit 1
-    fi
-
-    echo "Refreshing Schwab access token..."
-    BASIC_AUTH=$(printf "%s:%s" "$SCHWAB_CLIENT_ID" "$SCHWAB_CLIENT_SECRET" | base64)
-    TOKEN_RESPONSE=$(curl -s -X POST "$SCHWAB_TOKEN_URL" \
-      -H "Authorization: Basic $BASIC_AUTH" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "grant_type=refresh_token&refresh_token=$REFRESH_TOKEN")
-
-    ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null)
-
-    if [ -z "$ACCESS_TOKEN" ]; then
-      echo "ERROR: Failed to refresh access token."
-      echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('error_description', d.get('error', 'Unknown error')))" 2>/dev/null
-      exit 1
-    fi
-
-    # Save new tokens back to config.json
-    python3 -c "
-import json, time
-with open('$APP_CONFIG') as f:
-    cfg = json.load(f)
-resp = json.loads('''$TOKEN_RESPONSE''')
-now = int(time.time() * 1000)
-tokens = cfg.get('settings', {}).get('schwabTokens', {})
-tokens['accessToken'] = resp['access_token']
-tokens['refreshToken'] = resp.get('refresh_token', tokens.get('refreshToken', ''))
-tokens['accessTokenExpiresAt'] = now + (resp.get('expires_in', 1800) * 1000)
-tokens['refreshTokenExpiresAt'] = now + (7 * 24 * 60 * 60 * 1000)
-tokens['tokenType'] = resp.get('token_type', 'Bearer')
-tokens['scope'] = resp.get('scope', tokens.get('scope'))
-cfg['settings']['schwabTokens'] = tokens
-with open('$APP_CONFIG', 'w') as f:
-    json.dump(cfg, f, indent=2)
-" 2>/dev/null
-    echo "Access token refreshed."
+    schwab_ensure_token
 
     # Get account hashes
     echo "Fetching account numbers..."
