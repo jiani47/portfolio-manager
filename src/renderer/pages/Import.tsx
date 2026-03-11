@@ -18,7 +18,7 @@ interface ColumnMapping {
   acquisitionDate?: string;
 }
 
-export default function Import() {
+export default function Import({ embedded }: { embedded?: boolean } = {}) {
   const { importing, importExcel } = useFileImport();
   const { accounts, fetchAccounts } = useAccounts();
   const { createSecurity, findBySymbol } = useSecurities();
@@ -282,9 +282,11 @@ export default function Import() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-gray-900">Import Data</h1>
-      </div>
+      {!embedded && (
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold text-gray-900">Import Data</h1>
+        </div>
+      )}
 
       {/* Import Type Selection */}
       <div className="card">

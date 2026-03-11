@@ -35,7 +35,7 @@ const initialFormData: FormData = {
   transactionIds: [],
 };
 
-export default function DecisionLogs() {
+export default function DecisionLogs({ embedded }: { embedded?: boolean } = {}) {
   const { logs, loading, error, fetchLogs, createLog, updateLog, deleteLog } = useDecisionLogs();
   const { securities, fetchSecurities } = useSecurities();
   const { transactions, fetchTransactions } = useTransactions();
@@ -179,10 +179,12 @@ export default function DecisionLogs() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Decision Logs</h1>
-          <p className="text-sm text-gray-500 mt-1">Track your investment decisions and reasoning</p>
-        </div>
+        {!embedded && (
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Decision Logs</h1>
+            <p className="text-sm text-gray-500 mt-1">Track your investment decisions and reasoning</p>
+          </div>
+        )}
         <button onClick={() => handleOpenModal()} className="btn-primary">
           New Entry
         </button>

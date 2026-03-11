@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
-import { useSettings, useBackup, useSecurityTags, useFMP, useMassive, useSchwab } from '../hooks/useApi';
-import type { AppSettings, BackupConfig, SecurityTag } from '../../shared/types';
+import { useEffect, useState, useCallback } from 'react';
+import { useSettings, useBackup, useSecurityTags, useFMP, useMassive, useSchwab, useScheduler, useAccounts } from '../hooks/useApi';
+import type { Account, AppSettings, BackupConfig, SecurityTag, TaskRunRecord } from '../../shared/types';
 import { format } from 'date-fns';
+import Import from './Import';
 
 const TAG_COLORS = [
   { value: 'blue', label: 'Blue', class: 'bg-blue-500' },
@@ -19,6 +20,14 @@ export default function Settings() {
   const { testConnection: fmpTestConnection, loading: testingFmpConnection } = useFMP();
   const { testConnection: massiveTestConnection, loading: testingMassiveConnection } = useMassive();
   const { status: schwabStatus, loading: schwabLoading, error: schwabError, fetchStatus: fetchSchwabStatus, startOAuth, disconnect: disconnectSchwab, syncPositions, syncTransactions } = useSchwab();
+  const { status: schedulerStatus, fetchStatus: fetchSchedulerStatus, runTask, enableTask, disableTask, getTaskHistory } = useScheduler();
+  const { accounts, fetchAccounts, createAccount, updateAccount, deleteAccount } = useAccounts();
+  const [showAccountModal, setShowAccountModal] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const [accountFormData, setAccountFormData] = useState({ name: '', broker: '', accountNumber: '', accountType: 'brokerage' as Account['accountType'], book: '' as string, currency: 'USD' });
+  const [expandedTask, setExpandedTask] = useState<string | null>(null);
+  const [taskHistory, setTaskHistory] = useState<TaskRunRecord[]>([]);
+  const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -59,7 +68,44 @@ export default function Settings() {
     fetchBackups();
     fetchTags();
     fetchSchwabStatus();
-  }, [fetchSettings, fetchBackups, fetchTags, fetchSchwabStatus]);
+    fetchSchedulerStatus();
+    fetchAccounts();
+  }, [fetchSettings, fetchBackups, fetchTags, fetchSchwabStatus, fetchSchedulerStatus, fetchAccounts]);
+
+  // Listen for scheduler task events
+  useEffect(() => {
+    const cleanupStarted = window.electronAPI.onSchedulerTaskStarted(() => {
+      fetchSchedulerStatus();
+    });
+    const cleanupCompleted = window.electronAPI.onSchedulerTaskCompleted(() => {
+      fetchSchedulerStatus();
+    });
+    return () => {
+      cleanupStarted();
+      cleanupCompleted();
+    };
+  }, [fetchSchedulerStatus]);
+
+  const handleRunTask = useCallback(async (taskId: string) => {
+    setRunningTaskId(taskId);
+    try {
+      await runTask(taskId);
+      await fetchSchedulerStatus();
+    } finally {
+      setRunningTaskId(null);
+    }
+  }, [runTask, fetchSchedulerStatus]);
+
+  const handleToggleTaskHistory = useCallback(async (taskId: string) => {
+    if (expandedTask === taskId) {
+      setExpandedTask(null);
+      setTaskHistory([]);
+    } else {
+      const history = await getTaskHistory(taskId, 5);
+      setTaskHistory(history);
+      setExpandedTask(taskId);
+    }
+  }, [expandedTask, getTaskHistory]);
 
   useEffect(() => {
     if (settings) {
@@ -669,6 +715,149 @@ export default function Settings() {
         </div>
       </div>
 
+      {/* Accounts */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">Accounts</h2>
+          <button
+            onClick={() => {
+              setEditingAccount(null);
+              setAccountFormData({ name: '', broker: '', accountNumber: '', accountType: 'brokerage', book: '', currency: 'USD' });
+              setShowAccountModal(true);
+            }}
+            className="btn-primary text-sm"
+          >
+            Add Account
+          </button>
+        </div>
+        {accounts.length === 0 ? (
+          <p className="text-sm text-gray-500">No accounts configured.</p>
+        ) : (
+          <div className="space-y-2">
+            {accounts.map((account) => (
+              <div key={account.id} className="flex items-center justify-between py-2 px-3 bg-gray-50 rounded-lg">
+                <div className="flex items-center gap-3">
+                  <div>
+                    <span className="font-medium text-gray-900">{account.name}</span>
+                    <span className="text-sm text-gray-500 ml-2">{account.broker}</span>
+                    {account.accountNumber && (
+                      <span className="text-xs text-gray-400 ml-2">****{account.accountNumber.slice(-4)}</span>
+                    )}
+                  </div>
+                  <div className="flex gap-1">
+                    {account.book && (
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${account.book === 'investing' ? 'bg-blue-100 text-blue-700' : 'bg-yellow-100 text-yellow-700'} capitalize`}>
+                        {account.book}
+                      </span>
+                    )}
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-gray-200 text-gray-600 capitalize">
+                      {account.accountType.replace('_', ' ')}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setEditingAccount(account);
+                      setAccountFormData({
+                        name: account.name,
+                        broker: account.broker,
+                        accountNumber: account.accountNumber || '',
+                        accountType: account.accountType,
+                        book: account.book || '',
+                        currency: account.currency,
+                      });
+                      setShowAccountModal(true);
+                    }}
+                    className="text-xs text-blue-600 hover:text-blue-800"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (window.confirm('Delete this account? This will also delete all associated positions and transactions.')) {
+                        await deleteAccount(account.id);
+                      }
+                    }}
+                    className="text-xs text-red-600 hover:text-red-800"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Account Modal */}
+      {showAccountModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">
+              {editingAccount ? 'Edit Account' : 'Add Account'}
+            </h2>
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              const submitData = { ...accountFormData, book: accountFormData.book || undefined };
+              if (editingAccount) {
+                await updateAccount(editingAccount.id, submitData);
+              } else {
+                await createAccount(submitData);
+              }
+              setShowAccountModal(false);
+              setEditingAccount(null);
+            }} className="space-y-4">
+              <div>
+                <label className="label">Account Name</label>
+                <input type="text" className="input" value={accountFormData.name} onChange={(e) => setAccountFormData({ ...accountFormData, name: e.target.value })} placeholder="e.g., Main Brokerage" required />
+              </div>
+              <div>
+                <label className="label">Broker</label>
+                <input type="text" className="input" value={accountFormData.broker} onChange={(e) => setAccountFormData({ ...accountFormData, broker: e.target.value })} placeholder="e.g., Schwab" required />
+              </div>
+              <div>
+                <label className="label">Account Number (Optional)</label>
+                <input type="text" className="input" value={accountFormData.accountNumber} onChange={(e) => setAccountFormData({ ...accountFormData, accountNumber: e.target.value })} placeholder="For your reference only" />
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="label">Type</label>
+                  <select className="select" value={accountFormData.accountType} onChange={(e) => setAccountFormData({ ...accountFormData, accountType: e.target.value as Account['accountType'] })}>
+                    <option value="brokerage">Brokerage</option>
+                    <option value="ira">Traditional IRA</option>
+                    <option value="roth_ira">Roth IRA</option>
+                    <option value="401k">401(k)</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="label">Book</label>
+                  <select className="select" value={accountFormData.book} onChange={(e) => setAccountFormData({ ...accountFormData, book: e.target.value })}>
+                    <option value="">-</option>
+                    <option value="investing">Investing</option>
+                    <option value="trading">Trading</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="label">Currency</label>
+                  <select className="select" value={accountFormData.currency} onChange={(e) => setAccountFormData({ ...accountFormData, currency: e.target.value })}>
+                    <option value="USD">USD</option>
+                    <option value="EUR">EUR</option>
+                    <option value="GBP">GBP</option>
+                    <option value="CAD">CAD</option>
+                  </select>
+                </div>
+              </div>
+              <div className="flex justify-end gap-3 pt-4">
+                <button type="button" onClick={() => { setShowAccountModal(false); setEditingAccount(null); }} className="btn-secondary">Cancel</button>
+                <button type="submit" className="btn-primary">{editingAccount ? 'Save' : 'Add Account'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Backup Settings */}
       <div className="card">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Backup & Restore</h2>
@@ -800,6 +989,125 @@ export default function Settings() {
             <li>Local database with cloud backup options</li>
           </ul>
         </div>
+      </div>
+
+      {/* Task Scheduler */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">Task Scheduler</h2>
+          {schedulerStatus && (
+            <div className="flex items-center gap-2">
+              <span className={`inline-block w-2 h-2 rounded-full ${
+                schedulerStatus.running && (Date.now() - schedulerStatus.lastTick) < 180000
+                  ? 'bg-green-500'
+                  : 'bg-red-500'
+              }`} />
+              <span className="text-xs text-gray-500">
+                {schedulerStatus.running ? 'Running' : 'Stopped'}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {schedulerStatus ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200">
+                  <th className="text-left py-2 px-3 font-medium text-gray-500">Task</th>
+                  <th className="text-left py-2 px-3 font-medium text-gray-500">Schedule</th>
+                  <th className="text-left py-2 px-3 font-medium text-gray-500">Status</th>
+                  <th className="text-left py-2 px-3 font-medium text-gray-500">Last Run</th>
+                  <th className="text-right py-2 px-3 font-medium text-gray-500">Duration</th>
+                  <th className="text-right py-2 px-3 font-medium text-gray-500">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {schedulerStatus.tasks.map(task => (
+                  <>
+                    <tr key={task.id} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="py-2 px-3">
+                        <button
+                          onClick={() => handleToggleTaskHistory(task.id)}
+                          className="font-medium text-gray-900 hover:text-blue-600 text-left"
+                        >
+                          {task.name}
+                        </button>
+                      </td>
+                      <td className="py-2 px-3 text-gray-500 text-xs">{task.schedule}</td>
+                      <td className="py-2 px-3">
+                        {task.isRunning ? (
+                          <span className="text-blue-600 text-xs font-medium">Running...</span>
+                        ) : task.lastRun ? (
+                          <span className={`text-xs font-medium ${
+                            task.lastRun.status === 'success' ? 'text-green-600' : 'text-red-600'
+                          }`}>
+                            {task.lastRun.status === 'success' ? 'OK' : 'Failed'}
+                          </span>
+                        ) : (
+                          <span className="text-gray-400 text-xs">Never run</span>
+                        )}
+                      </td>
+                      <td className="py-2 px-3 text-gray-600 text-xs">
+                        {task.lastRun?.completedAt
+                          ? format(new Date(task.lastRun.completedAt), 'MMM d h:mm a')
+                          : '—'}
+                      </td>
+                      <td className="py-2 px-3 text-right text-gray-600 text-xs">
+                        {task.lastRun?.durationMs != null
+                          ? task.lastRun.durationMs < 1000
+                            ? `${task.lastRun.durationMs}ms`
+                            : `${(task.lastRun.durationMs / 1000).toFixed(1)}s`
+                          : '—'}
+                      </td>
+                      <td className="py-2 px-3 text-right">
+                        <button
+                          onClick={() => handleRunTask(task.id)}
+                          disabled={runningTaskId === task.id || task.isRunning}
+                          className="text-xs px-2 py-1 bg-blue-50 text-blue-700 rounded hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {runningTaskId === task.id ? 'Running...' : 'Run Now'}
+                        </button>
+                      </td>
+                    </tr>
+                    {expandedTask === task.id && taskHistory.length > 0 && (
+                      <tr key={`${task.id}-history`}>
+                        <td colSpan={6} className="px-3 py-2 bg-gray-50">
+                          <div className="text-xs space-y-1">
+                            <p className="font-medium text-gray-500 mb-1">Recent runs:</p>
+                            {taskHistory.map(run => (
+                              <div key={run.id} className="flex items-center gap-3 text-gray-600">
+                                <span className={run.status === 'success' ? 'text-green-600' : 'text-red-600'}>
+                                  {run.status === 'success' ? 'OK' : 'FAIL'}
+                                </span>
+                                <span>{format(new Date(run.startedAt), 'MMM d h:mm a')}</span>
+                                <span className="text-gray-400">
+                                  {run.durationMs != null
+                                    ? run.durationMs < 1000 ? `${run.durationMs}ms` : `${(run.durationMs / 1000).toFixed(1)}s`
+                                    : ''}
+                                </span>
+                                {run.error && <span className="text-red-500 truncate max-w-xs">{run.error}</span>}
+                                {run.result && run.status === 'success' && <span className="text-gray-500 truncate max-w-xs">{run.result}</span>}
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="text-gray-500 text-sm">Loading scheduler status...</p>
+        )}
+      </div>
+
+      {/* Import Data */}
+      <div className="card">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Import Data</h2>
+        <Import embedded />
       </div>
 
       {/* Tag Modal */}

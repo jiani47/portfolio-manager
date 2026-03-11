@@ -1,12 +1,16 @@
 import { useEffect, useState } from 'react';
 import { useDailyRituals, useIntentChangeLogs } from '../hooks/useApi';
 import type { DailyRitual as DailyRitualType, PositionIntentChangeLog } from '../../shared/types';
+import DecisionLogs from './DecisionLogs';
+
+type Tab = 'ritual' | 'decisions';
 
 export default function DailyRitual() {
   const { rituals, loading, fetchRituals } = useDailyRituals();
   const { logs: changeLogs, fetchLogsByDate } = useIntentChangeLogs();
   const [expandedDate, setExpandedDate] = useState<string | null>(null);
   const [todayRitual, setTodayRitual] = useState<DailyRitualType | null>(null);
+  const [activeTab, setActiveTab] = useState<Tab>('ritual');
 
   const today = new Date().toISOString().split('T')[0];
 
@@ -42,6 +46,35 @@ export default function DailyRitual() {
           Run the ritual in conversation with Claude Code. This page shows history.
         </p>
       </div>
+
+      {/* Tab Toggle */}
+      <div className="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+        <button
+          onClick={() => setActiveTab('ritual')}
+          className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+            activeTab === 'ritual'
+              ? 'bg-white text-gray-900 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Ritual
+        </button>
+        <button
+          onClick={() => setActiveTab('decisions')}
+          className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+            activeTab === 'decisions'
+              ? 'bg-white text-gray-900 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Decision Logs
+        </button>
+      </div>
+
+      {activeTab === 'decisions' ? (
+        <DecisionLogs embedded />
+      ) : (
+      <>
 
       {/* Today's Status */}
       <div className={`rounded-lg border p-6 ${todayRitual ? 'bg-white border-gray-200' : 'bg-gray-50 border-dashed border-gray-300'}`}>
@@ -140,6 +173,8 @@ export default function DailyRitual() {
           </div>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }
