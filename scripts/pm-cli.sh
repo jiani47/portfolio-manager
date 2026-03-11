@@ -342,7 +342,8 @@ for symbol, price in cur.fetchall():
         pct = abs(price - level_price) / price * 100
         if pct <= 3 and pct > 0.1:
             direction = 'approaching resistance' if level_price > price else 'approaching support'
-            alerts.append(f'  {symbol:<6} ${price:>8,.2f}  {direction} ${level_price:,.2f} ({pct:.1f}% away, {strength}x tested)')
+            label = 'Very Strong' if strength >= 8 else 'Strong' if strength >= 6 else 'Moderate' if strength >= 4 else 'Weak'
+            alerts.append(f'  {symbol:<6} ${price:>8,.2f}  {direction} ${level_price:,.2f} ({pct:.1f}% away, {strength}/10 {label})')
 
 if alerts:
     for a in alerts:
@@ -1790,27 +1791,32 @@ import json, urllib.request, sys
 
 key, date = sys.argv[1], sys.argv[2]
 
-url = f'https://financialmodelingprep.com/stable/sector-performance-snapshot?date={date}&apikey={key}'
-try:
-    data = json.loads(urllib.request.urlopen(url).read())
-except:
-    print("  Failed to fetch sector data")
-    sys.exit(1)
+from datetime import datetime, timedelta
+
+def fetch_sectors(date_str, api_key):
+    """Fetch both NYSE and NASDAQ sector data for a given date."""
+    all_data = []
+    for exchange in ['NYSE', 'NASDAQ']:
+        url = f'https://financialmodelingprep.com/stable/sector-performance-snapshot?date={date_str}&exchange={exchange}&apikey={api_key}'
+        try:
+            result = json.loads(urllib.request.urlopen(url).read())
+            if isinstance(result, list):
+                all_data.extend(result)
+        except:
+            pass
+    return all_data
+
+data = fetch_sectors(date, key)
 
 if not data:
-    # Try previous trading day
-    from datetime import datetime, timedelta
+    # Try previous trading days
     dt = datetime.strptime(date, '%Y-%m-%d')
     for i in range(1, 4):
         prev = (dt - timedelta(days=i)).strftime('%Y-%m-%d')
-        url2 = f'https://financialmodelingprep.com/stable/sector-performance-snapshot?date={prev}&apikey={key}'
-        try:
-            data = json.loads(urllib.request.urlopen(url2).read())
-            if data:
-                print(f'  (Using {prev} — today not yet available)')
-                break
-        except:
-            continue
+        data = fetch_sectors(prev, key)
+        if data:
+            print(f'  (Using {prev} — today not yet available)')
+            break
 
 if not data:
     print("  No sector data available")
@@ -1883,8 +1889,7 @@ PYEOF
 
     echo "=== Refreshing Support/Resistance Levels ==="
     python3 - "$DB" "$NOW" "$SYMBOLS" <<'PYEOF'
-import sqlite3, uuid, sys
-from collections import defaultdict
+import sqlite3, uuid, sys, math
 
 db = sys.argv[1]
 now = sys.argv[2]
@@ -1894,9 +1899,9 @@ conn = sqlite3.connect(db)
 cur = conn.cursor()
 
 for symbol in symbols:
-    # Get 6 months of OHLC data
+    # Get 6 months of OHLCV data
     cur.execute('''
-        SELECT ph.date, ph.high_price, ph.low_price, ph.close_price
+        SELECT ph.date, ph.open_price, ph.high_price, ph.low_price, ph.close_price, ph.volume
         FROM price_history ph
         JOIN securities s ON ph.security_id = s.id
         WHERE s.symbol = ? AND ph.date >= date('now', '-6 months')
@@ -1909,15 +1914,20 @@ for symbol in symbols:
         continue
 
     dates = [r[0] for r in rows]
-    highs = [r[1] for r in rows]
-    lows = [r[2] for r in rows]
-    closes = [r[3] for r in rows]
+    opens = [r[1] for r in rows]
+    highs = [r[2] for r in rows]
+    lows = [r[3] for r in rows]
+    closes = [r[4] for r in rows]
+    volumes = [r[5] or 0 for r in rows]
     current_price = closes[-1]
     if current_price is None:
         print(f'  {symbol}: no current price')
         continue
 
-    # Find swing highs (high > 5 days before and after)
+    total_days = len(rows)
+    avg_volume = sum(v for v in volumes if v > 0) / max(1, sum(1 for v in volumes if v > 0))
+
+    # Find swing highs/lows with metadata: (index, price, volume, rejection_pct)
     swing_highs = []
     swing_lows = []
     window = 5
@@ -1930,7 +1940,14 @@ for symbol in symbols:
         if any(v is None for v in neighborhood_h):
             continue
         if all(h >= v for v in neighborhood_h):
-            swing_highs.append(h)
+            # Rejection: upper wick as % of high (how far price rejected from level)
+            c, o = closes[i], opens[i]
+            if c is not None and o is not None and h > 0:
+                body_top = max(c, o)
+                rejection = (h - body_top) / h
+            else:
+                rejection = 0
+            swing_highs.append((i, h, volumes[i], rejection))
 
         l = lows[i]
         if l is None:
@@ -1939,61 +1956,102 @@ for symbol in symbols:
         if any(v is None for v in neighborhood_l):
             continue
         if all(l <= v for v in neighborhood_l):
-            swing_lows.append(l)
-
-    # Cluster nearby levels within 2%
-    def cluster(levels, threshold=0.02):
-        if not levels:
-            return []
-        levels = sorted(levels)
-        clusters = []
-        current_cluster = [levels[0]]
-        for level in levels[1:]:
-            if (level - current_cluster[0]) / current_cluster[0] <= threshold:
-                current_cluster.append(level)
+            # Rejection: lower wick as % of low (how far price bounced off level)
+            c, o = closes[i], opens[i]
+            if c is not None and o is not None and l > 0:
+                body_bottom = min(c, o)
+                rejection = (body_bottom - l) / l
             else:
-                avg = sum(current_cluster) / len(current_cluster)
-                clusters.append((round(avg, 2), len(current_cluster)))
-                current_cluster = [level]
-        avg = sum(current_cluster) / len(current_cluster)
-        clusters.append((round(avg, 2), len(current_cluster)))
+                rejection = 0
+            swing_lows.append((i, l, volumes[i], rejection))
+
+    # Cluster nearby swing points within 2%, preserving metadata
+    def cluster_with_meta(points, threshold=0.02):
+        if not points:
+            return []
+        points = sorted(points, key=lambda p: p[1])
+        clusters = []
+        current = [points[0]]
+        for pt in points[1:]:
+            if (pt[1] - current[0][1]) / current[0][1] <= threshold:
+                current.append(pt)
+            else:
+                avg_price = sum(p[1] for p in current) / len(current)
+                clusters.append((round(avg_price, 2), current))
+                current = [pt]
+        avg_price = sum(p[1] for p in current) / len(current)
+        clusters.append((round(avg_price, 2), current))
         return clusters
 
-    resistance_clusters = cluster(swing_highs)
-    support_clusters = cluster(swing_lows)
+    def score_cluster(points):
+        """
+        Composite strength score (1-10):
+          - Touches (30%): more swing points clustered here = stronger
+          - Volume (25%): high volume at reversal vs symbol avg = stronger
+          - Recency (25%): recent tests weighted more (60-day half-life)
+          - Rejection (20%): clean bounces with long wicks = stronger
+        """
+        n = len(points)
 
-    # Filter: resistance above current price, support below
-    resistance = [(p, s) for p, s in resistance_clusters if p > current_price]
-    support = [(p, s) for p, s in support_clusters if p < current_price]
+        # Touches: 1→0.2, 2→0.5, 3→0.75, 4+→1.0
+        touch_score = min(1.0, 0.2 + (n - 1) * 0.27) if n >= 1 else 0
 
-    # Sort: resistance ascending (nearest first), support descending (nearest first)
+        # Volume: ratio of avg volume at swing points vs symbol avg
+        vol_vals = [p[2] for p in points if p[2] > 0]
+        if vol_vals and avg_volume > 0:
+            vol_ratio = (sum(vol_vals) / len(vol_vals)) / avg_volume
+            vol_score = min(1.0, vol_ratio / 2.0)
+        else:
+            vol_score = 0.3
+
+        # Recency: exponential decay, half-life 60 trading days, take best
+        half_life = 60
+        recency_vals = []
+        for p in points:
+            days_ago = total_days - 1 - p[0]
+            recency_vals.append(math.exp(-0.693 * days_ago / half_life))
+        recency_score = max(recency_vals)
+
+        # Rejection: avg wick size (3%+ wick = max score)
+        rej_vals = [p[3] for p in points]
+        avg_rej = sum(rej_vals) / len(rej_vals) if rej_vals else 0
+        rej_score = min(1.0, avg_rej / 0.03) if avg_rej > 0 else 0.1
+
+        composite = (
+            touch_score * 0.30 +
+            vol_score * 0.25 +
+            recency_score * 0.25 +
+            rej_score * 0.20
+        )
+        return max(1, min(10, round(composite * 10)))
+
+    resistance_clusters = cluster_with_meta(swing_highs)
+    support_clusters = cluster_with_meta(swing_lows)
+
+    resistance = [(p, score_cluster(pts), len(pts)) for p, pts in resistance_clusters if p > current_price]
+    support = [(p, score_cluster(pts), len(pts)) for p, pts in support_clusters if p < current_price]
+
     resistance.sort(key=lambda x: x[0])
     support.sort(key=lambda x: -x[0])
 
-    # Keep top 5 each
     resistance = resistance[:5]
     support = support[:5]
 
-    # Clear old computed levels for this symbol
     cur.execute("DELETE FROM price_levels WHERE symbol = ? AND source = 'swing'", (symbol,))
 
-    # Insert new levels
-    count = 0
-    for price, strength in resistance:
+    for price, strength, touches in resistance:
         row_id = str(uuid.uuid4())
         cur.execute('''
             INSERT OR REPLACE INTO price_levels (id, symbol, level_type, price, strength, source, created_at, updated_at)
             VALUES (?, ?, 'resistance', ?, ?, 'swing', ?, ?)
         ''', (row_id, symbol, price, strength, now, now))
-        count += 1
 
-    for price, strength in support:
+    for price, strength, touches in support:
         row_id = str(uuid.uuid4())
         cur.execute('''
             INSERT OR REPLACE INTO price_levels (id, symbol, level_type, price, strength, source, created_at, updated_at)
             VALUES (?, ?, 'support', ?, ?, 'swing', ?, ?)
         ''', (row_id, symbol, price, strength, now, now))
-        count += 1
 
     print(f'  {symbol:<6} ${current_price:>8,.2f}  {len(support)}S / {len(resistance)}R levels')
 
@@ -2032,7 +2090,11 @@ PYEOF
         WHERE symbol = '$SYMBOL' AND level_type = 'resistance'
         ORDER BY price ASC;
       " | while IFS='|' read -r price str; do
-        echo "    R  \$$price  (${str}x tested)"
+        if [ "$str" -ge 8 ]; then label="Very Strong";
+        elif [ "$str" -ge 6 ]; then label="Strong";
+        elif [ "$str" -ge 4 ]; then label="Moderate";
+        else label="Weak"; fi
+        echo "    R  \$$price  ${str}/10  ${label}"
       done
       echo ""
       echo "  Support (below):"
@@ -2041,7 +2103,11 @@ PYEOF
         WHERE symbol = '$SYMBOL' AND level_type = 'support'
         ORDER BY price DESC;
       " | while IFS='|' read -r price str; do
-        echo "    S  \$$price  (${str}x tested)"
+        if [ "$str" -ge 8 ]; then label="Very Strong";
+        elif [ "$str" -ge 6 ]; then label="Strong";
+        elif [ "$str" -ge 4 ]; then label="Moderate";
+        else label="Weak"; fi
+        echo "    S  \$$price  ${str}/10  ${label}"
       done
       echo ""
       # Risk/reward

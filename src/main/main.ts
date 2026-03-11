@@ -104,6 +104,35 @@ async function initializeApp() {
   streamService = new SchwabStreamService(schwabService, database, store, () => mainWindow);
   streamService.startMarketHoursScheduler();
 
+  // Startup sync: refresh positions, transactions, and quotes immediately
+  if (schwabService.isConnected()) {
+    (async () => {
+      try {
+        console.log('Startup: syncing positions and quotes...');
+        const result = await schwabService.syncPositions(database);
+        if (result.success) {
+          console.log(`Startup sync: ${result.positionsSynced} positions across ${result.accountsSynced} accounts`);
+          // Notify renderer once window is ready
+          setTimeout(() => {
+            const win = mainWindow;
+            if (win && !win.isDestroyed()) {
+              win.webContents.send('positions:synced', {
+                positionsSynced: result.positionsSynced,
+                accountsSynced: result.accountsSynced,
+              });
+            }
+          }, 3000);
+        }
+        // Sync recent transactions (last 7 days)
+        const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        await schwabService.syncTransactions(database, weekAgo);
+        console.log('Startup: transaction sync complete');
+      } catch (err) {
+        console.error('Startup sync error:', err);
+      }
+    })();
+  }
+
   // Initialize analytics service
   const analyticsService = new AnalyticsService(database);
 

@@ -10,6 +10,11 @@ const DECISION_TYPES: { value: DecisionType; label: string; color: string }[] = 
   { value: 'research', label: 'Research', color: 'text-purple-700 bg-purple-100' },
 ];
 
+// Map legacy/alternate decision types to display values
+const DECISION_TYPE_ALIASES: Record<string, { label: string; color: string }> = {
+  add: { label: 'Buy', color: 'text-green-700 bg-green-100' },
+};
+
 type FormData = {
   securityId: string;
   decisionDate: string;
@@ -149,9 +154,18 @@ export default function DecisionLogs() {
     });
   };
 
-  const getDecisionTypeStyle = (decisionType: DecisionType) => {
+  const getDecisionTypeStyle = (decisionType: string) => {
     const type = DECISION_TYPES.find(t => t.value === decisionType);
-    return type?.color || 'text-gray-700 bg-gray-100';
+    if (type) return type.color;
+    const alias = DECISION_TYPE_ALIASES[decisionType];
+    return alias?.color || 'text-gray-700 bg-gray-100';
+  };
+
+  const getDecisionTypeLabel = (decisionType: string) => {
+    const type = DECISION_TYPES.find(t => t.value === decisionType);
+    if (type) return type.label;
+    const alias = DECISION_TYPE_ALIASES[decisionType];
+    return alias?.label || decisionType;
   };
 
   const formatDate = (dateString: string) => {
@@ -233,7 +247,7 @@ export default function DecisionLogs() {
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-center gap-3">
                     <span className={`inline-flex items-center px-2.5 py-1 rounded text-sm font-medium ${getDecisionTypeStyle(log.decisionType)}`}>
-                      {DECISION_TYPES.find(t => t.value === log.decisionType)?.label || log.decisionType}
+                      {getDecisionTypeLabel(log.decisionType)}
                     </span>
                     <span className="font-semibold text-gray-900">
                       {security?.symbol || 'Unknown'}

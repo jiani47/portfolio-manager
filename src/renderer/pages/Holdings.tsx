@@ -1,7 +1,9 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePositions, useAccounts, useSecurities, useSecurityTags, useSettings, usePositionIntents, useDataProvider } from '../hooks/useApi';
+import { usePositions, useAccounts, useSecurities, useSecurityTags, useSettings, usePositionIntents, useDataProvider, usePriceLevels } from '../hooks/useApi';
 import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import BrokerageImportModal from '../components/BrokerageImportModal';
+import PriceLevelTooltip from '../components/PriceLevelTooltip';
+import ChartModal from '../components/ChartModal';
 import type { Position, Security, SecurityTag, PositionIntent, Account } from '../../shared/types';
 
 interface PositionWithPercent extends Position {
@@ -29,6 +31,7 @@ export default function Holdings() {
   const { delayed } = useDataProvider();
   const { intents, fetchIntents, upsertIntent } = usePositionIntents();
   const { settings, fetchSettings } = useSettings();
+  const { levels: priceLevels, fetchLevels } = usePriceLevels();
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
@@ -44,6 +47,7 @@ export default function Holdings() {
   const [selectedTagFilter, setSelectedTagFilter] = useState<string>('');
   const [showWatchlist, setShowWatchlist] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [chartSymbol, setChartSymbol] = useState<{ symbol: string; name?: string } | null>(null);
   const [formData, setFormData] = useState({
     accountId: '',
     symbol: '',
@@ -62,7 +66,8 @@ export default function Holdings() {
     fetchAssignments();
     fetchSettings();
     fetchIntents();
-  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments, fetchSettings, fetchIntents]);
+    fetchLevels();
+  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments, fetchSettings, fetchIntents, fetchLevels]);
 
   // Listen for position sync events
   useEffect(() => {
@@ -131,17 +136,52 @@ export default function Holdings() {
       return p;
     });
 
+    // Merge positions across accounts with the same book type
+    // Key: symbol + book → aggregated position
+    const mergeKey = (p: Position) => {
+      const sec = securityMap.get(p.securityId);
+      const acct = accountMap.get(p.accountId);
+      const book = acct?.book || 'unassigned';
+      return `${sec?.symbol || p.securityId}::${book}`;
+    };
+
+    const mergedMap = new Map<string, Position & { _mergedIds: string[] }>();
+    for (const p of withStreaming) {
+      const sec = securityMap.get(p.securityId);
+      if (sec?.type === 'cash') {
+        // Don't merge cash — keep per-account
+        const key = `cash::${p.id}`;
+        mergedMap.set(key, { ...p, _mergedIds: [p.id] });
+        continue;
+      }
+      const key = mergeKey(p);
+      const existing = mergedMap.get(key);
+      if (existing) {
+        existing.quantity += p.quantity;
+        existing.costBasis += p.costBasis;
+        existing.marketValue = (existing.marketValue || 0) + (p.marketValue || 0);
+        existing.unrealizedGain = (existing.marketValue || 0) - existing.costBasis;
+        existing.unrealizedGainPercent = existing.costBasis > 0
+          ? (existing.unrealizedGain! / existing.costBasis) * 100 : 0;
+        existing._mergedIds.push(p.id);
+      } else {
+        mergedMap.set(key, { ...p, _mergedIds: [p.id] });
+      }
+    }
+    const merged = Array.from(mergedMap.values());
+
     // Calculate total market value (including cash for percentage calculation)
-    const total = withStreaming.reduce((sum, p) => sum + (p.marketValue || 0), 0);
+    const total = merged.reduce((sum, p) => sum + (p.marketValue || 0), 0);
 
     // Add percentage and enrich with security/account info, tags, and intents
-    let enriched: PositionWithPercent[] = withStreaming.map(p => ({
+    // For merged positions, use the first position's intent (intents are per-position, but same symbol should share)
+    let enriched: PositionWithPercent[] = merged.map(p => ({
       ...p,
       portfolioPercent: total > 0 ? ((p.marketValue || 0) / total) * 100 : 0,
       security: securityMap.get(p.securityId),
       account: accountMap.get(p.accountId),
       tags: securityTagsMap.get(p.securityId) || [],
-      intent: intents.get(p.id),
+      intent: intents.get(p.id) || intents.get(p._mergedIds[0]),
     }));
 
     // Apply tag filter if selected
@@ -358,6 +398,19 @@ export default function Holdings() {
       <div className={`text-xs ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
         {isPositive ? '+' : ''}{formatCurrency(mvChange)}
       </div>
+    );
+  };
+
+  const renderPrice = (position: PositionWithPercent) => {
+    if (!position.currentPrice) return '-';
+    const symbol = position.security?.symbol;
+    if (!symbol || position.security?.type === 'cash' || position.security?.type === 'option') {
+      return formatCurrency(position.currentPrice);
+    }
+    return (
+      <PriceLevelTooltip symbol={symbol} currentPrice={position.currentPrice} levels={priceLevels}>
+        {formatCurrency(position.currentPrice)}
+      </PriceLevelTooltip>
     );
   };
 
@@ -787,7 +840,13 @@ export default function Holdings() {
                       >
                         <td className="table-cell font-medium">
                           <div className="flex items-center gap-2">
-                            {position.security?.symbol || 'Unknown'}
+                            <button
+                              onClick={() => position.security && setChartSymbol({ symbol: position.security.symbol, name: position.security.name })}
+                              className="hover:text-blue-600 cursor-pointer"
+                              title="View chart"
+                            >
+                              {position.security?.symbol || 'Unknown'}
+                            </button>
                             {position.portfolioPercent >= 8 && (
                               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-200 text-amber-800">
                                 {'\u2265'}8%
@@ -805,7 +864,7 @@ export default function Holdings() {
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
                         <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
                         <td className="table-cell text-right">
-                          <div>{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</div>
+                          <div>{renderPrice(position)}</div>
                           {renderPriceDayChange(position)}
                         </td>
                         <td className="table-cell text-right">
@@ -857,7 +916,13 @@ export default function Holdings() {
                       <tr key={position.id} className="hover:bg-gray-50">
                         <td className="table-cell font-medium">
                           <div className="flex items-center gap-1">
-                            {position.security?.symbol || 'Unknown'}
+                            <button
+                              onClick={() => position.security && setChartSymbol({ symbol: position.security.symbol, name: position.security.name })}
+                              className="hover:text-blue-600 cursor-pointer"
+                              title="View chart"
+                            >
+                              {position.security?.symbol || 'Unknown'}
+                            </button>
                             {renderTierBadge(position.intent)}
                           </div>
                           {renderTagBadges(position.tags)}
@@ -866,7 +931,7 @@ export default function Holdings() {
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
                         <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
                         <td className="table-cell text-right">
-                          <div>{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</div>
+                          <div>{renderPrice(position)}</div>
                           {renderPriceDayChange(position)}
                         </td>
                         <td className="table-cell text-right">
@@ -918,7 +983,13 @@ export default function Holdings() {
                       <tr key={position.id} className="hover:bg-gray-50">
                         <td className="table-cell font-medium">
                           <div className="flex items-center gap-1">
-                            {position.security?.symbol || 'Unknown'}
+                            <button
+                              onClick={() => position.security && setChartSymbol({ symbol: position.security.symbol, name: position.security.name })}
+                              className="hover:text-blue-600 cursor-pointer"
+                              title="View chart"
+                            >
+                              {position.security?.symbol || 'Unknown'}
+                            </button>
                             {renderTierBadge(position.intent)}
                           </div>
                           {renderTagBadges(position.tags)}
@@ -927,7 +998,7 @@ export default function Holdings() {
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
                         <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
                         <td className="table-cell text-right">
-                          <div>{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</div>
+                          <div>{renderPrice(position)}</div>
                           {renderPriceDayChange(position)}
                         </td>
                         <td className="table-cell text-right">
@@ -1019,7 +1090,13 @@ export default function Holdings() {
                         <tr key={position.id} className="hover:bg-gray-50">
                           <td className="table-cell font-medium">
                             <div className="flex items-center gap-1">
-                              {position.security?.symbol || 'Unknown'}
+                              <button
+                                onClick={() => position.security && setChartSymbol({ symbol: position.security.symbol, name: position.security.name })}
+                                className="hover:text-blue-600 cursor-pointer"
+                                title="View chart"
+                              >
+                                {position.security?.symbol || 'Unknown'}
+                              </button>
                               {renderTierBadge(position.intent)}
                             </div>
                             {renderTagBadges(position.tags)}
@@ -1027,7 +1104,7 @@ export default function Holdings() {
                           <td className="table-cell text-right text-gray-500">{position.quantity.toFixed(4)}</td>
                           <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
                           <td className="table-cell text-right">
-                            <div>{position.currentPrice ? formatCurrency(position.currentPrice) : '-'}</div>
+                            <div>{renderPrice(position)}</div>
                             {renderPriceDayChange(position)}
                           </td>
                           <td className="table-cell text-right">
@@ -1359,6 +1436,16 @@ export default function Holdings() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Chart Modal */}
+      {chartSymbol && (
+        <ChartModal
+          symbol={chartSymbol.symbol}
+          name={chartSymbol.name}
+          onClose={() => setChartSymbol(null)}
+          onLevelsChanged={fetchLevels}
+        />
       )}
     </div>
   );

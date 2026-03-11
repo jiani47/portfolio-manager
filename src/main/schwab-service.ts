@@ -406,50 +406,66 @@ export class SchwabService {
             }
           }
 
-          if (!schwabAcct.positions) continue;
+          // Track which securities Schwab still has positions for in this account
+          const schwabSecurityIds = new Set<string>();
 
-          for (const pos of schwabAcct.positions) {
-            try {
-              const quantity = pos.longQuantity - pos.shortQuantity;
-              if (quantity === 0) continue;
+          if (schwabAcct.positions) {
+            for (const pos of schwabAcct.positions) {
+              try {
+                const quantity = pos.longQuantity - pos.shortQuantity;
+                if (quantity === 0) continue;
 
-              const securityType = this.mapSecurityType(pos.instrument.assetType);
-              const symbol = pos.instrument.symbol;
+                const securityType = this.mapSecurityType(pos.instrument.assetType);
+                const symbol = pos.instrument.symbol;
 
-              // Find or create security
-              let security = db.findSecurityBySymbol(symbol);
-              if (!security) {
-                security = db.createSecurity({
-                  symbol,
-                  name: pos.instrument.description || symbol,
-                  type: securityType,
-                  currency: 'USD',
-                });
+                // Find or create security
+                let security = db.findSecurityBySymbol(symbol);
+                if (!security) {
+                  security = db.createSecurity({
+                    symbol,
+                    name: pos.instrument.description || symbol,
+                    type: securityType,
+                    currency: 'USD',
+                  });
+                }
+
+                schwabSecurityIds.add(security.id);
+
+                // Upsert position
+                const existingPosition = db.findPositionByAccountAndSecurity(account.id, security.id);
+                const costBasis = pos.averagePrice * Math.abs(quantity);
+
+                if (existingPosition) {
+                  db.updatePosition(existingPosition.id, {
+                    quantity,
+                    costBasis,
+                    lastUpdated: new Date().toISOString(),
+                  });
+                } else {
+                  db.createPosition({
+                    accountId: account.id,
+                    securityId: security.id,
+                    quantity,
+                    costBasis,
+                    lastUpdated: new Date().toISOString(),
+                  });
+                }
+
+                positionsSynced++;
+              } catch (err) {
+                errors.push(`Position ${pos.instrument.symbol}: ${(err as Error).message}`);
               }
+            }
+          }
 
-              // Upsert position
-              const existingPosition = db.findPositionByAccountAndSecurity(account.id, security.id);
-              const costBasis = pos.averagePrice * Math.abs(quantity);
-
-              if (existingPosition) {
-                db.updatePosition(existingPosition.id, {
-                  quantity,
-                  costBasis,
-                  lastUpdated: new Date().toISOString(),
-                });
-              } else {
-                db.createPosition({
-                  accountId: account.id,
-                  securityId: security.id,
-                  quantity,
-                  costBasis,
-                  lastUpdated: new Date().toISOString(),
-                });
-              }
-
-              positionsSynced++;
-            } catch (err) {
-              errors.push(`Position ${pos.instrument.symbol}: ${(err as Error).message}`);
+          // Remove local positions that Schwab no longer has (fully sold)
+          const localPositions = db.listPositions(account.id);
+          for (const localPos of localPositions) {
+            const security = db.findSecurityById(localPos.securityId);
+            // Skip cash positions — managed separately above
+            if (security?.type === 'cash') continue;
+            if (!schwabSecurityIds.has(localPos.securityId)) {
+              db.deletePosition(localPos.id);
             }
           }
         } catch (err) {

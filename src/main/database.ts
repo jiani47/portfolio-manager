@@ -587,6 +587,13 @@ export class Database {
     return row ? this.mapRowToSecurity(row) : null;
   }
 
+  findSecurityById(id: string): Security | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM securities WHERE id = ?');
+    const row = stmt.get(id);
+    return row ? this.mapRowToSecurity(row) : null;
+  }
+
   updateSecurityProfile(id: string, profile: {
     sector?: string;
     industry?: string;
@@ -1707,12 +1714,20 @@ export class Database {
   // Watchlist Item CRUD
   listWatchlistItems(watchlistId?: string): WatchlistItem[] {
     if (!this.db) throw new Error('Database not initialized');
-    if (watchlistId) {
-      return this.db.prepare('SELECT * FROM watchlist_items WHERE watchlist_id = ? ORDER BY symbol')
-        .all(watchlistId).map(this.mapRowToWatchlistItem);
-    }
-    return this.db.prepare('SELECT * FROM watchlist_items ORDER BY symbol')
-      .all().map(this.mapRowToWatchlistItem);
+    const query = `
+      SELECT wi.*,
+        (SELECT ph.close FROM price_history ph
+         JOIN securities s ON s.id = ph.security_id
+         WHERE s.symbol = wi.symbol
+         ORDER BY ph.date DESC LIMIT 1) as last_price
+      FROM watchlist_items wi
+      ${watchlistId ? 'WHERE wi.watchlist_id = ?' : ''}
+      ORDER BY wi.symbol
+    `;
+    const rows = watchlistId
+      ? this.db.prepare(query).all(watchlistId)
+      : this.db.prepare(query).all();
+    return rows.map(this.mapRowToWatchlistItem);
   }
 
   addWatchlistItem(watchlistId: string, data: {
@@ -2024,6 +2039,216 @@ export class Database {
     }));
   }
 
+  // Price Levels (Support/Resistance)
+
+  getPriceLevels(symbol?: string): import('../shared/types').PriceLevel[] {
+    if (!this.db) throw new Error('Database not initialized');
+    // Ensure table exists
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS price_levels (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        level_type TEXT NOT NULL,
+        price REAL NOT NULL,
+        strength INTEGER DEFAULT 1,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(symbol, level_type, price)
+      )
+    `);
+    const sql = symbol
+      ? 'SELECT * FROM price_levels WHERE symbol = ? ORDER BY price ASC'
+      : 'SELECT * FROM price_levels ORDER BY symbol, price ASC';
+    const rows = symbol
+      ? this.db.prepare(sql).all(symbol.toUpperCase()) as Record<string, unknown>[]
+      : this.db.prepare(sql).all() as Record<string, unknown>[];
+    return rows.map(r => ({
+      id: r.id as string,
+      symbol: r.symbol as string,
+      levelType: r.level_type as 'support' | 'resistance',
+      price: r.price as number,
+      strength: r.strength as number,
+      source: r.source as string,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    }));
+  }
+
+  createPriceLevel(symbol: string, levelType: 'support' | 'resistance', price: number, strength = 5, source = 'manual'): import('../shared/types').PriceLevel {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT OR REPLACE INTO price_levels (id, symbol, level_type, price, strength, source, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, symbol.toUpperCase(), levelType, price, strength, source, now, now);
+    return { id, symbol: symbol.toUpperCase(), levelType, price, strength, source, createdAt: now, updatedAt: now };
+  }
+
+  updatePriceLevel(id: string, data: { price?: number; strength?: number; levelType?: 'support' | 'resistance' }): void {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const fields: string[] = ['updated_at = ?'];
+    const values: unknown[] = [now];
+    if (data.price !== undefined) { fields.push('price = ?'); values.push(data.price); }
+    if (data.strength !== undefined) { fields.push('strength = ?'); values.push(data.strength); }
+    if (data.levelType !== undefined) { fields.push('level_type = ?'); values.push(data.levelType); }
+    values.push(id);
+    this.db.prepare(`UPDATE price_levels SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  }
+
+  deletePriceLevel(id: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare('DELETE FROM price_levels WHERE id = ?').run(id);
+  }
+
+  refreshPriceLevels(symbols?: string[]): void {
+    if (!this.db) throw new Error('Database not initialized');
+    // Ensure table exists
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS price_levels (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        level_type TEXT NOT NULL,
+        price REAL NOT NULL,
+        strength INTEGER DEFAULT 1,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(symbol, level_type, price)
+      )
+    `);
+
+    const targetSymbols = symbols || (this.db.prepare(`
+      SELECT DISTINCT s.symbol FROM positions p
+      JOIN securities s ON p.security_id = s.id
+      WHERE s.type != 'cash' AND s.symbol != ''
+    `).all() as { symbol: string }[]).map(r => r.symbol);
+
+    const now = new Date().toISOString();
+
+    for (const symbol of targetSymbols) {
+      const rows = this.db.prepare(`
+        SELECT ph.date, ph.open_price, ph.high_price, ph.low_price, ph.close_price, ph.volume
+        FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = ? AND ph.date >= date('now', '-6 months')
+        ORDER BY ph.date ASC
+      `).all(symbol) as { date: string; open_price: number | null; high_price: number | null; low_price: number | null; close_price: number | null; volume: number | null }[];
+
+      if (rows.length < 15) continue;
+
+      const opens = rows.map(r => r.open_price);
+      const highs = rows.map(r => r.high_price);
+      const lows = rows.map(r => r.low_price);
+      const closes = rows.map(r => r.close_price);
+      const volumes = rows.map(r => r.volume || 0);
+      const currentPrice = closes[closes.length - 1];
+      if (!currentPrice) continue;
+
+      const totalDays = rows.length;
+      const validVols = volumes.filter(v => v > 0);
+      const avgVolume = validVols.length > 0 ? validVols.reduce((a, b) => a + b, 0) / validVols.length : 1;
+
+      // Find swing highs/lows with metadata: [index, price, volume, rejection]
+      type SwingPoint = [number, number, number, number];
+      const swingHighs: SwingPoint[] = [];
+      const swingLows: SwingPoint[] = [];
+      const window = 5;
+
+      for (let i = window; i < rows.length - window; i++) {
+        const h = highs[i];
+        if (h == null) continue;
+        const neighborH = [];
+        for (let j = i - window; j <= i + window; j++) {
+          if (j !== i) neighborH.push(highs[j]);
+        }
+        if (neighborH.some(v => v == null)) continue;
+        if (neighborH.every(v => h >= v!)) {
+          const c = closes[i], o = opens[i];
+          const rejection = (c != null && o != null && h > 0)
+            ? (h - Math.max(c, o)) / h : 0;
+          swingHighs.push([i, h, volumes[i], rejection]);
+        }
+
+        const l = lows[i];
+        if (l == null) continue;
+        const neighborL = [];
+        for (let j = i - window; j <= i + window; j++) {
+          if (j !== i) neighborL.push(lows[j]);
+        }
+        if (neighborL.some(v => v == null)) continue;
+        if (neighborL.every(v => l <= v!)) {
+          const c = closes[i], o = opens[i];
+          const rejection = (c != null && o != null && l > 0)
+            ? (Math.min(c, o) - l) / l : 0;
+          swingLows.push([i, l, volumes[i], rejection]);
+        }
+      }
+
+      // Cluster nearby levels within 2%
+      const clusterWithMeta = (points: SwingPoint[], threshold = 0.02): [number, SwingPoint[]][] => {
+        if (points.length === 0) return [];
+        const sorted = [...points].sort((a, b) => a[1] - b[1]);
+        const clusters: [number, SwingPoint[]][] = [];
+        let current = [sorted[0]];
+        for (let k = 1; k < sorted.length; k++) {
+          if ((sorted[k][1] - current[0][1]) / current[0][1] <= threshold) {
+            current.push(sorted[k]);
+          } else {
+            const avg = current.reduce((s, p) => s + p[1], 0) / current.length;
+            clusters.push([Math.round(avg * 100) / 100, current]);
+            current = [sorted[k]];
+          }
+        }
+        const avg = current.reduce((s, p) => s + p[1], 0) / current.length;
+        clusters.push([Math.round(avg * 100) / 100, current]);
+        return clusters;
+      };
+
+      // Composite strength score (1-10)
+      const scoreCluster = (points: SwingPoint[]): number => {
+        const n = points.length;
+        const touchScore = Math.min(1.0, 0.2 + (n - 1) * 0.27);
+        const volVals = points.filter(p => p[2] > 0).map(p => p[2]);
+        const volScore = (volVals.length > 0 && avgVolume > 0)
+          ? Math.min(1.0, (volVals.reduce((a, b) => a + b, 0) / volVals.length) / (avgVolume * 2))
+          : 0.3;
+        const halfLife = 60;
+        const recencyScore = Math.max(...points.map(p => Math.exp(-0.693 * (totalDays - 1 - p[0]) / halfLife)));
+        const avgRej = points.reduce((s, p) => s + p[3], 0) / points.length;
+        const rejScore = avgRej > 0 ? Math.min(1.0, avgRej / 0.03) : 0.1;
+        const composite = touchScore * 0.30 + volScore * 0.25 + recencyScore * 0.25 + rejScore * 0.20;
+        return Math.max(1, Math.min(10, Math.round(composite * 10)));
+      };
+
+      const resClusters = clusterWithMeta(swingHighs);
+      const supClusters = clusterWithMeta(swingLows);
+
+      let resistance = resClusters.filter(([p]) => p > currentPrice).map(([p, pts]) => ({ price: p, strength: scoreCluster(pts) }));
+      let support = supClusters.filter(([p]) => p < currentPrice).map(([p, pts]) => ({ price: p, strength: scoreCluster(pts) }));
+
+      resistance.sort((a, b) => a.price - b.price);
+      support.sort((a, b) => b.price - a.price);
+      resistance = resistance.slice(0, 5);
+      support = support.slice(0, 5);
+
+      // Clear and insert
+      this.db.prepare("DELETE FROM price_levels WHERE symbol = ? AND source = 'swing'").run(symbol);
+      const insert = this.db.prepare(`
+        INSERT OR REPLACE INTO price_levels (id, symbol, level_type, price, strength, source, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'swing', ?, ?)
+      `);
+      for (const r of resistance) {
+        insert.run(crypto.randomUUID(), symbol, 'resistance', r.price, r.strength, now, now);
+      }
+      for (const s of support) {
+        insert.run(crypto.randomUUID(), symbol, 'support', s.price, s.strength, now, now);
+      }
+    }
+  }
+
   getTriggeredMonitors(): Monitor[] {
     if (!this.db) throw new Error('Database not initialized');
     return this.db.prepare('SELECT * FROM monitors WHERE status = ? ORDER BY triggered_at DESC')
@@ -2053,6 +2278,7 @@ export class Database {
       targetEntryPrice: r.target_entry_price as number | undefined,
       targetExitPrice: r.target_exit_price as number | undefined,
       thesisSnippet: r.thesis_snippet as string | undefined,
+      lastPrice: r.last_price as number | undefined,
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,
     };

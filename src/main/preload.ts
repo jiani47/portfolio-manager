@@ -131,6 +131,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPortfolioAnalytics: (days?: number) => ipcRenderer.invoke('analytics:portfolio', days),
   getPositionBetas: (days?: number) => ipcRenderer.invoke('analytics:position-betas', days),
 
+  // Sector performance
+  getSectorPerformance: () => ipcRenderer.invoke('fmp:sector-performance'),
+
+  // Price levels (support/resistance)
+  getPriceLevels: (symbol?: string) => ipcRenderer.invoke('db:price-levels', symbol),
+  refreshPriceLevels: (symbols?: string[]) => ipcRenderer.invoke('db:price-levels:refresh', symbols),
+  createPriceLevel: (symbol: string, levelType: 'support' | 'resistance', price: number, strength?: number, source?: string) =>
+    ipcRenderer.invoke('db:price-levels:create', symbol, levelType, price, strength, source),
+  updatePriceLevel: (id: string, data: { price?: number; strength?: number; levelType?: 'support' | 'resistance' }) =>
+    ipcRenderer.invoke('db:price-levels:update', id, data),
+  deletePriceLevel: (id: string) => ipcRenderer.invoke('db:price-levels:delete', id),
+
+  // Price history by symbol
+  getPriceHistoryBySymbol: (symbol: string, days?: number) =>
+    ipcRenderer.invoke('db:price-history-by-symbol', symbol, days),
+
   // Decision log operations
   getDecisionLogs: (filters?: unknown) => ipcRenderer.invoke('db:decision-logs:list', filters),
   createDecisionLog: (log: unknown) => ipcRenderer.invoke('db:decision-logs:create', log),

@@ -1061,6 +1061,83 @@ export function setupIpcHandlers(
     return analyticsService.getPositionBetas(days);
   });
 
+  // Price levels (support/resistance)
+  ipcMain.handle('db:price-levels', (_, symbol?: string) => {
+    return db.getPriceLevels(symbol);
+  });
+
+  ipcMain.handle('db:price-levels:refresh', (_, symbols?: string[]) => {
+    db.refreshPriceLevels(symbols);
+    return { ok: true };
+  });
+
+  ipcMain.handle('db:price-levels:create', (_, symbol: string, levelType: 'support' | 'resistance', price: number, strength?: number, source?: string) => {
+    return db.createPriceLevel(symbol, levelType, price, strength, source);
+  });
+
+  ipcMain.handle('db:price-levels:update', (_, id: string, data: { price?: number; strength?: number; levelType?: 'support' | 'resistance' }) => {
+    db.updatePriceLevel(id, data);
+    return { ok: true };
+  });
+
+  ipcMain.handle('db:price-levels:delete', (_, id: string) => {
+    db.deletePriceLevel(id);
+    return { ok: true };
+  });
+
+  ipcMain.handle('db:price-history-by-symbol', (_, symbol: string, days?: number) => {
+    const security = db.findSecurityBySymbol(symbol);
+    if (!security) return [];
+    const startDate = days
+      ? new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+      : undefined;
+    return db.getPriceHistory(security.id, startDate);
+  });
+
+  // Sector performance (fetched from main process to avoid CORS)
+  // Returns per-exchange data so frontend can toggle
+  ipcMain.handle('fmp:sector-performance', async () => {
+    try {
+      const homedir = require('os').homedir();
+      const confPath = require('path').join(homedir, '.pm-cli.conf');
+      const content = fs.readFileSync(confPath, 'utf-8');
+      const match = content.match(/^FMP_API_KEY=(.+)$/m);
+      const apiKey = match ? match[1].trim() : null;
+      if (!apiKey) return null;
+
+      const today = new Date();
+      for (let i = 0; i < 4; i++) {
+        const d = new Date(today);
+        d.setDate(d.getDate() - i);
+        const dateStr = d.toISOString().split('T')[0];
+        const [nyseResp, nasdaqResp] = await Promise.all([
+          fetch(`https://financialmodelingprep.com/stable/sector-performance-snapshot?date=${dateStr}&exchange=NYSE&apikey=${apiKey}`),
+          fetch(`https://financialmodelingprep.com/stable/sector-performance-snapshot?date=${dateStr}&exchange=NASDAQ&apikey=${apiKey}`),
+        ]);
+        const nyseData = await nyseResp.json();
+        const nasdaqData = await nasdaqResp.json();
+        const nyseArr = Array.isArray(nyseData) ? nyseData : [];
+        const nasdaqArr = Array.isArray(nasdaqData) ? nasdaqData : [];
+        if (nyseArr.length > 0 || nasdaqArr.length > 0) {
+          const toMap = (rows: any[]) => {
+            const m: Record<string, number> = {};
+            for (const r of rows) m[r.sector] = r.averageChange;
+            return m;
+          };
+          const isToday = dateStr === today.toISOString().split('T')[0];
+          return {
+            nyse: toMap(nyseArr),
+            nasdaq: toMap(nasdaqArr),
+            date: isToday ? 'Today' : dateStr,
+          };
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  });
+
   // Config helpers
   ipcMain.handle('config:get-fmp-key', () => {
     try {

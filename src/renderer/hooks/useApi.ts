@@ -48,6 +48,7 @@ import type {
   Monitor,
   PortfolioAnalytics,
   PositionBeta,
+  PriceLevel,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -183,6 +184,16 @@ declare global {
       getPortfolioAnalytics: (days?: number) => Promise<PortfolioAnalytics | null>;
       getPositionBetas: (days?: number) => Promise<PositionBeta[]>;
 
+      // Price levels
+      getPriceLevels: (symbol?: string) => Promise<PriceLevel[]>;
+      refreshPriceLevels: (symbols?: string[]) => Promise<{ ok: boolean }>;
+      createPriceLevel: (symbol: string, levelType: 'support' | 'resistance', price: number, strength?: number, source?: string) => Promise<PriceLevel>;
+      updatePriceLevel: (id: string, data: { price?: number; strength?: number; levelType?: 'support' | 'resistance' }) => Promise<{ ok: boolean }>;
+      deletePriceLevel: (id: string) => Promise<{ ok: boolean }>;
+
+      // Price history by symbol
+      getPriceHistoryBySymbol: (symbol: string, days?: number) => Promise<PriceHistory[]>;
+
       // Decision log operations
       getDecisionLogs: (filters?: DecisionLogFilters) => Promise<DecisionLog[]>;
       createDecisionLog: (log: Omit<DecisionLog, 'id' | 'createdAt' | 'updatedAt'>) => Promise<DecisionLog>;
@@ -235,6 +246,7 @@ declare global {
       onStreamingStatus: (callback: (status: string) => void) => () => void;
       onPositionsSynced: (callback: (data: { positionsSynced: number; accountsSynced: number }) => void) => () => void;
       getFmpApiKey: () => Promise<string | null>;
+      getSectorPerformance: () => Promise<{ nyse: Record<string, number>; nasdaq: Record<string, number>; date: string } | null>;
       streamingStart: (symbols: string[]) => Promise<void>;
       streamingStop: () => Promise<void>;
       streamingGetStatus: () => Promise<StreamingState>;
@@ -1731,4 +1743,21 @@ export function useAnalytics() {
   }, []);
 
   return { analytics, positionBetas, loading, fetchAnalytics };
+}
+
+export function usePriceLevels() {
+  const [levels, setLevels] = useState<PriceLevel[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchLevels = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.getPriceLevels();
+      setLevels(data);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { levels, loading, fetchLevels };
 }

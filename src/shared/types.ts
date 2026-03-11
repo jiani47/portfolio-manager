@@ -605,6 +605,7 @@ export interface WatchlistItem {
   targetEntryPrice?: number;
   targetExitPrice?: number;
   thesisSnippet?: string;
+  lastPrice?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -678,4 +679,15 @@ export interface PositionBeta {
   correlation: number;
   weight: number;
   weightedBeta: number;
+}
+
+export interface PriceLevel {
+  id: string;
+  symbol: string;
+  levelType: 'support' | 'resistance';
+  price: number;
+  strength: number;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
 }

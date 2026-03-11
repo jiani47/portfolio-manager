@@ -45,6 +45,7 @@ export class SchwabStreamService {
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
   private positionSyncTimer: ReturnType<typeof setInterval> | null = null;
   private extendedHoursPollTimer: ReturnType<typeof setInterval> | null = null;
+  private levelsRefreshedToday = false;
   private consecutiveFailures = 0;
   private reconnectDelay = 2000;
   private connectedSince: number | undefined;
@@ -90,12 +91,23 @@ export class SchwabStreamService {
     if (marketOpen && isSchwabProvider && isConnectedToSchwab) {
       // Regular market hours: use WebSocket streaming
       this.stopExtendedHoursPolling();
+      this.levelsRefreshedToday = false; // Reset for next market close
       if (this.status === 'disconnected' || this.status === 'outside_hours') {
         this.connectWithPortfolioSymbols();
       }
     } else if (!marketOpen && (this.status === 'connected' || this.status === 'connecting')) {
       this.disconnect();
       this.setStatus('outside_hours');
+      // Refresh S/R levels once at market close
+      if (!this.levelsRefreshedToday) {
+        this.levelsRefreshedToday = true;
+        console.log('Market closed — refreshing S/R levels');
+        try {
+          this.db.refreshPriceLevels();
+        } catch (err) {
+          console.error('Failed to refresh price levels:', err);
+        }
+      }
       // Start extended hours polling if applicable
       if (extendedHours && isSchwabProvider && isConnectedToSchwab) {
         this.startExtendedHoursPolling();
