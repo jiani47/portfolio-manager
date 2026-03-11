@@ -1,0 +1,515 @@
+import { BrowserWindow } from 'electron';
+import Store from 'electron-store';
+import { Database } from './database';
+import { FMPService } from './fmp-service';
+import { SchwabService } from './schwab-service';
+import {
+  AppSettings,
+  TaskRunRecord,
+  TaskStatus,
+  SchedulerStatus,
+  SchedulerHeartbeat,
+  TaskResult,
+} from '../shared/types';
+
+interface TaskDefinition {
+  id: string;
+  name: string;
+  schedule: TaskSchedule;
+  execute: () => Promise<TaskResult>;
+  enabled: boolean;
+}
+
+interface TaskSchedule {
+  type: 'after_market_close' | 'daily' | 'interval';
+  afterMarketDelayMinutes?: number;
+  dailyHourET?: number;
+  intervalMs?: number;
+  wakingHoursOnly?: boolean;
+}
+
+const CHECK_INTERVAL_MS = 60 * 1000; // 60 seconds
+
+export class SchedulerService {
+  private db: Database;
+  private fmpService: FMPService;
+  private schwabService: SchwabService;
+  private store: Store<{ settings: AppSettings }>;
+  private getMainWindow: () => BrowserWindow | null;
+
+  private tasks: TaskDefinition[] = [];
+  private checkTimer: ReturnType<typeof setInterval> | null = null;
+  private running = false;
+  private startedAt: string | null = null;
+  private lastTick = 0;
+  private runningTasks = new Set<string>();
+  private retryScheduled = new Set<string>();
+
+  constructor(
+    db: Database,
+    fmpService: FMPService,
+    schwabService: SchwabService,
+    store: Store<{ settings: AppSettings }>,
+    getMainWindow: () => BrowserWindow | null
+  ) {
+    this.db = db;
+    this.fmpService = fmpService;
+    this.schwabService = schwabService;
+    this.store = store;
+    this.getMainWindow = getMainWindow;
+
+    this.registerTasks();
+  }
+
+  private registerTasks(): void {
+    this.tasks = [
+      {
+        id: 'eod-backfill',
+        name: 'Price Backfill',
+        schedule: { type: 'after_market_close', afterMarketDelayMinutes: 5 },
+        execute: () => this.executeBackfill(),
+        enabled: true,
+      },
+      {
+        id: 'eod-snapshot',
+        name: 'Portfolio Snapshot',
+        schedule: { type: 'after_market_close', afterMarketDelayMinutes: 15 },
+        execute: () => this.executeSnapshot(),
+        enabled: true,
+      },
+      {
+        id: 'eod-levels',
+        name: 'S/R Level Refresh',
+        schedule: { type: 'after_market_close', afterMarketDelayMinutes: 20 },
+        execute: () => this.executeLevelsRefresh(),
+        enabled: true,
+      },
+      {
+        id: 'eod-sectors',
+        name: 'Sector Performance',
+        schedule: { type: 'after_market_close', afterMarketDelayMinutes: 30 },
+        execute: () => this.executeSectorPerformance(),
+        enabled: true,
+      },
+      {
+        id: 'daily-earnings',
+        name: 'Earnings Calendar',
+        schedule: { type: 'daily', dailyHourET: 7 },
+        execute: () => this.executeEarnings(),
+        enabled: true,
+      },
+      {
+        id: 'daily-news',
+        name: 'News Refresh',
+        schedule: { type: 'interval', intervalMs: 10 * 60 * 1000, wakingHoursOnly: true },
+        execute: () => this.executeNews(),
+        enabled: true,
+      },
+    ];
+  }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.startedAt = new Date().toISOString();
+    this.lastTick = Date.now();
+
+    console.log('Scheduler: started');
+
+    // Check immediately for catch-up
+    this.checkTasks();
+
+    // Start periodic check
+    this.checkTimer = setInterval(() => {
+      this.checkTasks();
+    }, CHECK_INTERVAL_MS);
+  }
+
+  stop(): void {
+    this.running = false;
+    if (this.checkTimer) {
+      clearInterval(this.checkTimer);
+      this.checkTimer = null;
+    }
+    console.log('Scheduler: stopped');
+  }
+
+  destroy(): void {
+    this.stop();
+  }
+
+  getStatus(): SchedulerStatus {
+    return {
+      running: this.running,
+      startedAt: this.startedAt || '',
+      lastTick: this.lastTick,
+      tasks: this.tasks.map(t => this.getTaskStatus(t)),
+    };
+  }
+
+  getHeartbeat(): SchedulerHeartbeat {
+    return {
+      alive: this.running && (Date.now() - this.lastTick) < CHECK_INTERVAL_MS * 3,
+      lastTick: this.lastTick,
+      uptime: this.startedAt ? Date.now() - new Date(this.startedAt).getTime() : 0,
+    };
+  }
+
+  async runTaskNow(taskId: string): Promise<TaskResult> {
+    const task = this.tasks.find(t => t.id === taskId);
+    if (!task) return { success: false, message: `Unknown task: ${taskId}` };
+    return this.runTask(task);
+  }
+
+  enableTask(taskId: string): void {
+    const task = this.tasks.find(t => t.id === taskId);
+    if (task) task.enabled = true;
+  }
+
+  disableTask(taskId: string): void {
+    const task = this.tasks.find(t => t.id === taskId);
+    if (task) task.enabled = false;
+  }
+
+  getTaskHistory(taskId: string, limit?: number): TaskRunRecord[] {
+    return this.db.getTaskRunHistory(taskId, limit);
+  }
+
+  // --- Time helpers ---
+
+  private getETTime(): { weekday: string; hour: number; minute: number; timeInMinutes: number } {
+    const now = new Date();
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      hour: 'numeric',
+      minute: 'numeric',
+      hour12: false,
+      weekday: 'short',
+    });
+
+    const parts = formatter.formatToParts(now);
+    const weekday = parts.find(p => p.type === 'weekday')?.value || '';
+    const hour = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+    const minute = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10);
+
+    return { weekday, hour, minute, timeInMinutes: hour * 60 + minute };
+  }
+
+  private isWeekday(): boolean {
+    const { weekday } = this.getETTime();
+    return !['Sat', 'Sun'].includes(weekday);
+  }
+
+  private isMarketClosed(): boolean {
+    const { timeInMinutes } = this.getETTime();
+    return timeInMinutes >= 16 * 60; // After 4pm ET
+  }
+
+  private isWakingHours(): boolean {
+    const { hour } = this.getETTime();
+    return hour >= 7 || hour < 1;
+  }
+
+  // --- Task scheduling logic ---
+
+  private getTaskStatus(task: TaskDefinition): TaskStatus {
+    const lastRun = this.db.getLastTaskRun(task.id);
+    return {
+      id: task.id,
+      name: task.name,
+      enabled: task.enabled,
+      schedule: this.describeSchedule(task.schedule),
+      lastRun: lastRun || undefined,
+      nextRunAt: this.computeNextRun(task),
+      isRunning: this.runningTasks.has(task.id),
+    };
+  }
+
+  private describeSchedule(schedule: TaskSchedule): string {
+    switch (schedule.type) {
+      case 'after_market_close':
+        return `After market close +${schedule.afterMarketDelayMinutes}min`;
+      case 'daily':
+        return `Daily at ${schedule.dailyHourET}:00 ET`;
+      case 'interval': {
+        const ms = schedule.intervalMs || 0;
+        const label = ms >= 3600000 ? `${ms / 3600000}h` : `${ms / 60000}min`;
+        return `Every ${label}${schedule.wakingHoursOnly ? ' (waking hours)' : ''}`;
+      }
+    }
+  }
+
+  private computeNextRun(task: TaskDefinition): string | undefined {
+    if (!task.enabled) return undefined;
+    // Simple approximation — not worth full cron math
+    const lastRun = this.db.getLastTaskRun(task.id);
+    if (task.schedule.type === 'interval' && lastRun?.completedAt) {
+      const nextMs = new Date(lastRun.completedAt).getTime() + (task.schedule.intervalMs || 0);
+      return new Date(nextMs).toISOString();
+    }
+    return undefined; // EOD/daily tasks: "next trading day"
+  }
+
+  private shouldRunTask(task: TaskDefinition): boolean {
+    if (!task.enabled || this.runningTasks.has(task.id)) return false;
+
+    const { schedule } = task;
+
+    switch (schedule.type) {
+      case 'after_market_close': {
+        if (!this.isWeekday()) return false;
+        if (!this.isMarketClosed()) return false;
+        if (this.db.didTaskRunToday(task.id)) return false;
+        // Check if enough time has passed since market close (4pm ET)
+        const { timeInMinutes } = this.getETTime();
+        const runAfter = 16 * 60 + (schedule.afterMarketDelayMinutes || 0);
+        return timeInMinutes >= runAfter;
+      }
+
+      case 'daily': {
+        if (this.db.didTaskRunToday(task.id)) return false;
+        const { hour } = this.getETTime();
+        return hour >= (schedule.dailyHourET || 0);
+      }
+
+      case 'interval': {
+        if (schedule.wakingHoursOnly && !this.isWakingHours()) return false;
+        const lastRun = this.db.getLastTaskRun(task.id);
+        if (!lastRun?.completedAt) return true; // Never run
+        const elapsed = Date.now() - new Date(lastRun.completedAt).getTime();
+        return elapsed >= (schedule.intervalMs || 0);
+      }
+    }
+  }
+
+  private async checkTasks(): Promise<void> {
+    this.lastTick = Date.now();
+
+    for (const task of this.tasks) {
+      if (this.shouldRunTask(task)) {
+        const result = await this.runTask(task);
+
+        // Retry once after 5 minutes for EOD/daily tasks on failure
+        if (!result.success && task.schedule.type !== 'interval' && !this.retryScheduled.has(task.id)) {
+          this.retryScheduled.add(task.id);
+          console.log(`Scheduler: will retry ${task.id} in 5 minutes`);
+          setTimeout(async () => {
+            this.retryScheduled.delete(task.id);
+            // Only retry if it still hasn't succeeded today
+            if (!this.db.didTaskRunToday(task.id)) {
+              console.log(`Scheduler: retrying ${task.id}`);
+              await this.runTask(task);
+            }
+          }, 5 * 60 * 1000);
+        }
+      }
+    }
+  }
+
+  private async runTask(task: TaskDefinition): Promise<TaskResult> {
+    if (this.runningTasks.has(task.id)) {
+      return { success: false, message: `${task.name} is already running` };
+    }
+
+    this.runningTasks.add(task.id);
+    const runId = this.db.recordTaskStart(task.id);
+    this.notifyRenderer('scheduler:task-started', { taskId: task.id, startedAt: new Date().toISOString() });
+
+    console.log(`Scheduler: running ${task.id}`);
+
+    try {
+      // 5-minute timeout
+      const result = await Promise.race([
+        task.execute(),
+        new Promise<TaskResult>((_, reject) =>
+          setTimeout(() => reject(new Error('Task timed out after 5 minutes')), 5 * 60 * 1000)
+        ),
+      ]);
+
+      this.db.recordTaskComplete(runId, result.success ? 'success' : 'failure', result.message, result.success ? undefined : result.message);
+      console.log(`Scheduler: ${task.id} completed — ${result.success ? 'success' : 'failure'}: ${result.message}`);
+      this.notifyRenderer('scheduler:task-completed', { taskId: task.id, status: result.success ? 'success' : 'failure', result: result.message });
+      this.runningTasks.delete(task.id);
+      return result;
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.db.recordTaskComplete(runId, 'failure', undefined, errorMsg);
+      console.error(`Scheduler: ${task.id} failed:`, errorMsg);
+      this.notifyRenderer('scheduler:task-completed', { taskId: task.id, status: 'failure', result: errorMsg });
+      this.runningTasks.delete(task.id);
+      return { success: false, message: errorMsg };
+    }
+  }
+
+  private notifyRenderer(channel: string, data: unknown): void {
+    const win = this.getMainWindow();
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(channel, data);
+    }
+  }
+
+  // --- Task implementations ---
+
+  private async executeBackfill(): Promise<TaskResult> {
+    const settings = this.store.get('settings');
+    const positions = this.db.listPositions();
+    const securities = this.db.listSecurities();
+    const securityMap = new Map(securities.map(s => [s.id, s]));
+
+    const symbolSecurityMap = new Map<string, string>();
+    for (const pos of positions) {
+      const security = securityMap.get(pos.securityId);
+      if (security && security.type !== 'cash') {
+        symbolSecurityMap.set(security.symbol, security.id);
+      }
+    }
+
+    if (symbolSecurityMap.size === 0) {
+      return { success: true, message: 'No positions to backfill' };
+    }
+
+    const days = 5; // Last 5 trading days
+
+    let priceHistory: Omit<import('../shared/types').PriceHistory, 'id'>[] = [];
+    let errors: string[] = [];
+
+    if (settings.dataProvider === 'schwab' && this.schwabService.isConnected()) {
+      const result = await this.schwabService.fetchHistoricalForAll(symbolSecurityMap, days);
+      priceHistory = result.priceHistory;
+      errors = result.errors;
+    } else if (settings.dataProvider === 'fmp' && this.fmpService.isConfigured()) {
+      const result = await this.fmpService.fetchHistoricalForAll(symbolSecurityMap, days);
+      priceHistory = result.priceHistory;
+      errors = result.errors;
+    } else {
+      return { success: false, message: 'No data provider configured' };
+    }
+
+    const saved = priceHistory.length > 0 ? this.db.savePriceHistoryBatch(priceHistory) : 0;
+    return {
+      success: errors.length === 0,
+      message: `Backfilled ${saved} candles for ${symbolSecurityMap.size} symbols${errors.length > 0 ? `, ${errors.length} errors` : ''}`,
+    };
+  }
+
+  private async executeSnapshot(): Promise<TaskResult> {
+    try {
+      const result = this.db.takeEodSnapshot();
+      return {
+        success: true,
+        message: `Snapshot: ${result.count} positions, MV $${result.totalMV.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+      };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private async executeLevelsRefresh(): Promise<TaskResult> {
+    try {
+      this.db.refreshPriceLevels();
+      return { success: true, message: 'S/R levels refreshed for all symbols' };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private async executeSectorPerformance(): Promise<TaskResult> {
+    try {
+      const fs = await import('fs');
+      const os = await import('os');
+      const path = await import('path');
+      const confPath = path.join(os.homedir(), '.pm-cli.conf');
+      const content = fs.readFileSync(confPath, 'utf-8');
+      const match = content.match(/^FMP_API_KEY=(.+)$/m);
+      const apiKey = match ? match[1].trim() : null;
+      if (!apiKey) return { success: false, message: 'No FMP API key configured' };
+
+      const today = new Date().toISOString().split('T')[0];
+      const resp = await fetch(
+        `https://financialmodelingprep.com/stable/sector-performance-snapshot?date=${today}&exchange=NYSE&apikey=${apiKey}`
+      );
+      const data = await resp.json();
+      const count = Array.isArray(data) ? data.length : 0;
+      return { success: true, message: `Fetched ${count} sectors for ${today}` };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private async executeEarnings(): Promise<TaskResult> {
+    try {
+      const positions = this.db.listPositions();
+      const securities = this.db.listSecurities();
+      const securityMap = new Map(securities.map(s => [s.id, s]));
+
+      const symbols: string[] = [];
+      for (const pos of positions) {
+        const security = securityMap.get(pos.securityId);
+        if (security && security.type !== 'cash') {
+          symbols.push(security.symbol);
+        }
+      }
+
+      if (symbols.length === 0) {
+        return { success: true, message: 'No positions for earnings check' };
+      }
+
+      const today = new Date();
+      const twoWeeksOut = new Date(today.getTime() + 14 * 24 * 60 * 60 * 1000);
+      const fromDate = today.toISOString().split('T')[0];
+      const toDate = twoWeeksOut.toISOString().split('T')[0];
+
+      const earnings = await this.fmpService.getEarningsForSymbols(symbols, fromDate, toDate);
+      if (earnings.length > 0) {
+        this.db.syncEarningsMonitors(earnings);
+      }
+      return { success: true, message: `Found ${earnings.length} upcoming earnings events` };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private async executeNews(): Promise<TaskResult> {
+    try {
+      const fs = await import('fs');
+      const os = await import('os');
+      const path = await import('path');
+      const confPath = path.join(os.homedir(), '.pm-cli.conf');
+      const content = fs.readFileSync(confPath, 'utf-8');
+      const match = content.match(/^FMP_API_KEY=(.+)$/m);
+      const apiKey = match ? match[1].trim() : null;
+      if (!apiKey) return { success: false, message: 'No FMP API key configured' };
+
+      // Get portfolio symbols
+      const positions = this.db.listPositions();
+      const securities = this.db.listSecurities();
+      const securityMap = new Map(securities.map(s => [s.id, s]));
+      const symbols: string[] = [];
+      for (const pos of positions) {
+        const security = securityMap.get(pos.securityId);
+        if (security && security.type !== 'cash') {
+          symbols.push(security.symbol);
+        }
+      }
+
+      if (symbols.length === 0) {
+        return { success: true, message: 'No positions for news fetch' };
+      }
+
+      // Fetch news for portfolio symbols (batch of 10 at a time)
+      let totalArticles = 0;
+      for (let i = 0; i < symbols.length; i += 10) {
+        const batch = symbols.slice(i, i + 10).join(',');
+        const resp = await fetch(
+          `https://financialmodelingprep.com/stable/news?tickers=${batch}&limit=5&apikey=${apiKey}`
+        );
+        const data = await resp.json();
+        if (Array.isArray(data)) totalArticles += data.length;
+      }
+
+      return { success: true, message: `Fetched ${totalArticles} news articles` };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+}
