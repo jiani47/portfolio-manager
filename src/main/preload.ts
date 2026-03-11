@@ -226,4 +226,28 @@ contextBridge.exposeInMainWorld('electronAPI', {
   streamingStop: () => ipcRenderer.invoke('streaming:stop'),
   streamingGetStatus: () => ipcRenderer.invoke('streaming:get-status'),
   streamingUpdateSymbols: (symbols: string[]) => ipcRenderer.invoke('streaming:update-symbols', symbols),
+
+  // News operations
+  getRecentNews: (hours?: number) => ipcRenderer.invoke('db:news:recent', hours),
+  getNewsBySymbol: (symbol: string, limit?: number) => ipcRenderer.invoke('db:news:by-symbol', symbol, limit),
+
+  // Scheduler operations
+  schedulerGetStatus: () => ipcRenderer.invoke('scheduler:get-status'),
+  schedulerGetHeartbeat: () => ipcRenderer.invoke('scheduler:get-heartbeat'),
+  schedulerRunTask: (taskId: string) => ipcRenderer.invoke('scheduler:run-task', taskId),
+  schedulerEnableTask: (taskId: string) => ipcRenderer.invoke('scheduler:enable-task', taskId),
+  schedulerDisableTask: (taskId: string) => ipcRenderer.invoke('scheduler:disable-task', taskId),
+  schedulerGetTaskHistory: (taskId: string, limit?: number) => ipcRenderer.invoke('scheduler:get-task-history', taskId, limit),
+
+  // Scheduler events (main -> renderer push)
+  onSchedulerTaskStarted: (callback: (data: { taskId: string; startedAt: string }) => void) => {
+    const handler = (_event: unknown, data: { taskId: string; startedAt: string }) => callback(data);
+    ipcRenderer.on('scheduler:task-started', handler);
+    return () => { ipcRenderer.removeListener('scheduler:task-started', handler); };
+  },
+  onSchedulerTaskCompleted: (callback: (data: { taskId: string; status: string; result: string }) => void) => {
+    const handler = (_event: unknown, data: { taskId: string; status: string; result: string }) => callback(data);
+    ipcRenderer.on('scheduler:task-completed', handler);
+    return () => { ipcRenderer.removeListener('scheduler:task-completed', handler); };
+  },
 });

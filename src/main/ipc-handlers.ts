@@ -11,6 +11,7 @@ import { SchwabService } from './schwab-service';
 import { SchwabStreamService } from './schwab-stream-service';
 import { parserRegistry, transactionParserRegistry, lotDetailsParserRegistry } from './parsers';
 import { AnalyticsService } from './analytics-service';
+import { SchedulerService } from './scheduler-service';
 import { AppSettings, ExcelImportResult, RefreshPricesResult } from '../shared/types';
 
 export function setupIpcHandlers(
@@ -23,7 +24,8 @@ export function setupIpcHandlers(
   schwabService: SchwabService,
   streamService: SchwabStreamService | null,
   store: Store<{ settings: AppSettings }>,
-  analyticsService?: AnalyticsService
+  analyticsService?: AnalyticsService,
+  schedulerService?: SchedulerService
 ): void {
   // Account handlers
   ipcMain.handle('db:accounts:list', () => db.listAccounts());
@@ -354,7 +356,38 @@ export function setupIpcHandlers(
   ipcMain.handle('db:watchlists:update', (_, id, data) => db.updateWatchlist(id, data));
   ipcMain.handle('db:watchlists:delete', (_, id) => db.deleteWatchlist(id));
   ipcMain.handle('db:watchlist-items:list', (_, watchlistId) => db.listWatchlistItems(watchlistId));
-  ipcMain.handle('db:watchlist-items:add', (_, watchlistId, data) => db.addWatchlistItem(watchlistId, data));
+  ipcMain.handle('db:watchlist-items:add', async (_, watchlistId, data) => {
+    const item = db.addWatchlistItem(watchlistId, data);
+    // Auto-backfill price history and compute S/R levels for new symbol
+    const symbol = data.symbol || item.symbol;
+    if (symbol) {
+      (async () => {
+        try {
+          const settings = store.get('settings');
+          let security = db.findSecurityBySymbol(symbol);
+          if (!security) {
+            security = db.createSecurity({ symbol, name: symbol, type: 'stock', currency: 'USD' });
+          }
+          const symbolSecurityMap = new Map([[symbol, security.id]]);
+          const days = 1095; // 3 years
+
+          if (settings.dataProvider === 'schwab' && schwabService.isConnected()) {
+            const result = await schwabService.fetchHistoricalForAll(symbolSecurityMap, days);
+            if (result.priceHistory.length > 0) db.savePriceHistoryBatch(result.priceHistory);
+          } else if (settings.dataProvider === 'fmp' && fmpService.isConfigured()) {
+            const result = await fmpService.fetchHistoricalForAll(symbolSecurityMap, days);
+            if (result.priceHistory.length > 0) db.savePriceHistoryBatch(result.priceHistory);
+          }
+          // Compute S/R levels
+          db.refreshPriceLevels([symbol]);
+          console.log(`Auto-backfill + S/R levels complete for ${symbol}`);
+        } catch (err) {
+          console.error(`Auto-backfill failed for ${symbol}:`, err);
+        }
+      })();
+    }
+    return item;
+  });
   ipcMain.handle('db:watchlist-items:update', (_, id, data) => db.updateWatchlistItem(id, data));
   ipcMain.handle('db:watchlist-items:remove', (_, id) => db.removeWatchlistItem(id));
   ipcMain.handle('db:watchlist-items:symbols', () => db.getWatchlistSymbols());
@@ -1149,5 +1182,35 @@ export function setupIpcHandlers(
     } catch {
       return null;
     }
+  });
+
+  // News handlers
+  ipcMain.handle('db:news:recent', (_, hours?: number) => db.getRecentNews(hours));
+  ipcMain.handle('db:news:by-symbol', (_, symbol: string, limit?: number) => db.getNewsBySymbol(symbol, limit));
+
+  // Scheduler handlers
+  ipcMain.handle('scheduler:get-status', () => {
+    return schedulerService?.getStatus() || null;
+  });
+
+  ipcMain.handle('scheduler:get-heartbeat', () => {
+    return schedulerService?.getHeartbeat() || null;
+  });
+
+  ipcMain.handle('scheduler:run-task', async (_, taskId: string) => {
+    if (!schedulerService) return { success: false, message: 'Scheduler not available' };
+    return schedulerService.runTaskNow(taskId);
+  });
+
+  ipcMain.handle('scheduler:enable-task', (_, taskId: string) => {
+    schedulerService?.enableTask(taskId);
+  });
+
+  ipcMain.handle('scheduler:disable-task', (_, taskId: string) => {
+    schedulerService?.disableTask(taskId);
+  });
+
+  ipcMain.handle('scheduler:get-task-history', (_, taskId: string, limit?: number) => {
+    return db.getTaskRunHistory(taskId, limit);
   });
 }

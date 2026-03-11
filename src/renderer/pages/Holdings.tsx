@@ -1,10 +1,10 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePositions, useAccounts, useSecurities, useSecurityTags, useSettings, usePositionIntents, useDataProvider, usePriceLevels } from '../hooks/useApi';
+import { usePositions, useAccounts, useSecurities, useSecurityTags, useSettings, usePositionIntents, useDataProvider, usePriceLevels, useAnalytics } from '../hooks/useApi';
 import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import BrokerageImportModal from '../components/BrokerageImportModal';
 import PriceLevelTooltip from '../components/PriceLevelTooltip';
 import ChartModal from '../components/ChartModal';
-import type { Position, Security, SecurityTag, PositionIntent, Account } from '../../shared/types';
+import type { Position, Security, SecurityTag, PositionIntent, Account, NewsArticle } from '../../shared/types';
 
 interface PositionWithPercent extends Position {
   portfolioPercent: number;
@@ -32,6 +32,7 @@ export default function Holdings() {
   const { intents, fetchIntents, upsertIntent } = usePositionIntents();
   const { settings, fetchSettings } = useSettings();
   const { levels: priceLevels, fetchLevels } = usePriceLevels();
+  const { analytics, positionBetas, fetchAnalytics } = useAnalytics();
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
@@ -48,6 +49,9 @@ export default function Holdings() {
   const [showWatchlist, setShowWatchlist] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [chartSymbol, setChartSymbol] = useState<{ symbol: string; name?: string } | null>(null);
+  const [newsSymbol, setNewsSymbol] = useState<string | null>(null);
+  const [newsArticles, setNewsArticles] = useState<NewsArticle[]>([]);
+  const [newsLoading, setNewsLoading] = useState(false);
   const [formData, setFormData] = useState({
     accountId: '',
     symbol: '',
@@ -67,7 +71,8 @@ export default function Holdings() {
     fetchSettings();
     fetchIntents();
     fetchLevels();
-  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments, fetchSettings, fetchIntents, fetchLevels]);
+    fetchAnalytics(90);
+  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments, fetchSettings, fetchIntents, fetchLevels, fetchAnalytics]);
 
   // Listen for position sync events
   useEffect(() => {
@@ -99,6 +104,9 @@ export default function Holdings() {
     }
     return map;
   }, [tags, assignments]);
+
+  // Beta lookup by symbol
+  const betaMap = useMemo(() => new Map(positionBetas.map(b => [b.symbol, b])), [positionBetas]);
 
   const securityMap = useMemo(() => new Map(securities.map(s => [s.id, s])), [securities]);
   const accountMap = useMemo(() => new Map(accounts.map(a => [a.id, a])), [accounts]);
@@ -339,6 +347,51 @@ export default function Holdings() {
         title={hasIntent ? `${intent.tier || 'No tier'}: ${intent.thesis || 'No thesis'}` : 'Set intent'}
       >
         {hasIntent ? '◆' : '◇'}
+      </button>
+    );
+  };
+
+  const renderBeta = (position: PositionWithPercent) => {
+    const symbol = position.security?.symbol;
+    if (!symbol) return <td className="table-cell text-right text-gray-400">-</td>;
+    const beta = betaMap.get(symbol);
+    if (!beta) return <td className="table-cell text-right text-gray-400">-</td>;
+    const val = beta.beta;
+    const color = val >= 2 ? 'text-red-600' : val >= 1.5 ? 'text-amber-600' : val >= 0.8 ? 'text-gray-700' : 'text-blue-600';
+    return (
+      <td className={`table-cell text-right ${color}`} title={`Correlation: ${beta.correlation.toFixed(2)}`}>
+        {val.toFixed(2)}
+      </td>
+    );
+  };
+
+  const handleNewsClick = useCallback(async (symbol: string) => {
+    if (newsSymbol === symbol) {
+      setNewsSymbol(null);
+      return;
+    }
+    setNewsSymbol(symbol);
+    setNewsLoading(true);
+    try {
+      const data = await window.electronAPI.getNewsBySymbol(symbol, 10);
+      setNewsArticles(data);
+    } finally {
+      setNewsLoading(false);
+    }
+  }, [newsSymbol]);
+
+  const renderNewsIcon = (position: PositionWithPercent) => {
+    const symbol = position.security?.symbol;
+    if (!symbol) return null;
+    return (
+      <button
+        onClick={() => handleNewsClick(symbol)}
+        className={`p-1 rounded hover:bg-gray-100 ${newsSymbol === symbol ? 'text-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
+        title={`News for ${symbol}`}
+      >
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
+        </svg>
       </button>
     );
   };
@@ -674,6 +727,16 @@ export default function Holdings() {
                     <div className="text-xl font-semibold text-gray-700">{formatCurrency(totalCash)}</div>
                   </div>
                 )}
+                {analytics?.weightedBeta != null && (
+                  <div>
+                    <div className="text-sm text-gray-500">Portfolio Beta</div>
+                    <div className={`text-xl font-semibold ${
+                      analytics.weightedBeta > 1.2 ? 'text-red-600' : analytics.weightedBeta < 0.8 ? 'text-blue-600' : 'text-gray-700'
+                    }`}>
+                      {analytics.weightedBeta.toFixed(2)}
+                    </div>
+                  </div>
+                )}
               </div>
               {lastSynced && (
                 <div className="text-xs text-gray-400">
@@ -829,6 +892,8 @@ export default function Holdings() {
                       <th className="table-header text-right">Price</th>
                       <th className="table-header text-right">Mkt Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
+                      <th className="table-header text-right">Beta</th>
+                      <th className="table-header text-center w-8"></th>
                       <th className="table-header text-right"></th>
                     </tr>
                   </thead>
@@ -879,6 +944,10 @@ export default function Holdings() {
                             </div>
                           ) : '-'}
                         </td>
+                        {renderBeta(position)}
+                        <td className="table-cell text-center">
+                          {renderNewsIcon(position)}
+                        </td>
                         <td className="table-cell text-right">
                           {renderActionMenu(position)}
                         </td>
@@ -908,6 +977,8 @@ export default function Holdings() {
                       <th className="table-header text-right">Price</th>
                       <th className="table-header text-right">Mkt Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
+                      <th className="table-header text-right">Beta</th>
+                      <th className="table-header text-center w-8"></th>
                       <th className="table-header text-right"></th>
                     </tr>
                   </thead>
@@ -946,6 +1017,10 @@ export default function Holdings() {
                             </div>
                           ) : '-'}
                         </td>
+                        {renderBeta(position)}
+                        <td className="table-cell text-center">
+                          {renderNewsIcon(position)}
+                        </td>
                         <td className="table-cell text-right">
                           {renderActionMenu(position)}
                         </td>
@@ -975,6 +1050,8 @@ export default function Holdings() {
                       <th className="table-header text-right">Price</th>
                       <th className="table-header text-right">Mkt Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
+                      <th className="table-header text-right">Beta</th>
+                      <th className="table-header text-center w-8"></th>
                       <th className="table-header text-right"></th>
                     </tr>
                   </thead>
@@ -1012,6 +1089,10 @@ export default function Holdings() {
                               <div className="text-xs">{formatPercent(position.unrealizedGainPercent || 0)}</div>
                             </div>
                           ) : '-'}
+                        </td>
+                        {renderBeta(position)}
+                        <td className="table-cell text-center">
+                          {renderNewsIcon(position)}
                         </td>
                         <td className="table-cell text-right">
                           {renderActionMenu(position)}
@@ -1082,6 +1163,8 @@ export default function Holdings() {
                         <th className="table-header text-right">Price</th>
                         <th className="table-header text-right">Mkt Value</th>
                         <th className="table-header text-right">Gain/Loss</th>
+                        <th className="table-header text-right">Beta</th>
+                        <th className="table-header text-center w-8"></th>
                         <th className="table-header text-right"></th>
                       </tr>
                     </thead>
@@ -1118,6 +1201,10 @@ export default function Holdings() {
                                 <div className="text-xs">{formatPercent(position.unrealizedGainPercent || 0)}</div>
                               </div>
                             ) : '-'}
+                          </td>
+                          {renderBeta(position)}
+                          <td className="table-cell text-center">
+                            {renderNewsIcon(position)}
                           </td>
                           <td className="table-cell text-right">
                             {renderActionMenu(position)}
@@ -1435,6 +1522,52 @@ export default function Holdings() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* News Panel */}
+      {newsSymbol && (
+        <div className="card mt-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-900">News: {newsSymbol}</h3>
+            <button onClick={() => setNewsSymbol(null)} className="text-gray-400 hover:text-gray-600 text-sm">Close</button>
+          </div>
+          {newsLoading ? (
+            <p className="text-sm text-gray-400">Loading...</p>
+          ) : newsArticles.length === 0 ? (
+            <p className="text-sm text-gray-400">No recent news for {newsSymbol}</p>
+          ) : (
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {newsArticles.map((article, i) => (
+                <div key={i} className="flex items-start gap-3 py-1.5 border-b border-gray-100 last:border-0">
+                  <span className="text-xs text-gray-400 whitespace-nowrap mt-0.5 w-20">
+                    {(() => {
+                      const d = new Date(article.publishedAt);
+                      const now = new Date();
+                      const diffH = (now.getTime() - d.getTime()) / 3600000;
+                      if (diffH < 24) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+                      return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                    })()}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    {article.url ? (
+                      <a href={article.url} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline leading-tight">
+                        {article.title}
+                      </a>
+                    ) : (
+                      <span className="text-sm text-gray-700 leading-tight">{article.title}</span>
+                    )}
+                    {article.snippet && (
+                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{article.snippet}</p>
+                    )}
+                  </div>
+                  {article.source && (
+                    <span className="text-xs text-gray-400 whitespace-nowrap">{article.source}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

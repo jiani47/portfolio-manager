@@ -1,8 +1,8 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePortfolio, usePositions, useSecurities, useSettings, usePositionIntents, useDailyRituals } from '../hooks/useApi';
+import { usePortfolio, usePositions, useSecurities, useSettings, usePositionIntents, useDailyRituals, useNews, useEarnings } from '../hooks/useApi';
 import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
-import type { StreamingQuote } from '../../shared/types';
-import { format } from 'date-fns';
+import type { StreamingQuote, NewsArticle, EarningsEvent } from '../../shared/types';
+import { format, addDays } from 'date-fns';
 
 const TIER_COLORS: Record<string, string> = {
   'Core': '#3b82f6',
@@ -18,10 +18,14 @@ export default function Dashboard() {
   const { settings, fetchSettings } = useSettings();
   const { intents, fetchIntents } = usePositionIntents();
   const { rituals, fetchRituals } = useDailyRituals();
+  const { articles: newsArticles, fetchRecentNews } = useNews();
+  const { earnings, fetchPortfolioEarnings } = useEarnings();
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [rawSectorData, setRawSectorData] = useState<{ nyse: Record<string, number>; nasdaq: Record<string, number> } | null>(null);
   const [sectorDate, setSectorDate] = useState<string>('');
   const [sectorView, setSectorView] = useState<'all' | 'nyse' | 'nasdaq'>('all');
+  const [newsTab, setNewsTab] = useState<'all' | 'positions' | 'watchlist'>('all');
+  const [watchlistSymbols, setWatchlistSymbols] = useState<string[]>([]);
 
   useEffect(() => {
     fetchSummary();
@@ -30,7 +34,12 @@ export default function Dashboard() {
     fetchSettings();
     fetchIntents();
     fetchRituals(1);
-  }, [fetchSummary, fetchPositions, fetchSecurities, fetchSettings, fetchIntents, fetchRituals]);
+    fetchRecentNews(24);
+    const today = format(new Date(), 'yyyy-MM-dd');
+    const twoWeeksOut = format(addDays(new Date(), 14), 'yyyy-MM-dd');
+    fetchPortfolioEarnings(today, twoWeeksOut);
+    window.electronAPI.getWatchlistSymbols().then(setWatchlistSymbols).catch(() => {});
+  }, [fetchSummary, fetchPositions, fetchSecurities, fetchSettings, fetchIntents, fetchRituals, fetchRecentNews, fetchPortfolioEarnings]);
 
   // Listen for position sync events
   useEffect(() => {
@@ -113,6 +122,27 @@ export default function Dashboard() {
 
   const loading = portfolioLoading || positionsLoading;
   const securityMap = useMemo(() => new Map(securities.map(s => [s.id, s])), [securities]);
+
+  // Position symbols for news filtering
+  const positionSymbols = useMemo(() => {
+    const syms = new Set<string>();
+    for (const p of positions) {
+      const s = securityMap.get(p.securityId);
+      if (s && s.type !== 'cash' && s.symbol) syms.add(s.symbol);
+    }
+    return syms;
+  }, [positions, securityMap]);
+
+  const watchlistSymbolSet = useMemo(() => new Set(watchlistSymbols), [watchlistSymbols]);
+
+  // Filtered news based on selected tab
+  const filteredNews = useMemo(() => {
+    return newsArticles.filter(a => {
+      if (newsTab === 'all') return positionSymbols.has(a.symbol) || watchlistSymbolSet.has(a.symbol);
+      if (newsTab === 'positions') return positionSymbols.has(a.symbol);
+      return watchlistSymbolSet.has(a.symbol);
+    });
+  }, [newsArticles, newsTab, positionSymbols, watchlistSymbolSet]);
 
   // Streaming quotes — include SPY and QQQ for indices
   const symbolList = useMemo(() => {
@@ -442,6 +472,118 @@ export default function Dashboard() {
               <p className="text-sm text-gray-400">Waiting for streaming data...</p>
             )}
           </div>
+
+          {/* Upcoming Earnings */}
+          {earnings.length > 0 && (
+            <div className="card">
+              <h2 className="text-lg font-semibold text-gray-900 mb-3">Upcoming Earnings</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200">
+                      <th className="text-left py-2 px-3 font-medium text-gray-500">Date</th>
+                      <th className="text-left py-2 px-3 font-medium text-gray-500">Symbol</th>
+                      <th className="text-left py-2 px-3 font-medium text-gray-500">Time</th>
+                      <th className="text-right py-2 px-3 font-medium text-gray-500">EPS Est.</th>
+                      <th className="text-right py-2 px-3 font-medium text-gray-500">Rev Est.</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {earnings.map((e, i) => {
+                      const isToday = e.date === format(new Date(), 'yyyy-MM-dd');
+                      const timeLabel = e.time === 'bmo' ? 'Pre-market' : e.time === 'amc' ? 'After-close' : e.time === 'dmh' ? 'During hours' : '';
+                      return (
+                        <tr key={`${e.symbol}-${i}`} className={`border-b border-gray-100 ${isToday ? 'bg-yellow-50' : 'hover:bg-gray-50'}`}>
+                          <td className="py-2 px-3 text-gray-700">
+                            {format(new Date(e.date + 'T12:00:00'), 'EEE, MMM d')}
+                            {isToday && <span className="ml-1 text-xs font-medium text-yellow-700">TODAY</span>}
+                          </td>
+                          <td className="py-2 px-3 font-medium text-gray-900">{e.symbol}</td>
+                          <td className="py-2 px-3 text-gray-500">{timeLabel}</td>
+                          <td className="py-2 px-3 text-right text-gray-700">
+                            {e.epsEstimated != null ? `$${e.epsEstimated.toFixed(2)}` : '-'}
+                          </td>
+                          <td className="py-2 px-3 text-right text-gray-700">
+                            {e.revenueEstimated != null ? `$${(e.revenueEstimated / 1e9).toFixed(2)}B` : '-'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Recent News */}
+          {newsArticles.length > 0 && (
+            <div className="card">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-semibold text-gray-900">Recent News</h2>
+                <div className="flex gap-1">
+                  {(['all', 'positions', 'watchlist'] as const).map(tab => (
+                    <button
+                      key={tab}
+                      onClick={() => setNewsTab(tab)}
+                      className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                        newsTab === tab
+                          ? 'bg-blue-100 text-blue-700'
+                          : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                      {tab === 'all' ? 'All' : tab === 'positions' ? 'Positions' : 'Watchlist'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                {(() => {
+                  // Group by symbol, show top 3 per symbol
+                  const grouped = new Map<string, NewsArticle[]>();
+                  for (const a of filteredNews) {
+                    const list = grouped.get(a.symbol) || [];
+                    list.push(a);
+                    grouped.set(a.symbol, list);
+                  }
+                  // Sort symbols by number of articles descending
+                  const symbols = Array.from(grouped.keys()).sort((a, b) => (grouped.get(b)?.length || 0) - (grouped.get(a)?.length || 0));
+                  if (symbols.length === 0) return <p className="text-sm text-gray-400">No news for this filter.</p>;
+                  return symbols.map(sym => (
+                    <div key={sym}>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-sm font-semibold text-gray-900">{sym}</span>
+                        <span className="text-xs text-gray-400">({grouped.get(sym)!.length})</span>
+                      </div>
+                      <div className="space-y-1 ml-2">
+                        {grouped.get(sym)!.slice(0, 3).map((article, i) => (
+                          <div key={i} className="flex items-start gap-2">
+                            <span className="text-xs text-gray-400 whitespace-nowrap mt-0.5">
+                              {format(new Date(article.publishedAt), 'h:mm a')}
+                            </span>
+                            {article.url ? (
+                              <a
+                                href={article.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-xs text-blue-600 hover:underline leading-tight"
+                              >
+                                {article.title}
+                              </a>
+                            ) : (
+                              <span className="text-xs text-gray-700 leading-tight">{article.title}</span>
+                            )}
+                            {article.source && (
+                              <span className="text-xs text-gray-400 whitespace-nowrap">[{article.source}]</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ));
+                })()}
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>

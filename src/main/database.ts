@@ -23,6 +23,7 @@ import {
   Watchlist,
   WatchlistItem,
   Monitor,
+  TaskRunRecord,
 } from '../shared/types';
 
 export class Database {
@@ -487,6 +488,59 @@ export class Database {
       }
     }
 
+    // Portfolio snapshots table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+        id TEXT PRIMARY KEY,
+        date TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        quantity REAL NOT NULL,
+        cost_basis REAL NOT NULL,
+        close_price REAL NOT NULL,
+        market_value REAL NOT NULL,
+        unrealized_gain REAL NOT NULL,
+        day_change REAL,
+        day_pnl REAL,
+        created_at TEXT NOT NULL,
+        UNIQUE(date, symbol)
+      );
+      CREATE INDEX IF NOT EXISTS idx_snapshots_date ON portfolio_snapshots(date);
+      CREATE INDEX IF NOT EXISTS idx_snapshots_symbol ON portfolio_snapshots(symbol);
+    `);
+
+    // News table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS news (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        title TEXT NOT NULL,
+        snippet TEXT,
+        source TEXT,
+        url TEXT,
+        published_at TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        UNIQUE(symbol, title)
+      );
+      CREATE INDEX IF NOT EXISTS idx_news_symbol ON news(symbol);
+      CREATE INDEX IF NOT EXISTS idx_news_published ON news(published_at);
+    `);
+
+    // Scheduler task runs table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS scheduler_task_runs (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        status TEXT NOT NULL DEFAULT 'running',
+        result TEXT,
+        error TEXT,
+        duration_ms INTEGER,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_runs_task ON scheduler_task_runs(task_id, started_at DESC);
+    `);
+
     // Sync watchlist monitors on startup
     this.syncWatchlistMonitors();
   }
@@ -702,6 +756,32 @@ export class Database {
     });
 
     return insertMany(prices);
+  }
+
+  // Get latest price per security for bootstrapping streaming quotes from DB
+  getLatestPrices(): Array<{ symbol: string; closePrice: number; openPrice: number | null; highPrice: number | null; lowPrice: number | null; volume: number | null; date: string; fetchedAt: string }> {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare(`
+      SELECT s.symbol, ph.close_price, ph.open_price, ph.high_price, ph.low_price,
+             ph.volume, ph.date, ph.fetched_at
+      FROM price_history ph
+      JOIN (
+        SELECT security_id, MAX(date) as max_date
+        FROM price_history GROUP BY security_id
+      ) latest ON ph.security_id = latest.security_id AND ph.date = latest.max_date
+      JOIN securities s ON ph.security_id = s.id
+      WHERE s.type NOT IN ('cash', 'option')
+    `);
+    return stmt.all().map((r: any) => ({
+      symbol: r.symbol,
+      closePrice: r.close_price,
+      openPrice: r.open_price,
+      highPrice: r.high_price,
+      lowPrice: r.low_price,
+      volume: r.volume,
+      date: r.date,
+      fetchedAt: r.fetched_at,
+    }));
   }
 
   private mapRowToPriceHistory = (row: unknown): PriceHistory => {
@@ -1716,7 +1796,7 @@ export class Database {
     if (!this.db) throw new Error('Database not initialized');
     const query = `
       SELECT wi.*,
-        (SELECT ph.close FROM price_history ph
+        (SELECT ph.close_price FROM price_history ph
          JOIN securities s ON s.id = ph.security_id
          WHERE s.symbol = wi.symbol
          ORDER BY ph.date DESC LIMIT 1) as last_price
@@ -2121,9 +2201,14 @@ export class Database {
     `);
 
     const targetSymbols = symbols || (this.db.prepare(`
-      SELECT DISTINCT s.symbol FROM positions p
-      JOIN securities s ON p.security_id = s.id
-      WHERE s.type != 'cash' AND s.symbol != ''
+      SELECT DISTINCT symbol FROM (
+        SELECT s.symbol FROM positions p
+        JOIN securities s ON p.security_id = s.id
+        WHERE s.type != 'cash' AND s.symbol != ''
+        UNION
+        SELECT wi.symbol FROM watchlist_items wi
+        WHERE wi.symbol != ''
+      )
     `).all() as { symbol: string }[]).map(r => r.symbol);
 
     const now = new Date().toISOString();
@@ -2241,10 +2326,10 @@ export class Database {
         VALUES (?, ?, ?, ?, ?, 'swing', ?, ?)
       `);
       for (const r of resistance) {
-        insert.run(crypto.randomUUID(), symbol, 'resistance', r.price, r.strength, now, now);
+        insert.run(uuidv4(), symbol, 'resistance', r.price, r.strength, now, now);
       }
       for (const s of support) {
-        insert.run(crypto.randomUUID(), symbol, 'support', s.price, s.strength, now, now);
+        insert.run(uuidv4(), symbol, 'support', s.price, s.strength, now, now);
       }
     }
   }
@@ -2338,6 +2423,204 @@ export class Database {
       marketCap: r.market_cap as number | undefined,
       profileUpdatedAt: r.profile_updated_at as string | undefined,
       createdAt: r.created_at as string,
+    };
+  };
+
+  // === News ===
+
+  getRecentNews(hours = 24): Array<{ symbol: string; title: string; snippet: string | null; source: string | null; url: string | null; publishedAt: string }> {
+    if (!this.db) throw new Error('Database not initialized');
+    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const rows = this.db.prepare(`
+      SELECT symbol, title, snippet, source, url, published_at
+      FROM news
+      WHERE published_at >= ?
+      ORDER BY published_at DESC
+    `).all(cutoff) as Array<{ symbol: string; title: string; snippet: string | null; source: string | null; url: string | null; published_at: string }>;
+    return rows.map(r => ({
+      symbol: r.symbol,
+      title: r.title,
+      snippet: r.snippet,
+      source: r.source,
+      url: r.url,
+      publishedAt: r.published_at,
+    }));
+  }
+
+  getNewsBySymbol(symbol: string, limit = 10): Array<{ symbol: string; title: string; snippet: string | null; source: string | null; url: string | null; publishedAt: string }> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.prepare(`
+      SELECT symbol, title, snippet, source, url, published_at
+      FROM news
+      WHERE symbol = ?
+      ORDER BY published_at DESC
+      LIMIT ?
+    `).all(symbol.toUpperCase(), limit) as Array<{ symbol: string; title: string; snippet: string | null; source: string | null; url: string | null; published_at: string }>;
+    return rows.map(r => ({
+      symbol: r.symbol,
+      title: r.title,
+      snippet: r.snippet,
+      source: r.source,
+      url: r.url,
+      publishedAt: r.published_at,
+    }));
+  }
+
+  // === Scheduler task run tracking ===
+
+  recordTaskStart(taskId: string): string {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO scheduler_task_runs (id, task_id, started_at, status, created_at)
+      VALUES (?, ?, ?, 'running', ?)
+    `).run(id, taskId, now, now);
+    return id;
+  }
+
+  recordTaskComplete(runId: string, status: 'success' | 'failure', result?: string, error?: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const row = this.db.prepare('SELECT started_at FROM scheduler_task_runs WHERE id = ?').get(runId) as { started_at: string } | undefined;
+    const durationMs = row ? Date.now() - new Date(row.started_at).getTime() : 0;
+    this.db.prepare(`
+      UPDATE scheduler_task_runs SET completed_at = ?, status = ?, result = ?, error = ?, duration_ms = ?
+      WHERE id = ?
+    `).run(now, status, result || null, error || null, durationMs, runId);
+  }
+
+  getLastTaskRun(taskId: string): TaskRunRecord | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT * FROM scheduler_task_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 1
+    `).get(taskId) as Record<string, unknown> | undefined;
+    return row ? this.mapRowToTaskRun(row) : null;
+  }
+
+  getTaskRunHistory(taskId: string, limit = 10): TaskRunRecord[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.prepare(`
+      SELECT * FROM scheduler_task_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT ?
+    `).all(taskId, limit) as Record<string, unknown>[];
+    return rows.map(this.mapRowToTaskRun);
+  }
+
+  didTaskRunToday(taskId: string): boolean {
+    if (!this.db) throw new Error('Database not initialized');
+    const today = new Date().toISOString().split('T')[0];
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as cnt FROM scheduler_task_runs
+      WHERE task_id = ? AND status = 'success' AND started_at >= ?
+    `).get(taskId, today + 'T00:00:00.000Z') as { cnt: number };
+    return row.cnt > 0;
+  }
+
+  // === EOD Snapshot ===
+
+  takeEodSnapshot(): { count: number; totalMV: number; totalPnL: number; dayPnL: number } {
+    if (!this.db) throw new Error('Database not initialized');
+    const today = new Date().toISOString().split('T')[0];
+    const now = new Date().toISOString();
+
+    // Check if already exists
+    const existing = this.db.prepare('SELECT COUNT(*) as cnt FROM portfolio_snapshots WHERE date = ?').get(today) as { cnt: number };
+    if (existing.cnt > 0) {
+      // Return existing totals
+      const totals = this.db.prepare(`
+        SELECT COALESCE(SUM(market_value), 0) as mv, COALESCE(SUM(unrealized_gain), 0) as pnl, COALESCE(SUM(day_pnl), 0) as day_pnl
+        FROM portfolio_snapshots WHERE date = ?
+      `).get(today) as { mv: number; pnl: number; day_pnl: number };
+      return { count: existing.cnt, totalMV: totals.mv, totalPnL: totals.pnl, dayPnL: totals.day_pnl };
+    }
+
+    // Get positions aggregated by symbol
+    const positions = this.db.prepare(`
+      SELECT s.symbol, s.type,
+             SUM(p.quantity) as total_qty,
+             SUM(p.cost_basis) as total_cost
+      FROM positions p
+      JOIN securities s ON p.security_id = s.id
+      GROUP BY s.symbol, s.type
+      HAVING total_qty != 0
+    `).all() as Array<{ symbol: string; type: string; total_qty: number; total_cost: number }>;
+
+    let count = 0;
+    const insert = this.db.prepare(`
+      INSERT INTO portfolio_snapshots (id, date, symbol, quantity, cost_basis, close_price, market_value, unrealized_gain, day_change, day_pnl, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertMany = this.db.transaction(() => {
+      for (const pos of positions) {
+        let closePrice: number;
+        let dayChange: number | null = null;
+        let dayPnl: number | null = null;
+
+        if (pos.type === 'cash') {
+          closePrice = 1.0;
+        } else {
+          // Get latest close price
+          const priceRow = this.db!.prepare(`
+            SELECT ph.close_price FROM price_history ph
+            JOIN securities s ON ph.security_id = s.id
+            WHERE s.symbol = ?
+            ORDER BY ph.date DESC LIMIT 1
+          `).get(pos.symbol) as { close_price: number } | undefined;
+
+          if (!priceRow) continue;
+          closePrice = priceRow.close_price;
+
+          // Get previous day's close
+          const prevRow = this.db!.prepare(`
+            SELECT ph.close_price FROM price_history ph
+            JOIN securities s ON ph.security_id = s.id
+            WHERE s.symbol = ? AND ph.date < (
+              SELECT MAX(ph2.date) FROM price_history ph2
+              JOIN securities s2 ON ph2.security_id = s2.id
+              WHERE s2.symbol = ?
+            )
+            ORDER BY ph.date DESC LIMIT 1
+          `).get(pos.symbol, pos.symbol) as { close_price: number } | undefined;
+
+          if (prevRow) {
+            dayChange = closePrice - prevRow.close_price;
+            dayPnl = dayChange * pos.total_qty;
+          }
+        }
+
+        const marketValue = pos.total_qty * closePrice;
+        const unrealizedGain = marketValue - pos.total_cost;
+
+        insert.run(
+          uuidv4(), today, pos.symbol, pos.total_qty, pos.total_cost,
+          closePrice, marketValue, unrealizedGain, dayChange, dayPnl, now
+        );
+        count++;
+      }
+    });
+
+    insertMany();
+
+    // Return totals
+    const totals = this.db.prepare(`
+      SELECT COALESCE(SUM(market_value), 0) as mv, COALESCE(SUM(unrealized_gain), 0) as pnl, COALESCE(SUM(day_pnl), 0) as day_pnl
+      FROM portfolio_snapshots WHERE date = ?
+    `).get(today) as { mv: number; pnl: number; day_pnl: number };
+
+    return { count, totalMV: totals.mv, totalPnL: totals.pnl, dayPnL: totals.day_pnl };
+  }
+
+  private mapRowToTaskRun = (row: Record<string, unknown>): TaskRunRecord => {
+    return {
+      id: row.id as string,
+      taskId: row.task_id as string,
+      startedAt: row.started_at as string,
+      completedAt: row.completed_at as string | undefined,
+      status: row.status as TaskRunRecord['status'],
+      result: row.result as string | undefined,
+      error: row.error as string | undefined,
+      durationMs: row.duration_ms as number | undefined,
     };
   };
 

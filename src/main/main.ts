@@ -9,6 +9,7 @@ import { MassiveService } from './massive-service';
 import { SchwabService } from './schwab-service';
 import { SchwabStreamService } from './schwab-stream-service';
 import { AnalyticsService } from './analytics-service';
+import { SchedulerService } from './scheduler-service';
 import Store from 'electron-store';
 import { AppSettings } from '../shared/types';
 
@@ -22,6 +23,7 @@ let fmpService: FMPService | null = null;
 let massiveService: MassiveService | null = null;
 let schwabService: SchwabService | null = null;
 let streamService: SchwabStreamService | null = null;
+let schedulerService: SchedulerService | null = null;
 
 const defaultSettings: AppSettings = {
   theme: 'system',
@@ -136,8 +138,12 @@ async function initializeApp() {
   // Initialize analytics service
   const analyticsService = new AnalyticsService(database);
 
+  // Initialize scheduler service
+  schedulerService = new SchedulerService(database, fmpService, schwabService, store, () => mainWindow);
+  schedulerService.start();
+
   // Setup IPC handlers
-  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, schwabService, streamService, store, analyticsService);
+  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, schwabService, streamService, store, analyticsService, schedulerService);
 }
 
 app.whenReady().then(async () => {
@@ -158,6 +164,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  schedulerService?.destroy();
   streamService?.destroy();
   database?.close();
 });

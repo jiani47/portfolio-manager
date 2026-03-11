@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from 'recharts';
-import type { PriceHistory, PriceLevel } from '../../shared/types';
+import type { PriceHistory, PriceLevel, NewsArticle } from '../../shared/types';
 
 const PERIODS = [
   { label: '3M', days: 90 },
@@ -36,6 +36,8 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
   const [newLevelPrice, setNewLevelPrice] = useState('');
   const [newLevelType, setNewLevelType] = useState<'support' | 'resistance'>('support');
   const [refreshing, setRefreshing] = useState(false);
+  const [news, setNews] = useState<NewsArticle[]>([]);
+  const [newsLoading, setNewsLoading] = useState(false);
   const chartRef = useRef<HTMLDivElement>(null);
 
   const fetchData = useCallback(async () => {
@@ -51,6 +53,21 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
       setLoading(false);
     }
   }, [symbol, period]);
+
+  // Fetch news for the symbol
+  useEffect(() => {
+    let cancelled = false;
+    setNewsLoading(true);
+    window.electronAPI.getNewsBySymbol(symbol, 10).then(articles => {
+      if (!cancelled) {
+        setNews(articles);
+        setNewsLoading(false);
+      }
+    }).catch(() => {
+      if (!cancelled) setNewsLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [symbol]);
 
   useEffect(() => {
     fetchData();
@@ -230,8 +247,8 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
                 {/* Volume bars at bottom */}
                 <Bar
                   dataKey="volumeScaled"
-                  fill="#e5e7eb"
-                  opacity={0.4}
+                  fill="#93c5fd"
+                  opacity={0.5}
                   isAnimationActive={false}
                 />
 
@@ -410,11 +427,57 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
             {levels.length === 0 && (
               <p className="text-xs text-gray-400 mt-2">No levels. Click "Refresh" to compute or "Add" to create manually.</p>
             )}
+
+            {/* News */}
+            <div className="mt-4 pt-3 border-t border-gray-200">
+              <h3 className="text-sm font-semibold text-gray-900 mb-2">Recent News</h3>
+              {newsLoading ? (
+                <p className="text-xs text-gray-400">Loading...</p>
+              ) : news.length === 0 ? (
+                <p className="text-xs text-gray-400">No recent news for {symbol}</p>
+              ) : (
+                <div className="space-y-2">
+                  {news.map((article, i) => (
+                    <div key={i} className="text-xs">
+                      {article.url ? (
+                        <a
+                          href={article.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:text-blue-800 hover:underline font-medium leading-tight block"
+                        >
+                          {article.title}
+                        </a>
+                      ) : (
+                        <p className="font-medium text-gray-800 leading-tight">{article.title}</p>
+                      )}
+                      <p className="text-gray-400 mt-0.5">
+                        {article.source && <span>{article.source} · </span>}
+                        {formatNewsDate(article.publishedAt)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
     </div>
   );
+}
+
+function formatNewsDate(dateStr: string) {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffHours = diffMs / (1000 * 60 * 60);
+  if (diffHours < 1) return `${Math.round(diffMs / 60000)}m ago`;
+  if (diffHours < 24) return `${Math.round(diffHours)}h ago`;
+  const diffDays = Math.round(diffHours / 24);
+  if (diffDays === 1) return '1d ago';
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 function LevelRow({

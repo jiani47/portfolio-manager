@@ -67,11 +67,40 @@ export class SchwabStreamService {
   }
 
   startMarketHoursScheduler(): void {
+    // Bootstrap quotes from DB so renderer has prices immediately
+    this.loadQuotesFromDb();
     // Check immediately, then every 30 seconds
     this.checkMarketAndConnect();
     this.marketCheckTimer = setInterval(() => {
       this.checkMarketAndConnect();
     }, MARKET_CHECK_INTERVAL_MS);
+  }
+
+  private loadQuotesFromDb(): void {
+    try {
+      const prices = this.db.getLatestPrices();
+      if (prices.length === 0) return;
+      console.log(`Bootstrapping ${prices.length} quotes from DB`);
+      const mainWindow = this.getMainWindow();
+      for (const p of prices) {
+        const quote: StreamingQuote = {
+          symbol: p.symbol,
+          last: p.closePrice,
+          open: p.openPrice ?? undefined,
+          high: p.highPrice ?? undefined,
+          low: p.lowPrice ?? undefined,
+          volume: p.volume ?? undefined,
+          close: p.closePrice,
+          timestamp: new Date(p.fetchedAt).getTime(),
+        };
+        this.latestQuotes.set(p.symbol, quote);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('streaming:quote', quote);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to bootstrap quotes from DB:', err);
+    }
   }
 
   stopMarketHoursScheduler(): void {

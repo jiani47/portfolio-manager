@@ -691,3 +691,54 @@ export interface PriceLevel {
   createdAt: string;
   updatedAt: string;
 }
+
+// News types
+export interface NewsArticle {
+  symbol: string;
+  title: string;
+  snippet: string | null;
+  source: string | null;
+  url: string | null;
+  publishedAt: string;
+}
+
+// Scheduler types
+export interface TaskRunRecord {
+  id: string;
+  taskId: string;
+  startedAt: string;
+  completedAt?: string;
+  status: 'running' | 'success' | 'failure';
+  result?: string;
+  error?: string;
+  durationMs?: number;
+}
+
+export interface TaskStatus {
+  id: string;
+  name: string;
+  enabled: boolean;
+  schedule: string;
+  lastRun?: TaskRunRecord;
+  nextRunAt?: string;
+  isRunning: boolean;
+}
+
+export interface SchedulerStatus {
+  running: boolean;
+  startedAt: string;
+  lastTick: number;
+  tasks: TaskStatus[];
+}
+
+export interface SchedulerHeartbeat {
+  alive: boolean;
+  lastTick: number;
+  uptime: number;
+}
+
+export interface TaskResult {
+  success: boolean;
+  message: string;
+  details?: Record<string, unknown>;
+}

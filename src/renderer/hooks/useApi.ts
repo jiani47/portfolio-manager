@@ -49,6 +49,11 @@ import type {
   PortfolioAnalytics,
   PositionBeta,
   PriceLevel,
+  NewsArticle,
+  SchedulerStatus,
+  SchedulerHeartbeat,
+  TaskRunRecord,
+  TaskResult,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -251,6 +256,22 @@ declare global {
       streamingStop: () => Promise<void>;
       streamingGetStatus: () => Promise<StreamingState>;
       streamingUpdateSymbols: (symbols: string[]) => Promise<void>;
+
+      // News operations
+      getRecentNews: (hours?: number) => Promise<NewsArticle[]>;
+      getNewsBySymbol: (symbol: string, limit?: number) => Promise<NewsArticle[]>;
+
+      // Scheduler operations
+      schedulerGetStatus: () => Promise<SchedulerStatus | null>;
+      schedulerGetHeartbeat: () => Promise<SchedulerHeartbeat | null>;
+      schedulerRunTask: (taskId: string) => Promise<TaskResult>;
+      schedulerEnableTask: (taskId: string) => Promise<void>;
+      schedulerDisableTask: (taskId: string) => Promise<void>;
+      schedulerGetTaskHistory: (taskId: string, limit?: number) => Promise<TaskRunRecord[]>;
+
+      // Scheduler events
+      onSchedulerTaskStarted: (callback: (data: { taskId: string; startedAt: string }) => void) => () => void;
+      onSchedulerTaskCompleted: (callback: (data: { taskId: string; status: string; result: string }) => void) => () => void;
     };
   }
 }
@@ -1760,4 +1781,67 @@ export function usePriceLevels() {
   }, []);
 
   return { levels, loading, fetchLevels };
+}
+
+export function useNews() {
+  const [articles, setArticles] = useState<NewsArticle[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchRecentNews = useCallback(async (hours?: number) => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.getRecentNews(hours);
+      setArticles(data);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchNewsBySymbol = useCallback(async (symbol: string, limit?: number) => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.getNewsBySymbol(symbol, limit);
+      setArticles(data);
+      return data;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { articles, loading, fetchRecentNews, fetchNewsBySymbol };
+}
+
+export function useScheduler() {
+  const [status, setStatus] = useState<SchedulerStatus | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchStatus = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.schedulerGetStatus();
+      setStatus(data);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const runTask = useCallback(async (taskId: string) => {
+    return window.electronAPI.schedulerRunTask(taskId);
+  }, []);
+
+  const enableTask = useCallback(async (taskId: string) => {
+    await window.electronAPI.schedulerEnableTask(taskId);
+    await fetchStatus();
+  }, [fetchStatus]);
+
+  const disableTask = useCallback(async (taskId: string) => {
+    await window.electronAPI.schedulerDisableTask(taskId);
+    await fetchStatus();
+  }, [fetchStatus]);
+
+  const getTaskHistory = useCallback(async (taskId: string, limit?: number) => {
+    return window.electronAPI.schedulerGetTaskHistory(taskId, limit);
+  }, []);
+
+  return { status, loading, fetchStatus, runTask, enableTask, disableTask, getTaskHistory };
 }

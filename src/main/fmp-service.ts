@@ -51,7 +51,7 @@ export class FMPService {
   private baseUrl = 'https://financialmodelingprep.com/stable';
 
   configure(settings: AppSettings): void {
-    if (settings.dataProvider === 'fmp' && settings.dataProviderApiKey) {
+    if (settings.dataProviderApiKey) {
       this.apiKey = settings.dataProviderApiKey;
     } else {
       this.apiKey = null;
