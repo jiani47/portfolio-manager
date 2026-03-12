@@ -54,6 +54,9 @@ import type {
   SchedulerHeartbeat,
   TaskRunRecord,
   TaskResult,
+  PreTradeCheckRequest,
+  PreTradeCheckResult,
+  PreTradeCheckItem,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -242,6 +245,10 @@ declare global {
       schwabPlaceOrder: (order: SchwabOrderRequest) => Promise<{ success: boolean; message: string; orderId?: string }>;
       schwabGetOrders: (status?: string) => Promise<SchwabOrder[]>;
       schwabCancelOrder: (accountNumber: string, orderId: string) => Promise<{ success: boolean; message: string }>;
+
+      // Pre-trade checklist
+      preTradeEvaluate: (req: PreTradeCheckRequest) => Promise<PreTradeCheckResult>;
+      preTradeRecord: (data: { orderSymbol: string; orderSide: string; orderQty: number; accountId: string; book: string; items: PreTradeCheckItem[]; overrides: string[]; passed: boolean }) => Promise<string>;
 
       // Schwab market data operations
       schwabTestMarketData: () => Promise<{ success: boolean; message: string }>;
@@ -1844,4 +1851,28 @@ export function useScheduler() {
   }, []);
 
   return { status, loading, fetchStatus, runTask, enableTask, disableTask, getTaskHistory };
+}
+
+export function usePreTradeCheck() {
+  const [checkResult, setCheckResult] = useState<PreTradeCheckResult | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const evaluate = useCallback(async (req: PreTradeCheckRequest) => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI.preTradeEvaluate(req);
+      setCheckResult(result);
+      return result;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const record = useCallback(async (data: Parameters<typeof window.electronAPI.preTradeRecord>[0]) => {
+    return window.electronAPI.preTradeRecord(data);
+  }, []);
+
+  const reset = useCallback(() => setCheckResult(null), []);
+
+  return { checkResult, loading, evaluate, record, reset };
 }

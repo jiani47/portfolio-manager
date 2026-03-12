@@ -12,6 +12,7 @@ import { SchwabStreamService } from './schwab-stream-service';
 import { parserRegistry, transactionParserRegistry, lotDetailsParserRegistry } from './parsers';
 import { AnalyticsService } from './analytics-service';
 import { SchedulerService } from './scheduler-service';
+import { PreTradeValidator } from './pre-trade-validator';
 import { AppSettings, ExcelImportResult, RefreshPricesResult } from '../shared/types';
 
 export function setupIpcHandlers(
@@ -25,7 +26,8 @@ export function setupIpcHandlers(
   streamService: SchwabStreamService | null,
   store: Store<{ settings: AppSettings }>,
   analyticsService?: AnalyticsService,
-  schedulerService?: SchedulerService
+  schedulerService?: SchedulerService,
+  preTradeValidator?: PreTradeValidator
 ): void {
   // Account handlers
   ipcMain.handle('db:accounts:list', () => db.listAccounts());
@@ -1056,6 +1058,17 @@ export function setupIpcHandlers(
 
   ipcMain.handle('schwab:cancel-order', async (_, accountNumber, orderId) => {
     return schwabService.cancelOrder(accountNumber, orderId);
+  });
+
+  // Pre-trade checklist
+  ipcMain.handle('pre-trade:evaluate', (_, req) => {
+    if (!preTradeValidator) return { book: 'unassigned', items: [] };
+    return preTradeValidator.evaluate(req);
+  });
+
+  ipcMain.handle('pre-trade:record', (_, data) => {
+    if (!preTradeValidator) return null;
+    return preTradeValidator.record(data);
   });
 
   // Schwab market data handler

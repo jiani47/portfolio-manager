@@ -201,6 +201,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   schwabCancelOrder: (accountNumber: string, orderId: string) => ipcRenderer.invoke('schwab:cancel-order', accountNumber, orderId),
   schwabTestMarketData: () => ipcRenderer.invoke('schwab:test-market-data'),
 
+  // Pre-trade checklist
+  preTradeEvaluate: (req: unknown) => ipcRenderer.invoke('pre-trade:evaluate', req),
+  preTradeRecord: (data: unknown) => ipcRenderer.invoke('pre-trade:record', data),
+
   // Streaming events (main -> renderer push)
   onStreamingQuote: (callback: (quote: unknown) => void) => {
     const handler = (_event: unknown, quote: unknown) => callback(quote);
