@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useSchwab, useAccounts } from '../hooks/useApi';
+import { useSchwab, useAccounts, usePreTradeCheck } from '../hooks/useApi';
 import type { SchwabOrderRequest, SchwabOrder } from '../../shared/types';
 
 type OrderFormData = {
@@ -62,6 +62,8 @@ export default function Orders() {
   const [showConfirm, setShowConfirm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const { checkResult, loading: checkLoading, evaluate, record, reset } = usePreTradeCheck();
+  const [acknowledged, setAcknowledged] = useState<Set<string>>(new Set());
 
   const schwabAccounts = accounts.filter(a => a.broker === 'Schwab');
 
@@ -90,10 +92,65 @@ export default function Orders() {
     return true;
   };
 
-  const handleReview = () => {
+  const handleReview = async () => {
     if (!isFormValid()) return;
+    setAcknowledged(new Set());
+    await evaluate({
+      symbol: form.symbol.toUpperCase().trim(),
+      instruction: form.instruction,
+      quantity: Number(form.quantity),
+      accountNumber: form.accountNumber,
+      price: showsPrice ? Number(form.price) : showsStopPrice ? Number(form.stopPrice) : undefined,
+    });
+  };
+
+  const handleChecklistProceed = async () => {
+    if (!checkResult) return;
+    const failedOrWarn = checkResult.items.filter(i => i.status !== 'pass');
+    const overrides = failedOrWarn.map(i => i.id);
+    const account = schwabAccounts.find(a => a.accountNumber === form.accountNumber);
+    await record({
+      orderSymbol: form.symbol.toUpperCase().trim(),
+      orderSide: form.instruction,
+      orderQty: Number(form.quantity),
+      accountId: account?.id || form.accountNumber,
+      book: checkResult.book,
+      items: checkResult.items,
+      overrides,
+      passed: true,
+    });
+    reset();
     setShowConfirm(true);
   };
+
+  const handleChecklistCancel = async () => {
+    if (checkResult) {
+      const account = schwabAccounts.find(a => a.accountNumber === form.accountNumber);
+      await record({
+        orderSymbol: form.symbol.toUpperCase().trim(),
+        orderSide: form.instruction,
+        orderQty: Number(form.quantity),
+        accountId: account?.id || form.accountNumber,
+        book: checkResult.book,
+        items: checkResult.items,
+        overrides: [],
+        passed: false,
+      });
+    }
+    reset();
+  };
+
+  const toggleAck = (id: string) => {
+    setAcknowledged(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const allAcknowledged = checkResult
+    ? checkResult.items.every(i => i.status === 'pass' || acknowledged.has(i.id))
+    : false;
 
   const handleConfirm = async () => {
     setSubmitting(true);
@@ -306,6 +363,73 @@ export default function Orders() {
           </button>
         </div>
       </div>
+
+      {/* Pre-Trade Checklist */}
+      {checkResult && !showConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg p-6 mx-4">
+            <h2 className="text-lg font-semibold text-gray-900 mb-1">Pre-Trade Checklist</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              {checkResult.book} book — {form.instruction} {form.quantity} {form.symbol.toUpperCase()}
+            </p>
+
+            <div className="space-y-2 mb-6">
+              {checkResult.items.map(item => (
+                <div
+                  key={item.id}
+                  className={`flex items-start gap-3 p-3 rounded-lg border ${
+                    item.status === 'pass' ? 'bg-green-50 border-green-200' :
+                    item.status === 'warn' ? 'bg-amber-50 border-amber-200' :
+                    'bg-red-50 border-red-200'
+                  }`}
+                >
+                  {item.status === 'pass' ? (
+                    <span className="text-green-600 mt-0.5 flex-shrink-0">&#10003;</span>
+                  ) : (
+                    <input
+                      type="checkbox"
+                      checked={acknowledged.has(item.id)}
+                      onChange={() => toggleAck(item.id)}
+                      className="mt-1 flex-shrink-0 rounded border-gray-300"
+                    />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className={`text-sm font-medium ${
+                      item.status === 'pass' ? 'text-green-800' :
+                      item.status === 'warn' ? 'text-amber-800' :
+                      'text-red-800'
+                    }`}>
+                      {item.label}
+                    </p>
+                    {item.detail && (
+                      <p className="text-xs text-gray-500 mt-0.5">{item.detail}</p>
+                    )}
+                    {item.type === 'manual' && item.status !== 'pass' && (
+                      <p className="text-xs text-gray-400 mt-0.5 italic">Acknowledge to proceed</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={handleChecklistCancel}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleChecklistProceed}
+                disabled={!allAcknowledged}
+                className="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:opacity-50"
+              >
+                Proceed to Order
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Confirmation Dialog */}
       {showConfirm && (
