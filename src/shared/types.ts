@@ -661,6 +661,7 @@ export interface SchwabOrder {
 export interface PortfolioAnalytics {
   beta: number;
   weightedBeta: number;
+  weightedBetaWithCash: number;
   volatility: number;
   sharpeRatio: number;
   maxDrawdown: number;

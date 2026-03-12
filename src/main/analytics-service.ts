@@ -41,9 +41,20 @@ export class AnalyticsService {
       alignedBenchmark.map(r => r.ret)
     );
 
-    // Weighted beta from positions
+    // Weighted beta from positions (equity-only weights, sum to 1.0)
     const positionBetas = this.getPositionBetas(days);
     const weightedBeta = positionBetas.reduce((sum, p) => sum + p.weightedBeta, 0);
+
+    // Weighted beta including cash (dilutes beta by cash proportion)
+    const positionWeights = this.db.getPositionWeights();
+    const equityMV = positionWeights.reduce((sum, p) => sum + p.marketValue, 0);
+    const cashPositions = this.db.listPositions();
+    const cashSecurities = this.db.listSecurities().filter(s => s.type === 'cash');
+    const cashIds = new Set(cashSecurities.map(s => s.id));
+    const cashMV = cashPositions.filter(p => cashIds.has(p.securityId)).reduce((sum, p) => sum + (p.quantity || 0), 0);
+    const totalMV = equityMV + cashMV;
+    const equityFraction = totalMV > 0 ? equityMV / totalMV : 1;
+    const weightedBetaWithCash = weightedBeta * equityFraction;
 
     // Drawdown
     const mvSeries = snapshots.map(s => ({ date: s.date, value: s.totalMv }));
@@ -58,6 +69,7 @@ export class AnalyticsService {
     return {
       beta,
       weightedBeta,
+      weightedBetaWithCash,
       volatility,
       sharpeRatio,
       maxDrawdown,
@@ -236,6 +248,7 @@ export class AnalyticsService {
     return {
       beta: 0,
       weightedBeta: 0,
+      weightedBetaWithCash: 0,
       volatility: 0,
       sharpeRatio: 0,
       maxDrawdown: 0,

@@ -2104,18 +2104,23 @@ export class Database {
   getPositionWeights(): Array<{ symbol: string; marketValue: number; weight: number }> {
     if (!this.db) throw new Error('Database not initialized');
     const rows = this.db.prepare(`
-      SELECT s.symbol, SUM(p.market_value) as market_value
+      SELECT s.symbol, SUM(p.quantity * COALESCE(ph.close_price, 0)) as market_value
       FROM positions p
       JOIN securities s ON p.security_id = s.id
+      LEFT JOIN (
+        SELECT security_id, close_price
+        FROM price_history ph1
+        WHERE date = (SELECT MAX(date) FROM price_history ph2 WHERE ph2.security_id = ph1.security_id)
+      ) ph ON p.security_id = ph.security_id
       WHERE p.quantity > 0 AND s.type != 'cash'
       GROUP BY s.symbol
       ORDER BY market_value DESC
     `).all() as Array<{ symbol: string; market_value: number }>;
-    const total = rows.reduce((sum, r) => sum + r.market_value, 0);
+    const total = rows.reduce((sum, r) => sum + (r.market_value || 0), 0);
     return rows.map(r => ({
       symbol: r.symbol,
-      marketValue: r.market_value,
-      weight: total > 0 ? r.market_value / total : 0,
+      marketValue: r.market_value || 0,
+      weight: total > 0 ? (r.market_value || 0) / total : 0,
     }));
   }
 

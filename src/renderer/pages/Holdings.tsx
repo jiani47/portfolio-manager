@@ -729,11 +729,21 @@ export default function Holdings() {
                 )}
                 {analytics?.weightedBeta != null && (
                   <div>
-                    <div className="text-sm text-gray-500">Portfolio Beta</div>
+                    <div className="text-sm text-gray-500">Equity Beta</div>
                     <div className={`text-xl font-semibold ${
                       analytics.weightedBeta > 1.2 ? 'text-red-600' : analytics.weightedBeta < 0.8 ? 'text-blue-600' : 'text-gray-700'
                     }`}>
                       {analytics.weightedBeta.toFixed(2)}
+                    </div>
+                  </div>
+                )}
+                {analytics?.weightedBetaWithCash != null && (
+                  <div>
+                    <div className="text-sm text-gray-500">Portfolio Beta</div>
+                    <div className={`text-xl font-semibold ${
+                      analytics.weightedBetaWithCash > 1.2 ? 'text-red-600' : analytics.weightedBetaWithCash < 0.8 ? 'text-blue-600' : 'text-gray-700'
+                    }`}>
+                      {analytics.weightedBetaWithCash.toFixed(2)}
                     </div>
                   </div>
                 )}
