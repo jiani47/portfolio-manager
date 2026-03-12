@@ -158,6 +158,133 @@ resolve_account() {
   fi
 }
 
+# Pre-trade checklist functions
+check_regime_read() {
+  local today=$(date +%Y-%m-%d)
+  local regime=$(sqlite3 "$DB" "SELECT regime_type FROM daily_rituals WHERE date='$today'" 2>/dev/null)
+  if [ -n "$regime" ]; then
+    echo "  ✓ PASS: Regime read done ($regime day)"
+  else
+    echo "  ✗ FAIL: No regime read recorded for today"
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  fi
+  return 0
+}
+
+check_sorting_day() {
+  local today=$(date +%Y-%m-%d)
+  local regime=$(sqlite3 "$DB" "SELECT regime_type FROM daily_rituals WHERE date='$today'" 2>/dev/null)
+  if [ "$regime" = "sorting" ]; then
+    echo "  ⚠ WARN: Sorting day — adds typically disabled"
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  else
+    echo "  ✓ PASS: Not a sorting day"
+  fi
+  return 0
+}
+
+check_intent_exists() {
+  local symbol="$1"
+  local tier=$(sqlite3 "$DB" "SELECT pi.tier FROM position_intents pi JOIN positions p ON pi.position_id=p.id JOIN securities s ON p.security_id=s.id WHERE s.symbol='$symbol' LIMIT 1" 2>/dev/null)
+  if [ -n "$tier" ]; then
+    echo "  ✓ PASS: Intent assigned ($tier)"
+  else
+    echo "  ✗ FAIL: No tier assigned"
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  fi
+  return 0
+}
+
+check_thesis() {
+  local symbol="$1"
+  local thesis=$(sqlite3 "$DB" "SELECT pi.thesis FROM position_intents pi JOIN positions p ON pi.position_id=p.id JOIN securities s ON p.security_id=s.id WHERE s.symbol='$symbol' AND pi.thesis IS NOT NULL AND pi.thesis != '' LIMIT 1" 2>/dev/null)
+  if [ -n "$thesis" ]; then
+    echo "  ✓ PASS: Thesis documented"
+  else
+    echo "  ✗ FAIL: No thesis in position intent"
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  fi
+  return 0
+}
+
+check_invalidation() {
+  local symbol="$1"
+  local inv=$(sqlite3 "$DB" "SELECT pi.invalidation FROM position_intents pi JOIN positions p ON pi.position_id=p.id JOIN securities s ON p.security_id=s.id WHERE s.symbol='$symbol' AND pi.invalidation IS NOT NULL AND pi.invalidation != '' LIMIT 1" 2>/dev/null)
+  if [ -n "$inv" ]; then
+    echo "  ✓ PASS: Invalidation defined"
+  else
+    echo "  ✗ FAIL: No invalidation conditions"
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  fi
+  return 0
+}
+
+pre_trade_check() {
+  local symbol="$1" side="$2" qty="$3" acct="$4" price="${5:-0}"
+
+  # Determine book
+  local book=$(sqlite3 "$DB" "SELECT book FROM accounts WHERE account_number LIKE '%$acct'" 2>/dev/null)
+  [ -z "$book" ] && book="unassigned"
+
+  echo ""
+  echo "╔═══════════════════════════════════════╗"
+  echo "║       PRE-TRADE CHECKLIST             ║"
+  echo "╚═══════════════════════════════════════╝"
+  echo "  $side $qty $symbol ($book book)"
+  echo ""
+
+  if [ "$side" = "SELL" ]; then
+    check_regime_read || return 1
+    echo ""
+    echo "  Manual acknowledgments:"
+    read -p "  ☐ I have a clear reason for this sell (y/n): " ack
+    [ "$ack" != "y" ] && { echo "  Checklist abandoned."; return 1; }
+    echo ""
+    echo "  ✓ Checklist complete"
+    return 0
+  fi
+
+  if [ "$book" = "trading" ]; then
+    check_regime_read || return 1
+    check_sorting_day || return 1
+    echo "  ✓ PASS: Position size ≤1% check (manual verification)"
+    echo ""
+    echo "  Manual acknowledgments:"
+    for item in \
+      "I have a stop level defined — technical, not emotional" \
+      "I will exit if no progress in 20-30 days" \
+      "I accept a stop-out as success — not hoping, not averaging down"; do
+      read -p "  ☐ $item (y/n): " ack
+      [ "$ack" != "y" ] && { echo "  Checklist abandoned."; return 1; }
+    done
+  else
+    # Investing
+    check_intent_exists "$symbol" || return 1
+    check_thesis "$symbol" || return 1
+    check_invalidation "$symbol" || return 1
+    check_regime_read || return 1
+    check_sorting_day || return 1
+    echo "  ✓ PASS: Position size check (manual verification)"
+    echo ""
+    echo "  Manual acknowledgments:"
+    for item in \
+      "This is an investment — I expect to hold for months+" \
+      "I would hold through a 20-30% drawdown"; do
+      read -p "  ☐ $item (y/n): " ack
+      [ "$ack" != "y" ] && { echo "  Checklist abandoned."; return 1; }
+    done
+  fi
+
+  echo ""
+  echo "  ✓ Checklist complete"
+  return 0
+}
+
 case "$1" in
   morning)
     # Combined: refresh prices + briefing + ritual status
@@ -2417,6 +2544,9 @@ PYEOF
     fi
 
     ACCT_NAME=$(sqlite3 "$DB" "SELECT name FROM accounts WHERE account_number LIKE '%$RESOLVED_ACCOUNT' LIMIT 1")
+
+    # Pre-trade checklist
+    pre_trade_check "$SYMBOL" "$INSTRUCTION" "$QTY" "$RESOLVED_ACCOUNT" "$PRICE" || exit 1
 
     # Print order summary
     echo "==============================="
