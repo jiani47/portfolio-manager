@@ -24,6 +24,7 @@ import {
   WatchlistItem,
   Monitor,
   TaskRunRecord,
+  PreTradeCheckRecord,
 } from '../shared/types';
 
 export class Database {
@@ -539,6 +540,22 @@ export class Database {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_task_runs_task ON scheduler_task_runs(task_id, started_at DESC);
+    `);
+
+    // Pre-trade checks table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pre_trade_checks (
+        id TEXT PRIMARY KEY,
+        order_symbol TEXT NOT NULL,
+        order_side TEXT NOT NULL,
+        order_qty REAL NOT NULL,
+        account_id TEXT NOT NULL,
+        book TEXT NOT NULL,
+        checks_json TEXT NOT NULL,
+        overrides TEXT NOT NULL DEFAULT '[]',
+        passed INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
     `);
 
     // Sync watchlist monitors on startup
@@ -2753,4 +2770,15 @@ export class Database {
       updatedAt: r.updated_at as string,
     };
   };
+
+  // Pre-trade check operations
+  recordPreTradeCheck(record: Omit<PreTradeCheckRecord, 'id'>): string {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    this.db.prepare(`
+      INSERT INTO pre_trade_checks (id, order_symbol, order_side, order_qty, account_id, book, checks_json, overrides, passed, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, record.orderSymbol, record.orderSide, record.orderQty, record.accountId, record.book, record.checksJson, record.overrides, record.passed ? 1 : 0, record.createdAt);
+    return id;
+  }
 }

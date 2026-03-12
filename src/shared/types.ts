@@ -743,3 +743,38 @@ export interface TaskResult {
   message: string;
   details?: Record<string, unknown>;
 }
+
+// Pre-trade checklist
+export interface PreTradeCheckItem {
+  id: string;
+  label: string;
+  type: 'auto' | 'manual';
+  status: 'pass' | 'fail' | 'warn';
+  detail?: string;
+}
+
+export interface PreTradeCheckRequest {
+  symbol: string;
+  instruction: 'BUY' | 'SELL';
+  quantity: number;
+  accountNumber: string;
+  price?: number;
+}
+
+export interface PreTradeCheckResult {
+  book: 'investing' | 'trading' | 'unassigned';
+  items: PreTradeCheckItem[];
+}
+
+export interface PreTradeCheckRecord {
+  id: string;
+  orderSymbol: string;
+  orderSide: string;
+  orderQty: number;
+  accountId: string;
+  book: string;
+  checksJson: string;
+  overrides: string;
+  passed: boolean;
+  createdAt: string;
+}
