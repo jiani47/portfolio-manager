@@ -2468,7 +2468,10 @@ PYEOF
 
   sync-transactions)
     # Sync transactions from Schwab API
+    # Usage: sync-transactions [days] [end-date]
+    # Example: sync-transactions 180 2025-09-15
     DAYS=${2:-30}
+    END_DATE=${3:-}
     schwab_ensure_token
 
     # Get account hashes
@@ -2506,7 +2509,11 @@ cur.execute('SELECT id, account_number FROM accounts')
 for row in cur.fetchall():
     acct_map[row[1]] = row[0]
 
-end_date = datetime.now(timezone.utc)
+end_date_str = "$END_DATE" if "$END_DATE" else ""
+if end_date_str:
+    end_date = datetime.strptime(end_date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+else:
+    end_date = datetime.now(timezone.utc)
 start_date = end_date - timedelta(days=days)
 start_str = start_date.strftime('%Y-%m-%dT00:00:00.000Z')
 end_str = end_date.strftime('%Y-%m-%dT23:59:59.000Z')
@@ -2567,7 +2574,7 @@ for acct in accounts:
                             'OPTION': 'option', 'FIXED_INCOME': 'bond', 'CASH_EQUIVALENT': 'cash'}
                 sec_type = type_map.get(asset_type, 'other')
                 sec_id = str(uuid.uuid4())
-                cur.execute('INSERT INTO securities (id, symbol, name, type, currency, created_at, updated_at) VALUES (?,?,?,?,?,datetime("now"),datetime("now"))',
+                cur.execute('INSERT INTO securities (id, symbol, name, type, currency, created_at) VALUES (?,?,?,?,?,datetime("now"))',
                     (sec_id, symbol, instrument.get('description', symbol), sec_type, 'USD'))
                 sec_map[symbol] = sec_id
 

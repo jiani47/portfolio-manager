@@ -2787,11 +2787,13 @@ export class Database {
   getClosedTrades(): ClosedTrade[] {
     if (!this.db) throw new Error('Database not initialized');
 
+    // Include transfer_in (price=0) to detect stock splits
     const rows = this.db.prepare(`
       SELECT t.account_id, t.security_id, s.symbol, t.type, t.date, t.quantity, t.price
       FROM transactions t
       JOIN securities s ON t.security_id = s.id
       WHERE t.type IN ('buy', 'sell')
+         OR (t.type = 'transfer_in' AND t.price = 0 AND t.quantity > 0)
       ORDER BY t.date ASC, t.type ASC
     `).all() as Array<{
       account_id: string; security_id: string; symbol: string;
@@ -2811,6 +2813,22 @@ export class Database {
       const buyQueue: Array<{ date: string; price: number; remaining: number }> = [];
 
       for (const txn of txns) {
+        if (txn.type === 'transfer_in' && txn.price === 0) {
+          // Stock split: adjust all existing buy lots
+          const existingQty = buyQueue.reduce((s, l) => s + l.remaining, 0);
+          if (existingQty > 0) {
+            const ratio = (existingQty + txn.quantity) / existingQty;
+            // Only apply if ratio looks like a split (>= 1.5 and roughly a whole number)
+            const roundedRatio = Math.round(ratio);
+            if (roundedRatio >= 2 && Math.abs(ratio - roundedRatio) < 0.15) {
+              for (const lot of buyQueue) {
+                lot.price /= roundedRatio;
+                lot.remaining *= roundedRatio;
+              }
+            }
+          }
+          continue;
+        }
         if (txn.type === 'buy') {
           buyQueue.push({ date: txn.date, price: txn.price, remaining: txn.quantity });
         } else if (txn.type === 'sell') {
