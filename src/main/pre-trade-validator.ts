@@ -48,6 +48,8 @@ export class PreTradeValidator {
   private sellChecks(req: PreTradeCheckRequest): PreTradeCheckItem[] {
     const items: PreTradeCheckItem[] = [];
     items.push(this.checkRegimeRead());
+    items.push(this.checkSellFrequency(req.symbol));
+    items.push(this.checkRapidFlip(req.symbol, 'sell'));
     items.push({
       id: 'sell-reason',
       label: 'I have a clear reason for this sell',
@@ -64,6 +66,8 @@ export class PreTradeValidator {
     items.push(this.checkInvalidationDefined(req.symbol));
     items.push(this.checkRegimeRead());
     items.push(this.checkSortingDay());
+    items.push(this.checkReentryCooldown(req.symbol));
+    items.push(this.checkRapidFlip(req.symbol, 'buy'));
     items.push(this.checkPositionSize(req, 'investing'));
     items.push({
       id: 'invest-hold-months',
@@ -85,6 +89,8 @@ export class PreTradeValidator {
     items.push(this.checkTradingAccount());
     items.push(this.checkRegimeRead());
     items.push(this.checkSortingDay());
+    items.push(this.checkReentryCooldown(req.symbol));
+    items.push(this.checkRapidFlip(req.symbol, 'buy'));
     items.push(this.checkPositionSize(req, 'trading'));
     items.push({
       id: 'trade-stop-defined',
@@ -174,6 +180,74 @@ export class PreTradeValidator {
 
   private checkTradingAccount(): PreTradeCheckItem {
     return { id: 'trading-account', label: 'Placing in trading account', type: 'auto', status: 'pass' };
+  }
+
+  /** Warn if buying a symbol you sold within the last 14 days */
+  private checkReentryCooldown(symbol: string): PreTradeCheckItem {
+    const lastSell = this.db.getLastSellDate(symbol);
+    if (!lastSell) {
+      return { id: 'reentry-cooldown', label: 'Re-entry cooldown (no prior sells)', type: 'auto', status: 'pass' };
+    }
+    const daysSinceSell = Math.round((Date.now() - new Date(lastSell).getTime()) / 86400000);
+    if (daysSinceSell < 14) {
+      return {
+        id: 'reentry-cooldown',
+        label: `Re-entry cooldown — you sold ${symbol} ${daysSinceSell}d ago`,
+        type: 'auto',
+        status: 'warn',
+        detail: `Last sell: ${lastSell}. Data shows re-entries within 14d are premature 70% of the time.`,
+      };
+    }
+    return { id: 'reentry-cooldown', label: `Re-entry cooldown clear (${daysSinceSell}d since last sell)`, type: 'auto', status: 'pass' };
+  }
+
+  /** Warn if selling >3x this month (overtrading signal) */
+  private checkSellFrequency(symbol: string): PreTradeCheckItem {
+    const count = this.db.getSellCountThisMonth(symbol);
+    if (count >= 3) {
+      return {
+        id: 'sell-frequency',
+        label: `Overtrading warning — ${count} sells of ${symbol} this month`,
+        type: 'auto',
+        status: 'warn',
+        detail: `${count} sells already this month. If selling the same name >3x/month, the thesis may be broken.`,
+      };
+    }
+    return { id: 'sell-frequency', label: `Sell frequency OK (${count} this month)`, type: 'auto', status: 'pass' };
+  }
+
+  /** Warn on rapid round-trips: buying within 5d of selling, or selling within 5d of buying */
+  private checkRapidFlip(symbol: string, side: 'buy' | 'sell'): PreTradeCheckItem {
+    if (side === 'buy') {
+      const lastSell = this.db.getLastSellDate(symbol);
+      if (lastSell) {
+        const days = Math.round((Date.now() - new Date(lastSell).getTime()) / 86400000);
+        if (days <= 5) {
+          return {
+            id: 'rapid-flip',
+            label: `Rapid flip — sold ${symbol} ${days}d ago, now buying back`,
+            type: 'auto',
+            status: 'warn',
+            detail: `Rapid flips on conviction names destroy value. Data shows <5d round-trips have 27-31% win rate.`,
+          };
+        }
+      }
+    } else {
+      const lastBuy = this.db.getLastBuyDate(symbol);
+      if (lastBuy) {
+        const days = Math.round((Date.now() - new Date(lastBuy).getTime()) / 86400000);
+        if (days <= 5) {
+          return {
+            id: 'rapid-flip',
+            label: `Rapid flip — bought ${symbol} ${days}d ago, now selling`,
+            type: 'auto',
+            status: 'warn',
+            detail: `Selling within 5 days of buying. Your long holds (90d+) have 57% win rate vs 33% for <30d.`,
+          };
+        }
+      }
+    }
+    return { id: 'rapid-flip', label: 'No rapid flip detected', type: 'auto', status: 'pass' };
   }
 
   private checkPositionSize(req: PreTradeCheckRequest, book: 'investing' | 'trading'): PreTradeCheckItem {

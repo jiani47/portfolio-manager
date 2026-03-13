@@ -2873,6 +2873,45 @@ export class Database {
     return closedTrades;
   }
 
+  // Pre-trade behavioral checks
+
+  /** Returns the most recent sell date for a symbol across all accounts, or null */
+  getLastSellDate(symbol: string): string | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT MAX(t.date) as last_sell
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      WHERE s.symbol = ? AND t.type = 'sell'
+    `).get(symbol) as { last_sell: string | null } | undefined;
+    return row?.last_sell || null;
+  }
+
+  /** Returns the count of sell transactions for a symbol in the current calendar month */
+  getSellCountThisMonth(symbol: string): number {
+    if (!this.db) throw new Error('Database not initialized');
+    const monthStart = new Date().toISOString().slice(0, 7) + '-01'; // YYYY-MM-01
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as cnt
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      WHERE s.symbol = ? AND t.type = 'sell' AND t.date >= ?
+    `).get(symbol, monthStart) as { cnt: number };
+    return row.cnt;
+  }
+
+  /** Returns the most recent buy date for a symbol (to detect rapid flips on sells) */
+  getLastBuyDate(symbol: string): string | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT MAX(t.date) as last_buy
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      WHERE s.symbol = ? AND t.type = 'buy'
+    `).get(symbol) as { last_buy: string | null } | undefined;
+    return row?.last_buy || null;
+  }
+
   getRawDb(): BetterSqlite3.Database {
     if (!this.db) throw new Error('Database not initialized');
     return this.db;
