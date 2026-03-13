@@ -2854,4 +2854,9 @@ export class Database {
 
     return closedTrades;
   }
+
+  getRawDb(): BetterSqlite3.Database {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db;
+  }
 }
