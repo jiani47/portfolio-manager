@@ -226,7 +226,11 @@ export default function Analytics() {
                     </div>
                     <div className="card">
                       <p className="stat-label">Sharpe Ratio</p>
-                      <p className={`stat-value ${sharpeColor(analytics!.sharpeRatio)}`}>{analytics!.sharpeRatio.toFixed(2)}</p>
+                      {analytics!.dataPoints >= 30 ? (
+                        <p className={`stat-value ${sharpeColor(analytics!.sharpeRatio)}`}>{analytics!.sharpeRatio.toFixed(2)}</p>
+                      ) : (
+                        <p className="text-xs text-gray-400 mt-2">Insufficient data, requires minimum 30 days</p>
+                      )}
                     </div>
                     <div className="card">
                       <p className="stat-label">Volatility</p>
@@ -253,7 +257,11 @@ export default function Analytics() {
                     </div>
                     <div className="card">
                       <p className="stat-label">Annualized Return</p>
-                      <p className={`stat-value ${returnColor(analytics!.annualizedReturn)}`}>{formatPct(analytics!.annualizedReturn)}</p>
+                      {analytics!.dataPoints >= 30 ? (
+                        <p className={`stat-value ${returnColor(analytics!.annualizedReturn)}`}>{formatPct(analytics!.annualizedReturn)}</p>
+                      ) : (
+                        <p className="text-xs text-gray-400 mt-2">Insufficient data, requires minimum 30 days</p>
+                      )}
                     </div>
                     <div className="card">
                       <p className="stat-label">SPY Return</p>

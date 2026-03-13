@@ -230,10 +230,10 @@ check_reentry_cooldown() {
   if [ -n "$last_sell" ] && [ "$last_sell" != "" ]; then
     local days_ago=$(( ($(date +%s) - $(date -j -f "%Y-%m-%d" "$last_sell" +%s 2>/dev/null || echo 0)) / 86400 ))
     if [ "$days_ago" -lt 14 ] 2>/dev/null; then
-      echo "  ⚠ WARN: Re-entry cooldown — you sold $symbol ${days_ago}d ago (last: $last_sell)"
-      echo "          Data shows re-entries within 14d are premature 70% of the time."
-      read -p "    Override? (y/n): " ov
-      [ "$ov" != "y" ] && return 1
+      local wait_days=$((14 - days_ago))
+      echo "  ✗ BLOCKED: Re-entry cooldown — you sold $symbol ${days_ago}d ago (last: $last_sell)"
+      echo "             Re-entries within 14d are premature 70% of the time. Wait ${wait_days} more days."
+      return 1
     else
       echo "  ✓ PASS: Re-entry cooldown clear (${days_ago}d since last sell)"
     fi
@@ -243,23 +243,8 @@ check_reentry_cooldown() {
   return 0
 }
 
-check_sell_frequency() {
-  local symbol="$1"
-  local month_start=$(date +%Y-%m)-01
-  local count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM transactions t JOIN securities s ON t.security_id=s.id WHERE s.symbol='$symbol' AND t.type='sell' AND t.date>='$month_start'" 2>/dev/null)
-  if [ "$count" -ge 3 ] 2>/dev/null; then
-    echo "  ⚠ WARN: Overtrading — $count sells of $symbol this month"
-    echo "          If selling >3x/month, the thesis may be broken."
-    read -p "    Override? (y/n): " ov
-    [ "$ov" != "y" ] && return 1
-  else
-    echo "  ✓ PASS: Sell frequency OK ($count this month)"
-  fi
-  return 0
-}
-
 check_rapid_flip() {
-  local symbol="$1" side="$2"
+  local symbol="$1" side="$2" sell_price="${3:-0}"
   if [ "$side" = "buy" ]; then
     local last_sell=$(sqlite3 "$DB" "SELECT MAX(t.date) FROM transactions t JOIN securities s ON t.security_id=s.id WHERE s.symbol='$symbol' AND t.type='sell'" 2>/dev/null)
     if [ -n "$last_sell" ] && [ "$last_sell" != "" ]; then
@@ -276,10 +261,17 @@ check_rapid_flip() {
     if [ -n "$last_buy" ] && [ "$last_buy" != "" ]; then
       local days_ago=$(( ($(date +%s) - $(date -j -f "%Y-%m-%d" "$last_buy" +%s 2>/dev/null || echo 0)) / 86400 ))
       if [ "$days_ago" -le 5 ] 2>/dev/null; then
-        echo "  ⚠ WARN: Rapid flip — bought $symbol ${days_ago}d ago, now selling"
-        echo "          Your 90d+ holds have 57% win rate vs 33% for <30d."
-        read -p "    Override? (y/n): " ov
-        [ "$ov" != "y" ] && return 1
+        # Only warn if materializing a loss
+        local avg_cost=$(sqlite3 "$DB" "SELECT CASE WHEN p.quantity > 0 THEN p.cost_basis / p.quantity ELSE 0 END FROM positions p JOIN securities s ON p.security_id=s.id WHERE s.symbol='$symbol' LIMIT 1" 2>/dev/null)
+        if [ -n "$avg_cost" ] && [ "$sell_price" != "0" ]; then
+          local is_loss=$(python3 -c "print(1 if $sell_price < $avg_cost else 0)" 2>/dev/null)
+          if [ "$is_loss" = "1" ]; then
+            echo "  ⚠ WARN: Rapid flip at a loss — bought $symbol ${days_ago}d ago (avg cost \$$avg_cost, selling at \$$sell_price)"
+            echo "          Your 90d+ holds have 57% win rate vs 33% for <30d."
+            read -p "    Override? (y/n): " ov
+            [ "$ov" != "y" ] && return 1
+          fi
+        fi
       fi
     fi
   fi
@@ -303,8 +295,7 @@ pre_trade_check() {
 
   if [ "$side" = "SELL" ]; then
     check_regime_read || return 1
-    check_sell_frequency "$symbol" || return 1
-    check_rapid_flip "$symbol" "sell" || return 1
+    check_rapid_flip "$symbol" "sell" "$price" || return 1
     echo ""
     echo "  Manual acknowledgments:"
     read -p "  ☐ I have a clear reason for this sell (y/n): " ack

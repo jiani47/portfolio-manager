@@ -48,8 +48,7 @@ export class PreTradeValidator {
   private sellChecks(req: PreTradeCheckRequest): PreTradeCheckItem[] {
     const items: PreTradeCheckItem[] = [];
     items.push(this.checkRegimeRead());
-    items.push(this.checkSellFrequency(req.symbol));
-    items.push(this.checkRapidFlip(req.symbol, 'sell'));
+    items.push(this.checkRapidFlip(req.symbol, 'sell', req.price));
     items.push({
       id: 'sell-reason',
       label: 'I have a clear reason for this sell',
@@ -182,7 +181,7 @@ export class PreTradeValidator {
     return { id: 'trading-account', label: 'Placing in trading account', type: 'auto', status: 'pass' };
   }
 
-  /** Warn if buying a symbol you sold within the last 14 days */
+  /** HARD BLOCK: no re-entry within 14 days of a sell */
   private checkReentryCooldown(symbol: string): PreTradeCheckItem {
     const lastSell = this.db.getLastSellDate(symbol);
     if (!lastSell) {
@@ -194,30 +193,15 @@ export class PreTradeValidator {
         id: 'reentry-cooldown',
         label: `Re-entry cooldown — you sold ${symbol} ${daysSinceSell}d ago`,
         type: 'auto',
-        status: 'warn',
-        detail: `Last sell: ${lastSell}. Data shows re-entries within 14d are premature 70% of the time.`,
+        status: 'fail',
+        detail: `Last sell: ${lastSell}. BLOCKED: Re-entries within 14d are premature 70% of the time. Wait ${14 - daysSinceSell} more days.`,
       };
     }
     return { id: 'reentry-cooldown', label: `Re-entry cooldown clear (${daysSinceSell}d since last sell)`, type: 'auto', status: 'pass' };
   }
 
-  /** Warn if selling >3x this month (overtrading signal) */
-  private checkSellFrequency(symbol: string): PreTradeCheckItem {
-    const count = this.db.getSellCountThisMonth(symbol);
-    if (count >= 3) {
-      return {
-        id: 'sell-frequency',
-        label: `Overtrading warning — ${count} sells of ${symbol} this month`,
-        type: 'auto',
-        status: 'warn',
-        detail: `${count} sells already this month. If selling the same name >3x/month, the thesis may be broken.`,
-      };
-    }
-    return { id: 'sell-frequency', label: `Sell frequency OK (${count} this month)`, type: 'auto', status: 'pass' };
-  }
-
-  /** Warn on rapid round-trips: buying within 5d of selling, or selling within 5d of buying */
-  private checkRapidFlip(symbol: string, side: 'buy' | 'sell'): PreTradeCheckItem {
+  /** Warn on rapid sell flip only when materializing a loss */
+  private checkRapidFlip(symbol: string, side: 'buy' | 'sell', sellPrice?: number): PreTradeCheckItem {
     if (side === 'buy') {
       const lastSell = this.db.getLastSellDate(symbol);
       if (lastSell) {
@@ -237,17 +221,32 @@ export class PreTradeValidator {
       if (lastBuy) {
         const days = Math.round((Date.now() - new Date(lastBuy).getTime()) / 86400000);
         if (days <= 5) {
-          return {
-            id: 'rapid-flip',
-            label: `Rapid flip — bought ${symbol} ${days}d ago, now selling`,
-            type: 'auto',
-            status: 'warn',
-            detail: `Selling within 5 days of buying. Your long holds (90d+) have 57% win rate vs 33% for <30d.`,
-          };
+          // Only warn if materializing a loss
+          const avgCost = this.getAvgCostBasis(symbol);
+          if (avgCost && sellPrice && sellPrice < avgCost) {
+            return {
+              id: 'rapid-flip',
+              label: `Rapid flip at a loss — bought ${symbol} ${days}d ago (avg cost $${avgCost.toFixed(2)}, selling at $${sellPrice.toFixed(2)})`,
+              type: 'auto',
+              status: 'warn',
+              detail: `Selling within 5 days of buying at a loss. Your long holds (90d+) have 57% win rate vs 33% for <30d.`,
+            };
+          }
         }
       }
     }
     return { id: 'rapid-flip', label: 'No rapid flip detected', type: 'auto', status: 'pass' };
+  }
+
+  /** Get average cost basis for a symbol from current positions */
+  private getAvgCostBasis(symbol: string): number | null {
+    const securities = this.db.listSecurities();
+    const security = securities.find(s => s.symbol === symbol);
+    if (!security) return null;
+    const positions = this.db.listPositions();
+    const position = positions.find(p => p.securityId === security.id);
+    if (!position || !position.costBasis || !position.quantity || position.quantity === 0) return null;
+    return position.costBasis / position.quantity;
   }
 
   private checkPositionSize(req: PreTradeCheckRequest, book: 'investing' | 'trading'): PreTradeCheckItem {

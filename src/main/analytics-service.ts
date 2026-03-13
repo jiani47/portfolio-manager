@@ -30,10 +30,16 @@ export class AnalyticsService {
       ? (snapshots[snapshots.length - 1].totalMv - snapshots[0].totalMv) / snapshots[0].totalMv
       : 0;
 
-    const annualizedReturn = this.annualizeReturn(totalReturn, snapshots.length);
     const volatility = this.computeVolatility(alignedPortfolio.map(r => r.ret));
     const riskFreeRate = 0.05;
-    const sharpeRatio = volatility > 0 ? (annualizedReturn - riskFreeRate) / volatility : 0;
+    // Only annualize when we have enough data (30+ trading days); otherwise raw return
+    const annualizedReturn = snapshots.length >= 30
+      ? this.annualizeReturn(totalReturn, snapshots.length)
+      : totalReturn;
+    // Sharpe is meaningless with < 30 data points
+    const sharpeRatio = (volatility > 0 && alignedPortfolio.length >= 30)
+      ? (annualizedReturn - riskFreeRate) / volatility
+      : 0;
 
     // Beta
     const beta = this.computeBeta(
