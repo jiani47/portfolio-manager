@@ -175,33 +175,33 @@ One-sentence journal stored in ritual record.
 
 ---
 
-## Phase 7: Pre-Trade Checklists
+## Phase 7: Pre-Trade Checklists ✅
 
 **Goal:** Interactive gate before any order placement. Different checklists for investing vs trading accounts.
 
-### 7.1 Investing Account Checklist
+### 7.1 Investing Account Checklist ✅
 
 Before any add/entry in the investing book:
-- Intent confirmation (not a trade, expect to hold months+)
-- Tier & role clarity (assigned tier, within limits)
-- Ranking discipline (justifies capital over existing names)
-- Thesis quality (moat articulated, failure conditions defined)
-- Execution sanity (adding on weakness, building position intentionally)
-- Final gate: "If this goes down 20-30%, would I still own it?"
+- Intent confirmed (tier assigned)
+- Thesis documented, invalidation defined
+- Regime read done, sorting day awareness (warn, not block)
+- Position size within tier limits (Core ≤25%, Growth ≤10%, Starter ≤5%)
+- Manual: expect to hold months+, would hold through 20-30% drawdown
 
-### 7.2 Trading Account Checklist
+### 7.2 Trading Account Checklist ✅
 
 Before any trade entry:
-- Mandate check (separate account, not an investment)
-- Setup qualification (momentum leader, entry style selected)
-- Invalidation defined (stop level, technical not emotional)
-- Sizing discipline (<=1%, no averaging down, within concurrent limit)
-- Time discipline (exit if no progress in 20-30 days)
-- Mental check (not hoping, accept stop-out as success)
+- Separate account confirmed
+- Regime read done, sorting day awareness
+- Position size ≤1% of portfolio
+- Manual: stop defined, time discipline (20-30 days), accept stop-out
 
-### 7.3 Integration with Orders Page
+### 7.3 Integration ✅
 
-Checklist must be completed before order submission. Checklist responses stored with the order for audit trail.
+- Orders page: checklist modal between Review and Confirm, with acknowledge/override
+- CLI: `pm-cli.sh buy/sell` runs checklist before confirmation prompt
+- Audit trail: all checklist results stored in `pre_trade_checks` table
+- Soft gate: all items are warnings with override, never hard blocks
 
 ---
 
@@ -243,13 +243,13 @@ Not alerts — questions:
 
 ---
 
-## Phase 9: Post-Mortem & Review
+## Phase 9: Transaction Analysis & Post-Mortems
 
-**Goal:** Structured review of wins and losses to build institutional memory.
+**Goal:** Structured review of every closed position. Win/loss classification, pattern detection, and institutional memory that compounds over time.
 
 ### 9.1 Post-Mortem Template
 
-Mandatory for large losses or big wins:
+For every closed position (mandatory for large losses or big wins):
 - Original intent (investment vs trade, tier/setup)
 - Thesis vs reality (what happened vs what was expected)
 - Rule adherence audit (sizing, stops, no averaging down, no thesis upgrade)
@@ -257,13 +257,123 @@ Mandatory for large losses or big wins:
 - One concrete change for next time
 - Classification: good loss / bad loss / good win / bad win
 
-### 9.2 Pattern Detection
+### 9.2 Transaction Analytics
 
-Over time, surface patterns:
+Structured analysis of trading history:
+- Win/loss rate by tier, by book, by sector
+- Average hold period by book and outcome
+- Entry/exit timing analysis (did you buy weakness, sell strength?)
+- P&L attribution: which tiers/strategies generate returns vs destroy value
+- Realized vs unrealized gain tracking per position
+
+### 9.3 Pattern Detection
+
+Surface behavioral patterns over time:
 - Most common error type
-- Win/loss rate by tier
-- Average hold period by book
-- Rule violation frequency
+- "You tend to sell Growth tier too early"
+- "Your Starter→Growth promotions outperform by X%"
+- Rule violation frequency (checklist overrides, stop dishonoring)
+- Regime correlation: which regime types lead to best/worst decisions
+
+### 9.4 Trade Journal
+
+Automated trade journal from transaction + ritual + checklist data:
+- Every trade annotated with: regime at time, checklist result, rationale
+- Searchable by symbol, date range, outcome
+- CLI: `pm-cli.sh trade-review [symbol]` — full history with context
+
+---
+
+## Phase 10: Portfolio Optimization & Exposure Analysis
+
+**Goal:** Quantitative analysis of portfolio construction. Identify concentration risks, factor exposures, and diversification opportunities.
+
+### 10.1 Correlation & Factor Analysis
+
+- Correlation matrix across all holdings (from price_history)
+- Sector/industry concentration heatmap
+- Factor exposure decomposition (growth vs value, large vs small, US vs international)
+- Overlap detection: "GOOG and MSFT are 0.85 correlated — you're doubling up on big tech"
+
+### 10.2 Portfolio Optimization
+
+- Efficient frontier analysis using historical returns
+- "What-if" scenarios: adding/removing a position and impact on Sharpe ratio
+- Suggest alternative tickers that improve risk-adjusted returns
+- Constraint-aware: respect tier limits, book designations, thesis requirements
+- CLI: `pm-cli.sh optimize` — propose Sharpe-improving changes
+
+### 10.3 Stress Testing & Scenario Analysis
+
+- Historical stress tests: "how would this portfolio have performed in 2020 COVID crash?"
+- Factor shock scenarios: "what if rates rise 100bps?" (using rate sensitivity betas)
+- Drawdown simulation based on current portfolio beta and vol
+- Tail risk / VaR estimates from historical return distribution
+
+### 10.4 Rebalancing Suggestions
+
+- Drift analysis: current weights vs target tier allocations
+- Tax-efficient rebalancing suggestions (harvest losses, avoid wash sales)
+- "Your Core tier is 38% — target is 50%. Consider adding to GOOG/TSM/NVDA"
+
+---
+
+## Phase 11: Equity Research Engine
+
+**Goal:** Structured research workflow that builds deep, living thesis documents. Not recommendations — evidence collection and thesis validation.
+
+### 11.1 Research Templates
+
+- Standardized research framework: business model, moat analysis, financials, risks, valuation
+- Auto-populated data sections (financials from API, technicals from price_history)
+- Peer comparison tables (same sector/industry)
+- Research stored in `docs/positions/<SYMBOL>/`
+
+### 11.2 Thesis Scoring & Tracking
+
+- Track bull/bear criteria fulfillment over time
+- "3 of 5 bull case items confirmed, 1 of 4 bear case items triggered"
+- Visual thesis health dashboard per position
+- Alert when thesis score changes materially
+
+### 11.3 Earnings Workflow
+
+- Pre-earnings: key metrics to watch, consensus estimates, thesis implications
+- Post-earnings: actual vs expected, thesis impact assessment
+- Auto-pull earnings data and flag surprises
+- Earnings history stored per position
+
+### 11.4 Research Integration
+
+- Link research docs to position intents and monitors
+- Surface relevant research during pre-trade checklist
+- "Your thesis for KKR mentions credit cycle risk — here's the latest research from 2026-03-12"
+
+---
+
+## Phase 12: Risk Analysis & Monitoring
+
+**Goal:** Continuous portfolio risk monitoring with proactive alerts when risk parameters change.
+
+### 12.1 Risk Dashboard
+
+- Real-time portfolio beta, volatility, Sharpe (partially done in analytics)
+- Sector concentration with limits and alerts
+- Geographic exposure breakdown
+- Single-name concentration risk (already partially in pre-trade checklist)
+
+### 12.2 Risk Budgeting
+
+- Define risk budget per tier: "Core can use 60% of risk budget, Growth 30%, Starter 10%"
+- Track actual vs budgeted risk contribution per position
+- Alert when a position's risk contribution exceeds its tier allowance
+
+### 12.3 Regime-Aware Risk
+
+- Different risk parameters by regime type (trend vs sorting)
+- "Portfolio beta is 1.3 on a sorting day — consider reducing"
+- Historical drawdown by regime type
+- Regime persistence analysis: how long do sorting/trend regimes last
 
 ---
 
@@ -280,19 +390,22 @@ Over time, surface patterns:
 | **4.5** | Planned | External push | Slack, SMS, webhook alerting |
 | **5** | ✅ Done | Data infrastructure | Backfill, snapshots, news feed |
 | **6** | ✅ Done | Technical analysis | Support/resistance, indicators, risk/reward |
-| **7** | Planned | Pre-trade checklists | Gates action with process |
+| **7** | ✅ Done | Pre-trade checklists | Gates action with process |
 | **8** | Partial | Decision logging & memory | Institutional memory that compounds |
-| **9** | Planned | Post-mortems & review | Closes the learning loop |
+| **9** | Planned | Transaction analysis & post-mortems | Closes the learning loop |
+| **10** | Planned | Portfolio optimization & exposure | Quantitative portfolio construction |
+| **11** | Planned | Equity research engine | Structured thesis building and tracking |
+| **12** | Planned | Risk analysis & monitoring | Continuous risk awareness |
 
 ---
 
 ## What We Will NOT Build
 
 Per the design principles:
-- No buy/sell recommendations
+- No buy/sell recommendations — optimization suggests alternatives, human decides
 - No price targets or alpha scoring
 - No "top ideas" ranking
 - No alerts that demand action (monitors surface info, human decides)
-- No predictions or optimization
+- No predictions — scenarios show possibilities, not forecasts
 
 The co-pilot exists to **protect process**, not ego.
