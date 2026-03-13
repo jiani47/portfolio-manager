@@ -778,3 +778,54 @@ export interface PreTradeCheckRecord {
   passed: boolean;
   createdAt: string;
 }
+
+// --- Transaction Analytics (Phase 9B) ---
+
+export interface ClosedTrade {
+  symbol: string;
+  securityId: string;
+  accountId: string;
+  buyDate: string;
+  sellDate: string;
+  quantity: number;
+  buyPrice: number;
+  sellPrice: number;
+  costBasis: number;
+  proceeds: number;
+  realizedGain: number;
+  realizedGainPct: number;
+  holdDays: number;
+  holdBucket: 'short' | 'medium' | 'long';
+  isWin: boolean;
+}
+
+export interface TradeAnalyticsSummary {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  totalRealizedGain: number;
+  avgWin: number;
+  avgLoss: number;
+  largestWin: number;
+  largestLoss: number;
+  profitFactor: number;
+}
+
+export interface TradeBreakdown {
+  label: string;
+  count: number;
+  wins: number;
+  winRate: number;
+  avgGain: number;
+  totalGain: number;
+}
+
+export interface TradeAnalytics {
+  summary: TradeAnalyticsSummary;
+  byHoldPeriod: TradeBreakdown[];
+  byRegimeAtEntry: TradeBreakdown[];
+  byEntryStyle: TradeBreakdown[];
+  topWinners: ClosedTrade[];
+  topLosers: ClosedTrade[];
+}

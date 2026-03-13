@@ -25,6 +25,7 @@ import {
   Monitor,
   TaskRunRecord,
   PreTradeCheckRecord,
+  ClosedTrade,
 } from '../shared/types';
 
 export class Database {
@@ -2780,5 +2781,77 @@ export class Database {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, record.orderSymbol, record.orderSide, record.orderQty, record.accountId, record.book, record.checksJson, record.overrides, record.passed ? 1 : 0, record.createdAt);
     return id;
+  }
+
+  // Transaction Analytics (Phase 9B)
+  getClosedTrades(): ClosedTrade[] {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const rows = this.db.prepare(`
+      SELECT t.account_id, t.security_id, s.symbol, t.type, t.date, t.quantity, t.price
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      WHERE t.type IN ('buy', 'sell')
+      ORDER BY t.date ASC, t.type ASC
+    `).all() as Array<{
+      account_id: string; security_id: string; symbol: string;
+      type: string; date: string; quantity: number; price: number;
+    }>;
+
+    const groups = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const key = `${row.account_id}:${row.security_id}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(row);
+    }
+
+    const closedTrades: ClosedTrade[] = [];
+
+    for (const txns of groups.values()) {
+      const buyQueue: Array<{ date: string; price: number; remaining: number }> = [];
+
+      for (const txn of txns) {
+        if (txn.type === 'buy') {
+          buyQueue.push({ date: txn.date, price: txn.price, remaining: txn.quantity });
+        } else if (txn.type === 'sell') {
+          let sellRemaining = txn.quantity;
+          while (sellRemaining > 0 && buyQueue.length > 0) {
+            const lot = buyQueue[0];
+            const matched = Math.min(sellRemaining, lot.remaining);
+
+            const costBasis = matched * lot.price;
+            const proceeds = matched * txn.price;
+            const realizedGain = proceeds - costBasis;
+            const buyDate = new Date(lot.date);
+            const sellDate = new Date(txn.date);
+            const holdDays = Math.max(0, Math.round((sellDate.getTime() - buyDate.getTime()) / 86400000));
+
+            closedTrades.push({
+              symbol: txn.symbol,
+              securityId: txn.security_id,
+              accountId: txn.account_id,
+              buyDate: lot.date,
+              sellDate: txn.date,
+              quantity: matched,
+              buyPrice: lot.price,
+              sellPrice: txn.price,
+              costBasis,
+              proceeds,
+              realizedGain,
+              realizedGainPct: costBasis > 0 ? (realizedGain / costBasis) * 100 : 0,
+              holdDays,
+              holdBucket: holdDays < 30 ? 'short' : holdDays < 90 ? 'medium' : 'long',
+              isWin: realizedGain > 0,
+            });
+
+            lot.remaining -= matched;
+            sellRemaining -= matched;
+            if (lot.remaining <= 0) buyQueue.shift();
+          }
+        }
+      }
+    }
+
+    return closedTrades;
   }
 }
