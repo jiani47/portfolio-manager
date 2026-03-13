@@ -3,6 +3,7 @@ import {
   ComposedChart,
   Area,
   Bar,
+  Scatter,
   XAxis,
   YAxis,
   Tooltip,
@@ -10,7 +11,7 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from 'recharts';
-import type { PriceHistory, PriceLevel, NewsArticle } from '../../shared/types';
+import type { PriceHistory, PriceLevel, NewsArticle, Transaction } from '../../shared/types';
 
 const PERIODS = [
   { label: '3M', days: 90 },
@@ -38,6 +39,7 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [news, setNews] = useState<NewsArticle[]>([]);
   const [newsLoading, setNewsLoading] = useState(false);
+  const [trades, setTrades] = useState<Array<{ date: string; price: number; type: 'buy' | 'sell'; qty: number }>>([]);
   const chartRef = useRef<HTMLDivElement>(null);
 
   const fetchData = useCallback(async () => {
@@ -66,6 +68,29 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
     }).catch(() => {
       if (!cancelled) setNewsLoading(false);
     });
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  // Fetch trades for this symbol (last 3 months)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const security = await window.electronAPI.findSecurityBySymbol(symbol);
+        if (!security || cancelled) return;
+        const threeMonthsAgo = new Date();
+        threeMonthsAgo.setFullYear(threeMonthsAgo.getFullYear() - 1);
+        const startDate = threeMonthsAgo.toISOString().split('T')[0];
+        const txns = await window.electronAPI.getTransactions({ securityId: security.id, startDate });
+        if (cancelled) return;
+        const buySell = txns
+          .filter((t: Transaction) => t.type === 'buy' || t.type === 'sell')
+          .map((t: Transaction) => ({ date: t.date, price: t.price, type: t.type as 'buy' | 'sell', qty: t.quantity }));
+        setTrades(buySell);
+      } catch {
+        // ignore
+      }
+    })();
     return () => { cancelled = true; };
   }, [symbol]);
 
@@ -105,14 +130,30 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
     return Math.max(...chartData.map(d => d.volume || 0), 1);
   }, [chartData]);
 
-  // Volume data scaled to fit bottom 15% of chart
+  // Build trade marker lookup by date
+  const tradesByDate = useMemo(() => {
+    const map = new Map<string, Array<{ price: number; type: 'buy' | 'sell'; qty: number }>>();
+    for (const t of trades) {
+      if (!map.has(t.date)) map.set(t.date, []);
+      map.get(t.date)!.push({ price: t.price, type: t.type, qty: t.qty });
+    }
+    return map;
+  }, [trades]);
+
+  // Volume data scaled to fit bottom 15% of chart + trade markers
   const chartDataWithScaledVol = useMemo(() => {
     const range = yMax - yMin;
-    return chartData.map(d => ({
-      ...d,
-      volumeScaled: d.volume ? yMin + (d.volume / maxVolume) * range * 0.15 : 0,
-    }));
-  }, [chartData, yMin, yMax, maxVolume]);
+    return chartData.map(d => {
+      const dayTrades = tradesByDate.get(d.date);
+      return {
+        ...d,
+        volumeScaled: d.volume ? yMin + (d.volume / maxVolume) * range * 0.15 : 0,
+        tradePrice: dayTrades ? dayTrades[0].price : null,
+        tradeType: dayTrades ? dayTrades[0].type : null,
+        tradeQty: dayTrades ? dayTrades.reduce((s, t) => s + t.qty, 0) : null,
+      };
+    });
+  }, [chartData, yMin, yMax, maxVolume, tradesByDate]);
 
   const currentPrice = chartData.length > 0 ? chartData[chartData.length - 1].close : null;
 
@@ -170,6 +211,38 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
   const formatCurrency = (v: number) =>
     new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(v);
 
+  // Custom shape for trade markers
+  const TradeMarker = (props: { cx?: number; cy?: number; payload?: Record<string, unknown> }) => {
+    const { cx, cy, payload } = props;
+    if (!cx || !cy || !payload?.tradePrice) return null;
+    const isBuy = payload.tradeType === 'buy';
+    const size = 6;
+    // Triangle: up for buy, down for sell
+    const points = isBuy
+      ? `${cx},${cy - size} ${cx - size},${cy + size} ${cx + size},${cy + size}`
+      : `${cx - size},${cy - size} ${cx + size},${cy - size} ${cx},${cy + size}`;
+    return (
+      <g>
+        <polygon
+          points={points}
+          fill={isBuy ? '#16a34a' : '#dc2626'}
+          stroke="white"
+          strokeWidth={1}
+        />
+        <text
+          x={cx}
+          y={isBuy ? cy - size - 4 : cy + size + 10}
+          textAnchor="middle"
+          fill={isBuy ? '#16a34a' : '#dc2626'}
+          fontSize={8}
+          fontWeight="bold"
+        >
+          {isBuy ? 'B' : 'S'}
+        </text>
+      </g>
+    );
+  };
+
   const CustomTooltip = ({ active, payload, label }: { active?: boolean; payload?: Array<{ payload: Record<string, number> }>; label?: string }) => {
     if (!active || !payload?.length) return null;
     const d = payload[0].payload;
@@ -182,6 +255,11 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
         <p className="font-medium">C: {formatCurrency(d.close)}</p>
         {d.volume != null && d.volume > 0 && (
           <p className="text-gray-500">Vol: {(d.volume / 1e6).toFixed(1)}M</p>
+        )}
+        {d.tradePrice != null && (
+          <p className={`font-medium mt-1 ${d.tradeType === 'buy' ? 'text-green-700' : 'text-red-700'}`}>
+            {d.tradeType === 'buy' ? '▲ BUY' : '▼ SELL'} {d.tradeQty} @ {formatCurrency(d.tradePrice)}
+          </p>
         )}
       </div>
     );
@@ -325,6 +403,15 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
                       }}
                     />
                   ))}
+
+                {/* Trade markers */}
+                {trades.length > 0 && (
+                  <Scatter
+                    dataKey="tradePrice"
+                    shape={<TradeMarker />}
+                    isAnimationActive={false}
+                  />
+                )}
               </ComposedChart>
             </ResponsiveContainer>
           </div>

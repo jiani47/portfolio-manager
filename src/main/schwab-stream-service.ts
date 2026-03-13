@@ -3,6 +3,7 @@ import { BrowserWindow, Notification } from 'electron';
 import Store from 'electron-store';
 import { SchwabService } from './schwab-service';
 import { Database } from './database';
+import { logger } from './logger';
 import { AppSettings, StreamingQuote, StreamingStatus, StreamingState, PriceHistory } from '../shared/types';
 
 const EQUITY_FIELDS: Record<number, keyof Omit<StreamingQuote, 'symbol' | 'timestamp'>> = {
@@ -80,7 +81,7 @@ export class SchwabStreamService {
     try {
       const prices = this.db.getLatestPrices();
       if (prices.length === 0) return;
-      console.log(`Bootstrapping ${prices.length} quotes from DB`);
+      logger.info(`[quotes:bootstrap] Loading ${prices.length} quotes from DB`);
       const mainWindow = this.getMainWindow();
       for (const p of prices) {
         const quote: StreamingQuote = {
@@ -98,6 +99,7 @@ export class SchwabStreamService {
           mainWindow.webContents.send('streaming:quote', quote);
         }
       }
+      logger.info(`[quotes:bootstrap] Sent ${prices.length} quotes to renderer`);
     } catch (err) {
       console.error('Failed to bootstrap quotes from DB:', err);
     }
@@ -298,6 +300,7 @@ export class SchwabStreamService {
             };
 
             this.latestQuotes.set(sym.toUpperCase(), quote);
+            logger.debug(`[quotes:poll] ${sym.toUpperCase()} $${quote.last.toFixed(2)}`);
 
             // Check monitors
             if (this.db && quote.last > 0) {
@@ -614,6 +617,7 @@ export class SchwabStreamService {
       if (quote.last === 0 && item['3'] === undefined) continue;
 
       this.latestQuotes.set(symbol, quote);
+      logger.debug(`[quotes:stream] ${symbol} $${quote.last.toFixed(2)} vol=${quote.volume ?? '-'}`);
 
       // Check monitors for this symbol
       if (this.db && quote.last > 0) {
