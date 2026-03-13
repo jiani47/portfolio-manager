@@ -11,6 +11,7 @@ import { SchwabStreamService } from './schwab-stream-service';
 import { AnalyticsService } from './analytics-service';
 import { SchedulerService } from './scheduler-service';
 import { PreTradeValidator } from './pre-trade-validator';
+import { TransactionAnalyticsService } from './transaction-analytics-service';
 import Store from 'electron-store';
 import { AppSettings } from '../shared/types';
 
@@ -139,6 +140,9 @@ async function initializeApp() {
   // Initialize analytics service
   const analyticsService = new AnalyticsService(database);
 
+  // Initialize transaction analytics service
+  const transactionAnalyticsService = new TransactionAnalyticsService(database);
+
   // Initialize pre-trade validator
   const preTradeValidator = new PreTradeValidator(database);
 
@@ -147,7 +151,7 @@ async function initializeApp() {
   schedulerService.start();
 
   // Setup IPC handlers
-  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, schwabService, streamService, store, analyticsService, schedulerService, preTradeValidator);
+  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, schwabService, streamService, store, analyticsService, transactionAnalyticsService, schedulerService, preTradeValidator);
 }
 
 app.whenReady().then(async () => {

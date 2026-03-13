@@ -57,6 +57,7 @@ import type {
   PreTradeCheckRequest,
   PreTradeCheckResult,
   PreTradeCheckItem,
+  TradeAnalytics,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -191,6 +192,7 @@ declare global {
       // Analytics
       getPortfolioAnalytics: (days?: number) => Promise<PortfolioAnalytics | null>;
       getPositionBetas: (days?: number) => Promise<PositionBeta[]>;
+      getTradeAnalytics: () => Promise<TradeAnalytics | null>;
 
       // Price levels
       getPriceLevels: (symbol?: string) => Promise<PriceLevel[]>;
@@ -1771,6 +1773,23 @@ export function useAnalytics() {
   }, []);
 
   return { analytics, positionBetas, loading, fetchAnalytics };
+}
+
+export function useTradeAnalytics() {
+  const [data, setData] = useState<TradeAnalytics | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchTradeAnalytics = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI.getTradeAnalytics();
+      setData(result);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { tradeAnalytics: data, loading, fetchTradeAnalytics };
 }
 
 export function usePriceLevels() {

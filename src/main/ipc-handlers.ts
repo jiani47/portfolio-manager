@@ -11,6 +11,7 @@ import { SchwabService } from './schwab-service';
 import { SchwabStreamService } from './schwab-stream-service';
 import { parserRegistry, transactionParserRegistry, lotDetailsParserRegistry } from './parsers';
 import { AnalyticsService } from './analytics-service';
+import { TransactionAnalyticsService } from './transaction-analytics-service';
 import { SchedulerService } from './scheduler-service';
 import { PreTradeValidator } from './pre-trade-validator';
 import { AppSettings, ExcelImportResult, RefreshPricesResult } from '../shared/types';
@@ -26,6 +27,7 @@ export function setupIpcHandlers(
   streamService: SchwabStreamService | null,
   store: Store<{ settings: AppSettings }>,
   analyticsService?: AnalyticsService,
+  transactionAnalyticsService?: TransactionAnalyticsService,
   schedulerService?: SchedulerService,
   preTradeValidator?: PreTradeValidator
 ): void {
@@ -1105,6 +1107,11 @@ export function setupIpcHandlers(
   ipcMain.handle('analytics:position-betas', (_, days?: number) => {
     if (!analyticsService) return [];
     return analyticsService.getPositionBetas(days);
+  });
+
+  ipcMain.handle('analytics:trade-performance', () => {
+    if (!transactionAnalyticsService) return null;
+    return transactionAnalyticsService.getTradeAnalytics();
   });
 
   // Price levels (support/resistance)
