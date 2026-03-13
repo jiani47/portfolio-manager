@@ -285,6 +285,121 @@ pre_trade_check() {
   return 0
 }
 
+trade_analytics() {
+  local results
+  results=$(sqlite3 "$DB" "
+    WITH buys AS (
+      SELECT t.account_id, t.security_id, s.symbol,
+             SUM(t.quantity) as total_qty,
+             SUM(ABS(t.amount)) as total_cost
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      WHERE t.type = 'buy' AND s.symbol NOT LIKE 'CURRENCY_%' AND t.quantity > 0
+      GROUP BY t.account_id, t.security_id
+    ),
+    sells AS (
+      SELECT t.account_id, t.security_id, s.symbol,
+             t.date as sell_date,
+             t.quantity,
+             t.price as sell_price,
+             ABS(t.amount) as proceeds
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      WHERE t.type = 'sell' AND s.symbol NOT LIKE 'CURRENCY_%' AND t.quantity > 0
+    ),
+    matched AS (
+      SELECT s.symbol, s.sell_date, s.quantity, s.sell_price, s.proceeds,
+             CASE WHEN b.total_qty > 0 THEN b.total_cost / b.total_qty ELSE 0 END as avg_buy_price,
+             s.proceeds - (s.quantity * CASE WHEN b.total_qty > 0 THEN b.total_cost / b.total_qty ELSE 0 END) as gain
+      FROM sells s
+      LEFT JOIN buys b ON s.account_id = b.account_id AND s.security_id = b.security_id
+    )
+    SELECT
+      COUNT(*) as total_trades,
+      SUM(CASE WHEN gain > 0 THEN 1 ELSE 0 END) as wins,
+      SUM(CASE WHEN gain <= 0 THEN 1 ELSE 0 END) as losses,
+      ROUND(100.0 * SUM(CASE WHEN gain > 0 THEN 1 ELSE 0 END) / COUNT(*), 1) as win_rate,
+      ROUND(SUM(gain), 2) as total_pnl,
+      ROUND(AVG(CASE WHEN gain > 0 THEN gain END), 2) as avg_win,
+      ROUND(AVG(CASE WHEN gain <= 0 THEN gain END), 2) as avg_loss
+    FROM matched;
+  ")
+
+  if [ -z "$results" ] || [ "$results" = "0||||||" ]; then
+    echo ""
+    echo "=== Trade Performance (avg cost method) ==="
+    echo ""
+    echo "  No sell transactions found."
+    echo ""
+    return
+  fi
+
+  IFS='|' read -r total wins losses win_rate total_pnl avg_win avg_loss <<< "$results"
+
+  echo ""
+  echo "=== Trade Performance (avg cost method) ==="
+  echo ""
+  printf "  %-20s %s\n" "Total Trades:" "$total"
+  printf "  %-20s %s (%s W / %s L)\n" "Win Rate:" "${win_rate}%" "$wins" "$losses"
+  printf "  %-20s \$%s\n" "Total P&L:" "$total_pnl"
+  printf "  %-20s \$%s\n" "Avg Win:" "$avg_win"
+  printf "  %-20s \$%s\n" "Avg Loss:" "$avg_loss"
+  echo ""
+  echo "(Note: CLI uses avg cost method. App uses precise FIFO matching.)"
+
+  echo ""
+  echo "--- Top 5 Winners ---"
+  sqlite3 -header -column "$DB" "
+    WITH buys AS (
+      SELECT t.account_id, t.security_id,
+             SUM(t.quantity) as total_qty, SUM(ABS(t.amount)) as total_cost
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      WHERE t.type = 'buy' AND s.symbol NOT LIKE 'CURRENCY_%' AND t.quantity > 0
+      GROUP BY t.account_id, t.security_id
+    )
+    SELECT s.symbol, se.sell_date as date, se.quantity as qty,
+           ROUND(se.sell_price, 2) as sell_px,
+           ROUND(CASE WHEN b.total_qty > 0 THEN b.total_cost / b.total_qty ELSE 0 END, 2) as avg_cost,
+           ROUND(ABS(se.proceeds) - (se.quantity * CASE WHEN b.total_qty > 0 THEN b.total_cost / b.total_qty ELSE 0 END), 2) as pnl
+    FROM (
+      SELECT t.account_id, t.security_id, s.symbol, t.date as sell_date,
+             t.quantity, t.price as sell_price, ABS(t.amount) as proceeds
+      FROM transactions t JOIN securities s ON t.security_id = s.id
+      WHERE t.type = 'sell' AND s.symbol NOT LIKE 'CURRENCY_%' AND t.quantity > 0
+    ) se
+    JOIN securities s ON se.security_id = s.id
+    LEFT JOIN buys b ON se.account_id = b.account_id AND se.security_id = b.security_id
+    ORDER BY pnl DESC LIMIT 5;
+  "
+
+  echo ""
+  echo "--- Top 5 Losers ---"
+  sqlite3 -header -column "$DB" "
+    WITH buys AS (
+      SELECT t.account_id, t.security_id,
+             SUM(t.quantity) as total_qty, SUM(ABS(t.amount)) as total_cost
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      WHERE t.type = 'buy' AND s.symbol NOT LIKE 'CURRENCY_%' AND t.quantity > 0
+      GROUP BY t.account_id, t.security_id
+    )
+    SELECT s.symbol, se.sell_date as date, se.quantity as qty,
+           ROUND(se.sell_price, 2) as sell_px,
+           ROUND(CASE WHEN b.total_qty > 0 THEN b.total_cost / b.total_qty ELSE 0 END, 2) as avg_cost,
+           ROUND(ABS(se.proceeds) - (se.quantity * CASE WHEN b.total_qty > 0 THEN b.total_cost / b.total_qty ELSE 0 END), 2) as pnl
+    FROM (
+      SELECT t.account_id, t.security_id, s.symbol, t.date as sell_date,
+             t.quantity, t.price as sell_price, ABS(t.amount) as proceeds
+      FROM transactions t JOIN securities s ON t.security_id = s.id
+      WHERE t.type = 'sell' AND s.symbol NOT LIKE 'CURRENCY_%' AND t.quantity > 0
+    ) se
+    JOIN securities s ON se.security_id = s.id
+    LEFT JOIN buys b ON se.account_id = b.account_id AND se.security_id = b.security_id
+    ORDER BY pnl ASC LIMIT 5;
+  "
+}
+
 case "$1" in
   morning)
     # Combined: refresh prices + briefing + ritual status
@@ -2715,6 +2830,10 @@ for row in all_orders:
 PYEOF
     ;;
 
+  trade-analytics)
+    trade_analytics
+    ;;
+
   cancel-order)
     ORDER_ID="${2:-}"
     if [ -z "$ORDER_ID" ]; then
@@ -2794,5 +2913,6 @@ PYEOF
     echo "  sell               - Sell: <qty> <symbol> at|market|stop <price> <DAY|GTC> [account]"
     echo "  orders [all]       - List open/working orders (or all orders in last 7 days)"
     echo "  cancel-order <id>  - Cancel an open order by order ID"
+    echo "  trade-analytics    - Trade performance: win rate, P&L, top winners/losers"
     ;;
 esac
