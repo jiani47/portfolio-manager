@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from 'react';
-import { useAnalytics, useTransactions, useAccounts, useSecurities } from '../hooks/useApi';
+import { useAnalytics, useTransactions, useAccounts, useSecurities, useTradeAnalytics } from '../hooks/useApi';
 import type { PortfolioAnalytics, PositionBeta, Transaction, Security } from '../../shared/types';
 import { format } from 'date-fns';
 import TransactionImportModal from '../components/TransactionImportModal';
@@ -71,7 +71,7 @@ export default function Analytics() {
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities, createSecurity, findBySymbol } = useSecurities();
   const [selectedPeriod, setSelectedPeriod] = useState(90);
-  const [activeTab, setActiveTab] = useState<'analytics' | 'transactions'>('analytics');
+  const [activeTab, setActiveTab] = useState<'analytics' | 'transactions' | 'trade-performance'>('analytics');
 
   // Transaction state
   const [showTxModal, setShowTxModal] = useState(false);
@@ -90,6 +90,8 @@ export default function Analytics() {
     fetchAnalytics(selectedPeriod);
   }, [selectedPeriod, fetchAnalytics]);
 
+  const { tradeAnalytics, loading: tpLoading, fetchTradeAnalytics } = useTradeAnalytics();
+
   useEffect(() => {
     if (activeTab === 'transactions') {
       fetchTransactions();
@@ -97,6 +99,10 @@ export default function Analytics() {
       fetchSecurities();
     }
   }, [activeTab, fetchTransactions, fetchAccounts, fetchSecurities]);
+
+  useEffect(() => {
+    if (activeTab === 'trade-performance') fetchTradeAnalytics();
+  }, [activeTab, fetchTradeAnalytics]);
 
   const securityMap = useMemo(() => new Map(securities.map(s => [s.id, s])), [securities]);
   const accountMap = useMemo(() => new Map(accounts.map(a => [a.id, a])), [accounts]);
@@ -149,7 +155,7 @@ export default function Analytics() {
         <div className="flex items-center gap-4">
           <h1 className="text-2xl font-bold text-gray-900">Analytics</h1>
           <div className="flex gap-1">
-            {(['analytics', 'transactions'] as const).map(tab => (
+            {(['analytics', 'transactions', 'trade-performance'] as const).map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -159,7 +165,7 @@ export default function Analytics() {
                     : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
                 }`}
               >
-                {tab === 'analytics' ? 'Portfolio' : 'Transactions'}
+                {tab === 'analytics' ? 'Portfolio' : tab === 'transactions' ? 'Transactions' : 'Trade Performance'}
               </button>
             ))}
           </div>
@@ -192,7 +198,7 @@ export default function Analytics() {
         )}
       </div>
 
-      {activeTab === 'analytics' ? (
+      {activeTab === 'analytics' && (
         <>
           {loading ? (
             <div className="flex items-center justify-center h-64">
@@ -305,7 +311,9 @@ export default function Analytics() {
             </>
           )}
         </>
-      ) : (
+      )}
+
+      {activeTab === 'transactions' && (
         <>
           {/* Transactions Tab */}
           {/* Filters */}
@@ -469,6 +477,130 @@ export default function Analytics() {
                     <button type="submit" className="btn-primary">Add Transaction</button>
                   </div>
                 </form>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {activeTab === 'trade-performance' && (
+        <>
+          {tpLoading ? (
+            <div className="flex items-center justify-center h-64">
+              <div className="text-gray-500">Loading...</div>
+            </div>
+          ) : !tradeAnalytics || tradeAnalytics.summary.totalTrades === 0 ? (
+            <div className="card text-center py-12">
+              <p className="text-gray-500">No closed trades found.</p>
+              <p className="text-sm text-gray-400 mt-1">Analytics will appear once you have sell transactions matched to prior buys.</p>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {/* Summary Cards */}
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                <div className="card">
+                  <p className="stat-label">Total Trades</p>
+                  <p className="stat-value">{tradeAnalytics.summary.totalTrades}</p>
+                </div>
+                <div className="card">
+                  <p className="stat-label">Win Rate</p>
+                  <p className={`stat-value ${tradeAnalytics.summary.winRate >= 50 ? 'text-green-600' : 'text-red-600'}`}>
+                    {tradeAnalytics.summary.winRate.toFixed(1)}%
+                  </p>
+                  <p className="text-xs text-gray-400 mt-1">{tradeAnalytics.summary.wins}W / {tradeAnalytics.summary.losses}L</p>
+                </div>
+                <div className="card">
+                  <p className="stat-label">Total P&L</p>
+                  <p className={`stat-value ${returnColor(tradeAnalytics.summary.totalRealizedGain)}`}>
+                    {formatCurrency(tradeAnalytics.summary.totalRealizedGain)}
+                  </p>
+                </div>
+                <div className="card">
+                  <p className="stat-label">Avg Win / Loss</p>
+                  <p className="stat-value text-green-600">{formatCurrency(tradeAnalytics.summary.avgWin)}</p>
+                  <p className="text-xs text-red-600 mt-1">{formatCurrency(tradeAnalytics.summary.avgLoss)}</p>
+                </div>
+                <div className="card">
+                  <p className="stat-label">Profit Factor</p>
+                  <p className={`stat-value ${tradeAnalytics.summary.profitFactor >= 1 ? 'text-green-600' : 'text-red-600'}`}>
+                    {tradeAnalytics.summary.profitFactor === Infinity ? '\u221E' : tradeAnalytics.summary.profitFactor.toFixed(2)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Breakdown Tables */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {[
+                  { title: 'By Hold Period', data: tradeAnalytics.byHoldPeriod },
+                  { title: 'By Regime at Entry', data: tradeAnalytics.byRegimeAtEntry },
+                  { title: 'By Entry Style', data: tradeAnalytics.byEntryStyle },
+                ].map(({ title, data }) => (
+                  <div key={title} className="card">
+                    <h3 className="text-sm font-semibold text-gray-900 mb-3">{title}</h3>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-200">
+                          <th className="text-left py-1.5 font-medium text-gray-500">Label</th>
+                          <th className="text-right py-1.5 font-medium text-gray-500">Trades</th>
+                          <th className="text-right py-1.5 font-medium text-gray-500">Win%</th>
+                          <th className="text-right py-1.5 font-medium text-gray-500">Total P&L</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.map(row => (
+                          <tr key={row.label} className="border-b border-gray-100">
+                            <td className="py-1.5 text-gray-900 capitalize">{row.label}</td>
+                            <td className="py-1.5 text-right text-gray-700">{row.count}</td>
+                            <td className={`py-1.5 text-right font-medium ${row.winRate >= 50 ? 'text-green-600' : 'text-red-600'}`}>
+                              {row.winRate.toFixed(0)}%
+                            </td>
+                            <td className={`py-1.5 text-right font-medium ${row.totalGain >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                              {formatCurrency(row.totalGain)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
+              </div>
+
+              {/* Top Winners / Losers */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {[
+                  { title: 'Top 5 Winners', trades: tradeAnalytics.topWinners, color: 'text-green-600' },
+                  { title: 'Top 5 Losers', trades: tradeAnalytics.topLosers, color: 'text-red-600' },
+                ].map(({ title, trades, color }) => (
+                  <div key={title} className="card">
+                    <h3 className="text-sm font-semibold text-gray-900 mb-3">{title}</h3>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-200">
+                          <th className="text-left py-1.5 font-medium text-gray-500">Symbol</th>
+                          <th className="text-right py-1.5 font-medium text-gray-500">Qty</th>
+                          <th className="text-right py-1.5 font-medium text-gray-500">Buy</th>
+                          <th className="text-right py-1.5 font-medium text-gray-500">Sell</th>
+                          <th className="text-right py-1.5 font-medium text-gray-500">P&L</th>
+                          <th className="text-right py-1.5 font-medium text-gray-500">Hold</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {trades.map((t, i) => (
+                          <tr key={i} className="border-b border-gray-100">
+                            <td className="py-1.5 font-medium text-gray-900">{t.symbol}</td>
+                            <td className="py-1.5 text-right text-gray-700">{t.quantity.toFixed(0)}</td>
+                            <td className="py-1.5 text-right text-gray-700">${t.buyPrice.toFixed(2)}</td>
+                            <td className="py-1.5 text-right text-gray-700">${t.sellPrice.toFixed(2)}</td>
+                            <td className={`py-1.5 text-right font-medium ${color}`}>
+                              {formatCurrency(t.realizedGain)}
+                            </td>
+                            <td className="py-1.5 text-right text-gray-500">{t.holdDays}d</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
               </div>
             </div>
           )}
