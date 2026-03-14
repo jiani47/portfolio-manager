@@ -632,6 +632,90 @@ export default function Analytics() {
                   </div>
                 ))}
               </div>
+
+              {/* Behavioral Patterns */}
+              {tradeAnalytics.patterns && (tradeAnalytics.patterns.timingPatterns.length > 0 || tradeAnalytics.patterns.symbolPatterns.length > 0) && (
+                <>
+                  {/* Insight Banner */}
+                  <div className="card bg-blue-50 border border-blue-200">
+                    <p className="text-sm font-medium text-blue-900">{tradeAnalytics.patterns.overallInsight}</p>
+                    {tradeAnalytics.patterns.holdPeriodInsight && (
+                      <p className="text-sm text-blue-700 mt-1">{tradeAnalytics.patterns.holdPeriodInsight}</p>
+                    )}
+                  </div>
+
+                  {/* Timing Pattern Cards */}
+                  {tradeAnalytics.patterns.timingPatterns.length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-semibold text-gray-900 mb-3">Behavioral Patterns</h3>
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        {tradeAnalytics.patterns.timingPatterns.map((tp, i) => (
+                          <div
+                            key={i}
+                            className={`card border-l-4 ${
+                              tp.severity === 'warn' ? 'border-l-amber-400' :
+                              tp.severity === 'strength' ? 'border-l-green-500' :
+                              'border-l-blue-400'
+                            }`}
+                          >
+                            <p className="text-sm font-semibold text-gray-900">{tp.label}</p>
+                            <p className="text-xs text-gray-500 mt-0.5">{tp.description}</p>
+                            <p className="text-sm text-gray-700 mt-1">{tp.detail}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Per-Symbol Breakdown Table */}
+                  {tradeAnalytics.patterns.symbolPatterns.length > 0 && (
+                    <div className="card">
+                      <h3 className="text-sm font-semibold text-gray-900 mb-3">Per-Symbol Breakdown</h3>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-gray-200">
+                              <th className="text-left py-1.5 font-medium text-gray-500">Symbol</th>
+                              <th className="text-right py-1.5 font-medium text-gray-500">Trades</th>
+                              <th className="text-right py-1.5 font-medium text-gray-500">Win%</th>
+                              <th className="text-right py-1.5 font-medium text-gray-500">Avg Hold</th>
+                              <th className="text-right py-1.5 font-medium text-gray-500">Total P&L</th>
+                              <th className="text-left py-1.5 pl-3 font-medium text-gray-500">Flag</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {tradeAnalytics.patterns.symbolPatterns.slice(0, 20).map(sp => (
+                              <tr key={sp.symbol} className="border-b border-gray-100">
+                                <td className="py-1.5 font-medium text-gray-900">{sp.symbol}</td>
+                                <td className="py-1.5 text-right text-gray-700">{sp.tradeCount}</td>
+                                <td className={`py-1.5 text-right font-medium ${sp.winRate >= 50 ? 'text-green-600' : 'text-red-600'}`}>
+                                  {sp.winRate.toFixed(0)}%
+                                </td>
+                                <td className="py-1.5 text-right text-gray-700">{sp.avgHoldDays.toFixed(0)}d</td>
+                                <td className={`py-1.5 text-right font-medium ${sp.totalGain >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                  {formatCurrency(sp.totalGain)}
+                                </td>
+                                <td className="py-1.5 pl-3">
+                                  {sp.flag && (
+                                    <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded-full ${
+                                      sp.flag === 'overtrading' ? 'bg-amber-100 text-amber-800' :
+                                      sp.flag === 'consistent loser' ? 'bg-red-100 text-red-800' :
+                                      sp.flag === 'strong performer' ? 'bg-green-100 text-green-800' :
+                                      'bg-gray-100 text-gray-800'
+                                    }`}>
+                                      {sp.flag}
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
         </>
