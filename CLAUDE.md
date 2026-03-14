@@ -67,6 +67,7 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh levels [symbol]      # Support/resistance levels with risk/reward
 ./scripts/pm-cli.sh levels-refresh [sym] # Recompute S/R from price history swing highs/lows
 ./scripts/pm-cli.sh sectors [date]       # Sector performance heatmap (via FMP)
+./scripts/pm-cli.sh trade-journal [symbol] [days]  # Trade journal with regime/decision context (default 90d)
 ./scripts/pm-cli.sh buy <qty> <sym> <at <price>|market> <DAY|GTC> [acct]   # Place buy order
 ./scripts/pm-cli.sh sell <qty> <sym> <at <price>|market|stop <price>> <DAY|GTC> [acct]  # Place sell order
 ./scripts/pm-cli.sh orders [all]        # List orders (open, or all including filled)

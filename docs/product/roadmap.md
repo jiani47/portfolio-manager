@@ -257,30 +257,31 @@ For every closed position (mandatory for large losses or big wins):
 - One concrete change for next time
 - Classification: good loss / bad loss / good win / bad win
 
-### 9.2 Transaction Analytics
+### 9.2 Transaction Analytics ✅
 
 Structured analysis of trading history:
-- Win/loss rate by tier, by book, by sector
-- Average hold period by book and outcome
-- Entry/exit timing analysis (did you buy weakness, sell strength?)
-- P&L attribution: which tiers/strategies generate returns vs destroy value
-- Realized vs unrealized gain tracking per position
+- [x] FIFO lot matching from transactions table (~4K closed trades)
+- [x] Win/loss rate by hold period, regime at entry, entry style
+- [x] Trade Performance tab on Analytics page with date range filter (30D/90D/180D/1Y/All)
+- [x] Top winners/losers tables
+- [x] Stock split detection in FIFO engine
+- [x] Behavioral pre-trade rules derived from analysis (re-entry cooldown, rapid flip)
 
-### 9.3 Pattern Detection
+### 9.3 Pattern Detection ✅
 
 Surface behavioral patterns over time:
-- Most common error type
-- "You tend to sell Growth tier too early"
-- "Your Starter→Growth promotions outperform by X%"
-- Rule violation frequency (checklist overrides, stop dishonoring)
-- Regime correlation: which regime types lead to best/worst decisions
+- [x] Per-symbol stats: trade count, win rate, P&L, avg hold, flags (overtrading/consistent loser/strong performer)
+- [x] Timing patterns: rapid flips, long-hold outperformance, monthly overtrading, symbol churn
+- [x] Hold period insights and overall behavioral summary
+- [x] Patterns section on Trade Performance tab with insight banner, pattern cards, symbol breakdown table
 
-### 9.4 Trade Journal
+### 9.4 Trade Journal ✅
 
-Automated trade journal from transaction + ritual + checklist data:
-- Every trade annotated with: regime at time, checklist result, rationale
-- Searchable by symbol, date range, outcome
-- CLI: `pm-cli.sh trade-review [symbol]` — full history with context
+Automated trade journal from transaction + ritual + decision data:
+- [x] Every sell annotated with: entry price/date, hold period, regime at exit, decision log notes
+- [x] Searchable by symbol and date range in app (Summary/Journal toggle)
+- [x] CLI: `pm-cli.sh trade-journal [symbol] [days]` — full history with context
+- [x] Grouped by date with regime and journal context headers (CLI)
 
 ---
 
@@ -392,7 +393,8 @@ Automated trade journal from transaction + ritual + checklist data:
 | **6** | ✅ Done | Technical analysis | Support/resistance, indicators, risk/reward |
 | **7** | ✅ Done | Pre-trade checklists | Gates action with process |
 | **8** | Partial | Decision logging & memory | Institutional memory that compounds |
-| **9** | Planned | Transaction analysis & post-mortems | Closes the learning loop |
+| **9.1** | Planned | Post-mortem template | Structured review of closed positions |
+| **9.2-9.4** | ✅ Done | Transaction analytics, patterns, journal | Closes the learning loop |
 | **10** | Planned | Portfolio optimization & exposure | Quantitative portfolio construction |
 | **11** | Planned | Equity research engine | Structured thesis building and tracking |
 | **12** | Planned | Risk analysis & monitoring | Continuous risk awareness |
