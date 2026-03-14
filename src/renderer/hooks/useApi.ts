@@ -59,6 +59,7 @@ import type {
   PreTradeCheckItem,
   TradeAnalytics,
   TradeJournalEntry,
+  DecisionMemory,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -195,6 +196,7 @@ declare global {
       getPositionBetas: (days?: number) => Promise<PositionBeta[]>;
       getTradeAnalytics: (days?: number) => Promise<TradeAnalytics | null>;
       getTradeJournal: (opts?: { symbol?: string; days?: number }) => Promise<TradeJournalEntry[]>;
+      getDecisionMemory: (symbol: string) => Promise<DecisionMemory | null>;
 
       // Price levels
       getPriceLevels: (symbol?: string) => Promise<PriceLevel[]>;

@@ -279,6 +279,116 @@ check_rapid_flip() {
   return 0
 }
 
+recall_symbol() {
+  local symbol="$1"
+  if [ -z "$symbol" ]; then
+    echo "Usage: pm-cli.sh recall <symbol>"
+    exit 1
+  fi
+  symbol=$(echo "$symbol" | tr '[:lower:]' '[:upper:]')
+
+  echo ""
+  echo "╔═══════════════════════════════════════╗"
+  echo "║       DECISION MEMORY: $symbol"
+  echo "╚═══════════════════════════════════════╝"
+  echo ""
+
+  # Recent transactions (last 5 buys/sells)
+  echo "── Recent Transactions ──"
+  local txns
+  txns=$(sqlite3 -separator '|' "$DB" "
+    SELECT t.date, t.type, t.quantity, printf('%.2f', t.price) as price,
+           printf('%.2f', t.amount) as amount, a.name as account
+    FROM transactions t
+    JOIN securities s ON t.security_id = s.id
+    JOIN accounts a ON t.account_id = a.id
+    WHERE s.symbol = '$symbol' AND t.type IN ('Buy', 'Sell', 'buy', 'sell')
+    ORDER BY t.date DESC LIMIT 5;
+  " 2>/dev/null)
+
+  if [ -z "$txns" ]; then
+    echo "  (no transactions found)"
+  else
+    printf "  %-12s %-5s %8s %10s %12s  %s\n" "DATE" "SIDE" "QTY" "PRICE" "AMOUNT" "ACCOUNT"
+    printf "  %-12s %-5s %8s %10s %12s  %s\n" "----------" "-----" "--------" "----------" "------------" "-------"
+    echo "$txns" | while IFS='|' read -r TDATE TTYPE TQTY TPRICE TAMT TACCT; do
+      printf "  %-12s %-5s %8s %10s %12s  %s\n" "$TDATE" "$TTYPE" "$TQTY" "$TPRICE" "$TAMT" "$TACCT"
+    done
+  fi
+  echo ""
+
+  # Post-mortems
+  echo "── Post-Mortems ──"
+  local pms
+  pms=$(sqlite3 -separator '|' "$DB" "
+    SELECT pm.close_date, pm.classification, pm.error_type,
+           printf('%.2f', pm.realized_gain) as realized_gain,
+           pm.hold_days, pm.lesson_learned
+    FROM post_mortems pm
+    JOIN securities s ON pm.security_id = s.id
+    WHERE s.symbol = '$symbol'
+    ORDER BY pm.close_date DESC;
+  " 2>/dev/null)
+
+  if [ -z "$pms" ]; then
+    echo "  (no post-mortems)"
+  else
+    echo "$pms" | while IFS='|' read -r CDATE CLASS ERR GAIN HDAYS LESSON; do
+      if echo "$GAIN" | grep -q '^-'; then
+        COLOR="\033[31m"
+      else
+        COLOR="\033[32m"
+      fi
+      RESET="\033[0m"
+      printf "  ${COLOR}%s | %s | %s | P&L: %s | %s days${RESET}\n" "$CDATE" "$CLASS" "$ERR" "$GAIN" "$HDAYS"
+      echo "    Lesson: $LESSON"
+    done
+  fi
+  echo ""
+
+  # Decision logs
+  echo "── Decision Logs ──"
+  local dlogs
+  dlogs=$(sqlite3 -separator '|' "$DB" "
+    SELECT dl.date, dl.decision_type, dl.decision, dl.background
+    FROM decision_logs dl
+    JOIN securities s ON dl.security_id = s.id
+    WHERE s.symbol = '$symbol'
+    ORDER BY dl.date DESC;
+  " 2>/dev/null)
+
+  if [ -z "$dlogs" ]; then
+    echo "  (no decision logs)"
+  else
+    echo "$dlogs" | while IFS='|' read -r DDATE DTYPE DDEC DBKG; do
+      echo "  $DDATE [$DTYPE] $DDEC"
+      [ -n "$DBKG" ] && echo "    Background: $DBKG"
+    done
+  fi
+  echo ""
+
+  # Intent changes
+  echo "── Intent Changes ──"
+  local intlogs
+  intlogs=$(sqlite3 -separator '|' "$DB" "
+    SELECT cl.changed_at, cl.field_name, cl.old_value, cl.new_value
+    FROM position_intent_change_logs cl
+    JOIN positions p ON cl.position_id = p.id
+    JOIN securities s ON p.security_id = s.id
+    WHERE s.symbol = '$symbol'
+    ORDER BY cl.changed_at DESC LIMIT 10;
+  " 2>/dev/null)
+
+  if [ -z "$intlogs" ]; then
+    echo "  (no intent changes)"
+  else
+    echo "$intlogs" | while IFS='|' read -r IDATE IFIELD IOLD INEW; do
+      echo "  $IDATE  $IFIELD: $IOLD → $INEW"
+    done
+  fi
+  echo ""
+}
+
 pre_trade_check() {
   local symbol="$1" side="$2" qty="$3" acct="$4" price="${5:-0}"
 
@@ -292,6 +402,27 @@ pre_trade_check() {
   echo "╚═══════════════════════════════════════╝"
   echo "  $side $qty $symbol ($book book)"
   echo ""
+
+  # Decision memory context
+  local dm_pm dm_dl
+  dm_pm=$(sqlite3 "$DB" "
+    SELECT pm.lesson_learned FROM post_mortems pm
+    JOIN securities s ON pm.security_id = s.id
+    WHERE s.symbol = '$symbol'
+    ORDER BY pm.close_date DESC LIMIT 1;
+  " 2>/dev/null)
+  dm_dl=$(sqlite3 "$DB" "
+    SELECT dl.decision FROM decision_logs dl
+    JOIN securities s ON dl.security_id = s.id
+    WHERE s.symbol = '$symbol'
+    ORDER BY dl.date DESC LIMIT 1;
+  " 2>/dev/null)
+  if [ -n "$dm_pm" ] || [ -n "$dm_dl" ]; then
+    echo "  ── Decision Memory ──"
+    [ -n "$dm_pm" ] && echo "  Last lesson: $dm_pm"
+    [ -n "$dm_dl" ] && echo "  Last decision: $dm_dl"
+    echo ""
+  fi
 
   if [ "$side" = "SELL" ]; then
     check_regime_read || return 1
@@ -3031,6 +3162,10 @@ PYEOF
     fi
     ;;
 
+  recall)
+    recall_symbol "$2"
+    ;;
+
   post-mortem)
     # Interactive post-mortem creation
     SYMBOL="$2"
@@ -3239,5 +3374,6 @@ PYEOF
     echo "  trade-journal [sym] [days] - Sell log with entry, P&L, regime, decisions (default 90d)"
     echo "  post-mortem <symbol> - Create a post-mortem for a closed position"
     echo "  post-mortems [symbol]- List post-mortems (optionally filtered by symbol)"
+    echo "  recall <symbol>     - Decision memory: trades, post-mortems, decisions, intents"
     ;;
 esac

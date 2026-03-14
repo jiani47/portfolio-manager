@@ -1124,6 +1124,11 @@ export function setupIpcHandlers(
     return transactionAnalyticsService.getTradeJournal(opts);
   });
 
+  ipcMain.handle('analytics:decision-memory', (_, symbol: string) => {
+    if (!transactionAnalyticsService) return null;
+    return transactionAnalyticsService.getDecisionMemory(symbol);
+  });
+
   // Price levels (support/resistance)
   ipcMain.handle('db:price-levels', (_, symbol?: string) => {
     return db.getPriceLevels(symbol);

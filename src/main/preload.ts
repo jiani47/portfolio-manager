@@ -132,6 +132,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPositionBetas: (days?: number) => ipcRenderer.invoke('analytics:position-betas', days),
   getTradeAnalytics: (days?: number) => ipcRenderer.invoke('analytics:trade-performance', days),
   getTradeJournal: (opts?: { symbol?: string; days?: number }) => ipcRenderer.invoke('analytics:trade-journal', opts),
+  getDecisionMemory: (symbol: string) => ipcRenderer.invoke('analytics:decision-memory', symbol),
 
   // Sector performance
   getSectorPerformance: () => ipcRenderer.invoke('fmp:sector-performance'),
