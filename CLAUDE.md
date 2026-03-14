@@ -72,6 +72,8 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh sell <qty> <sym> <at <price>|market|stop <price>> <DAY|GTC> [acct]  # Place sell order
 ./scripts/pm-cli.sh orders [all]        # List orders (open, or all including filled)
 ./scripts/pm-cli.sh cancel-order <id>   # Cancel order by ID
+./scripts/pm-cli.sh post-mortem <symbol>  # Interactive post-mortem for a closed position
+./scripts/pm-cli.sh post-mortems [symbol] # List post-mortems (optionally filtered by symbol)
 ```
 
 ## Daily PM Ritual

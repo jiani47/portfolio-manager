@@ -3031,6 +3031,163 @@ PYEOF
     fi
     ;;
 
+  post-mortem)
+    # Interactive post-mortem creation
+    SYMBOL="$2"
+    if [ -z "$SYMBOL" ]; then
+      echo "Usage: pm-cli.sh post-mortem <symbol>"
+      exit 1
+    fi
+    SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+
+    # Look up security_id
+    SEC_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$SYMBOL' LIMIT 1;")
+    if [ -z "$SEC_ID" ]; then
+      echo "ERROR: Security '$SYMBOL' not found in database."
+      exit 1
+    fi
+
+    echo "=== Post-Mortem: $SYMBOL ==="
+    echo ""
+
+    # Show recent sell transactions for context
+    echo "--- Recent Sell Transactions ---"
+    sqlite3 -header -column "$DB" "
+      SELECT t.date, t.quantity, printf('%.2f', t.price) as price,
+             printf('%.2f', t.amount) as amount, a.name as account
+      FROM transactions t
+      JOIN accounts a ON t.account_id = a.id
+      WHERE t.security_id = '$SEC_ID' AND t.type = 'Sell'
+      ORDER BY t.date DESC LIMIT 5;
+    "
+    echo ""
+
+    # Show current position intent if exists
+    INTENT_ROW=$(sqlite3 -header -column "$DB" "
+      SELECT pi.tag as tier, pi.thesis, pi.invalidation
+      FROM position_intents pi
+      JOIN positions p ON pi.position_id = p.id
+      WHERE p.security_id = '$SEC_ID' LIMIT 1;
+    " 2>/dev/null)
+    if [ -n "$INTENT_ROW" ]; then
+      echo "--- Current Position Intent ---"
+      echo "$INTENT_ROW"
+      echo ""
+    fi
+
+    # Prompt for fields
+    read -p "Original intent (investment/trade): " PM_INTENT
+    read -p "Close date (YYYY-MM-DD): " PM_CLOSE_DATE
+    read -p "Tier at entry: " PM_TIER
+    echo "Entry thesis (what was the original idea?):"
+    read -p "> " PM_ENTRY_THESIS
+    echo "What happened (how did the position play out?):"
+    read -p "> " PM_WHAT_HAPPENED
+    echo "Rule adherence (did you follow your rules?):"
+    read -p "> " PM_RULE_ADHERENCE
+
+    # Error type menu
+    ERROR_TYPES=("entry-timing" "sizing" "stop-discipline" "thesis-quality" "regime-misread" "overtrading" "none")
+    echo "Error type:"
+    echo "  1) entry-timing"
+    echo "  2) sizing"
+    echo "  3) stop-discipline"
+    echo "  4) thesis-quality"
+    echo "  5) regime-misread"
+    echo "  6) overtrading"
+    echo "  7) none"
+    read -p "Select (1-7): " PM_ERROR_NUM
+    if [ "$PM_ERROR_NUM" -ge 1 ] && [ "$PM_ERROR_NUM" -le 7 ] 2>/dev/null; then
+      PM_ERROR_TYPE="${ERROR_TYPES[$((PM_ERROR_NUM - 1))]}"
+    else
+      echo "Invalid selection, defaulting to 'none'"
+      PM_ERROR_TYPE="none"
+    fi
+
+    # Classification menu
+    CLASSIFICATIONS=("good-win" "bad-win" "good-loss" "bad-loss")
+    echo "Classification:"
+    echo "  1) good-win  (followed rules, made money)"
+    echo "  2) bad-win   (broke rules, got lucky)"
+    echo "  3) good-loss (followed rules, lost money)"
+    echo "  4) bad-loss  (broke rules, lost money)"
+    read -p "Select (1-4): " PM_CLASS_NUM
+    if [ "$PM_CLASS_NUM" -ge 1 ] && [ "$PM_CLASS_NUM" -le 4 ] 2>/dev/null; then
+      PM_CLASSIFICATION="${CLASSIFICATIONS[$((PM_CLASS_NUM - 1))]}"
+    else
+      echo "Invalid selection, defaulting to 'good-loss'"
+      PM_CLASSIFICATION="good-loss"
+    fi
+
+    echo "Lesson learned:"
+    read -p "> " PM_LESSON
+    read -p "Realized P&L ($): " PM_REALIZED
+    read -p "Hold days: " PM_HOLD_DAYS
+
+    # Escape single quotes for SQL
+    PM_INTENT_ESC=$(echo "$PM_INTENT" | sed "s/'/''/g")
+    PM_TIER_ESC=$(echo "$PM_TIER" | sed "s/'/''/g")
+    PM_ENTRY_THESIS_ESC=$(echo "$PM_ENTRY_THESIS" | sed "s/'/''/g")
+    PM_WHAT_HAPPENED_ESC=$(echo "$PM_WHAT_HAPPENED" | sed "s/'/''/g")
+    PM_RULE_ADHERENCE_ESC=$(echo "$PM_RULE_ADHERENCE" | sed "s/'/''/g")
+    PM_LESSON_ESC=$(echo "$PM_LESSON" | sed "s/'/''/g")
+
+    # Generate UUID and timestamp
+    PM_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+    # Default numeric fields
+    if [ -z "$PM_REALIZED" ]; then PM_REALIZED="0"; fi
+    if [ -z "$PM_HOLD_DAYS" ]; then PM_HOLD_DAYS="0"; fi
+
+    sqlite3 "$DB" "INSERT INTO post_mortems (id, security_id, close_date, original_intent, tier, entry_thesis, what_happened, rule_adherence, error_type, classification, lesson_learned, realized_gain, hold_days, created_at, updated_at) VALUES ('$PM_ID', '$SEC_ID', '$PM_CLOSE_DATE', '$PM_INTENT_ESC', '$PM_TIER_ESC', '$PM_ENTRY_THESIS_ESC', '$PM_WHAT_HAPPENED_ESC', '$PM_RULE_ADHERENCE_ESC', '$PM_ERROR_TYPE', '$PM_CLASSIFICATION', '$PM_LESSON_ESC', $PM_REALIZED, $PM_HOLD_DAYS, '$NOW', '$NOW');"
+
+    echo ""
+    echo "Post-mortem created for $SYMBOL ($PM_CLASSIFICATION, error: $PM_ERROR_TYPE)"
+    echo "ID: $PM_ID"
+    ;;
+
+  post-mortems)
+    # List post-mortems, optionally filtered by symbol
+    PM_FILTER="$2"
+    if [ -n "$PM_FILTER" ]; then
+      PM_FILTER=$(echo "$PM_FILTER" | tr '[:lower:]' '[:upper:]')
+      PM_WHERE="WHERE s.symbol = '$PM_FILTER'"
+      echo "=== Post-Mortems: $PM_FILTER ==="
+    else
+      PM_WHERE=""
+      echo "=== All Post-Mortems ==="
+    fi
+
+    # Use raw mode to colorize output
+    PM_ROWS=$(sqlite3 -separator '|' "$DB" "
+      SELECT s.symbol, pm.close_date, pm.classification, pm.error_type,
+             pm.hold_days, printf('%.2f', pm.realized_gain) as realized_gain,
+             pm.lesson_learned
+      FROM post_mortems pm
+      JOIN securities s ON pm.security_id = s.id
+      $PM_WHERE
+      ORDER BY pm.close_date DESC;
+    ")
+
+    if [ -z "$PM_ROWS" ]; then
+      echo "(none)"
+    else
+      printf "%-6s %-12s %-11s %-16s %5s %12s  %s\n" "SYMBOL" "CLOSE DATE" "CLASS" "ERROR" "DAYS" "P&L" "LESSON"
+      printf "%-6s %-12s %-11s %-16s %5s %12s  %s\n" "------" "----------" "-----------" "----------------" "-----" "------------" "------"
+      echo "$PM_ROWS" | while IFS='|' read -r SYM CDATE CLASS ERR HDAYS GAIN LESSON; do
+        # Color: green for gains, red for losses
+        if echo "$GAIN" | grep -q '^-'; then
+          COLOR="\033[31m"  # red
+        else
+          COLOR="\033[32m"  # green
+        fi
+        RESET="\033[0m"
+        printf "${COLOR}%-6s %-12s %-11s %-16s %5s %12s${RESET}  %s\n" "$SYM" "$CDATE" "$CLASS" "$ERR" "$HDAYS" "$GAIN" "$LESSON"
+      done
+    fi
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -3080,5 +3237,7 @@ PYEOF
     echo "  cancel-order <id>  - Cancel an open order by order ID"
     echo "  trade-analytics    - Trade performance: win rate, P&L, top winners/losers"
     echo "  trade-journal [sym] [days] - Sell log with entry, P&L, regime, decisions (default 90d)"
+    echo "  post-mortem <symbol> - Create a post-mortem for a closed position"
+    echo "  post-mortems [symbol]- List post-mortems (optionally filtered by symbol)"
     ;;
 esac
