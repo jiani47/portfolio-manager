@@ -857,6 +857,25 @@ export interface TradePatterns {
   overallInsight: string;
 }
 
+export interface PostMortem {
+  id: string;
+  securityId: string;
+  symbol: string;
+  closeDate: string;
+  originalIntent: string; // 'investment' | 'trade'
+  tier: string;
+  entryThesis: string;
+  whatHappened: string;
+  ruleAdherence: string; // free text: sizing, stops, averaging
+  errorType: string; // 'entry-timing' | 'sizing' | 'stop-discipline' | 'thesis-quality' | 'regime-misread' | 'overtrading' | 'none'
+  classification: string; // 'good-win' | 'bad-win' | 'good-loss' | 'bad-loss'
+  lessonLearned: string; // one concrete change
+  realizedGain: number;
+  holdDays: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface TradeJournalEntry {
   symbol: string;
   sellDate: string;

@@ -26,6 +26,7 @@ import {
   TaskRunRecord,
   PreTradeCheckRecord,
   ClosedTrade,
+  PostMortem,
 } from '../shared/types';
 
 export class Database {
@@ -557,6 +558,29 @@ export class Database {
         passed INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
+    `);
+
+    // Post-mortems table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS post_mortems (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        close_date TEXT NOT NULL,
+        original_intent TEXT NOT NULL,
+        tier TEXT,
+        entry_thesis TEXT,
+        what_happened TEXT NOT NULL,
+        rule_adherence TEXT,
+        error_type TEXT NOT NULL,
+        classification TEXT NOT NULL,
+        lesson_learned TEXT NOT NULL,
+        realized_gain REAL DEFAULT 0,
+        hold_days INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_post_mortems_security ON post_mortems(security_id);
     `);
 
     // Sync watchlist monitors on startup
@@ -2911,6 +2935,122 @@ export class Database {
     `).get(symbol) as { last_buy: string | null } | undefined;
     return row?.last_buy || null;
   }
+
+  // Post-mortem operations
+
+  createPostMortem(data: {
+    securityId: string;
+    closeDate: string;
+    originalIntent: string;
+    tier?: string;
+    entryThesis?: string;
+    whatHappened: string;
+    ruleAdherence?: string;
+    errorType: string;
+    classification: string;
+    lessonLearned: string;
+    realizedGain?: number;
+    holdDays?: number;
+  }): PostMortem {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO post_mortems (id, security_id, close_date, original_intent, tier, entry_thesis, what_happened, rule_adherence, error_type, classification, lesson_learned, realized_gain, hold_days, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, data.securityId, data.closeDate, data.originalIntent,
+      data.tier || null, data.entryThesis || null, data.whatHappened,
+      data.ruleAdherence || null, data.errorType, data.classification,
+      data.lessonLearned, data.realizedGain ?? 0, data.holdDays ?? 0, now, now);
+    return this.getPostMortem(id)!;
+  }
+
+  getPostMortem(id: string): PostMortem | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT pm.*, s.symbol FROM post_mortems pm
+      JOIN securities s ON pm.security_id = s.id
+      WHERE pm.id = ?
+    `).get(id);
+    return row ? this.mapRowToPostMortem(row) : null;
+  }
+
+  listPostMortems(opts?: { symbol?: string; classification?: string; limit?: number }): PostMortem[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (opts?.symbol) {
+      conditions.push('s.symbol = ?');
+      params.push(opts.symbol.toUpperCase());
+    }
+    if (opts?.classification) {
+      conditions.push('pm.classification = ?');
+      params.push(opts.classification);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = opts?.limit ? `LIMIT ${opts.limit}` : '';
+
+    return this.db.prepare(`
+      SELECT pm.*, s.symbol FROM post_mortems pm
+      JOIN securities s ON pm.security_id = s.id
+      ${where}
+      ORDER BY pm.close_date DESC
+      ${limit}
+    `).all(...params).map(this.mapRowToPostMortem);
+  }
+
+  updatePostMortem(id: string, data: Partial<Omit<PostMortem, 'id' | 'symbol' | 'createdAt' | 'updatedAt'>>): PostMortem {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const fields: string[] = ['updated_at = ?'];
+    const values: unknown[] = [now];
+
+    if (data.securityId !== undefined) { fields.push('security_id = ?'); values.push(data.securityId); }
+    if (data.closeDate !== undefined) { fields.push('close_date = ?'); values.push(data.closeDate); }
+    if (data.originalIntent !== undefined) { fields.push('original_intent = ?'); values.push(data.originalIntent); }
+    if (data.tier !== undefined) { fields.push('tier = ?'); values.push(data.tier); }
+    if (data.entryThesis !== undefined) { fields.push('entry_thesis = ?'); values.push(data.entryThesis); }
+    if (data.whatHappened !== undefined) { fields.push('what_happened = ?'); values.push(data.whatHappened); }
+    if (data.ruleAdherence !== undefined) { fields.push('rule_adherence = ?'); values.push(data.ruleAdherence); }
+    if (data.errorType !== undefined) { fields.push('error_type = ?'); values.push(data.errorType); }
+    if (data.classification !== undefined) { fields.push('classification = ?'); values.push(data.classification); }
+    if (data.lessonLearned !== undefined) { fields.push('lesson_learned = ?'); values.push(data.lessonLearned); }
+    if (data.realizedGain !== undefined) { fields.push('realized_gain = ?'); values.push(data.realizedGain); }
+    if (data.holdDays !== undefined) { fields.push('hold_days = ?'); values.push(data.holdDays); }
+
+    values.push(id);
+    this.db.prepare(`UPDATE post_mortems SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    return this.getPostMortem(id)!;
+  }
+
+  deletePostMortem(id: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare('DELETE FROM post_mortems WHERE id = ?').run(id);
+  }
+
+  private mapRowToPostMortem = (row: unknown): PostMortem => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      securityId: r.security_id as string,
+      symbol: r.symbol as string,
+      closeDate: r.close_date as string,
+      originalIntent: r.original_intent as string,
+      tier: r.tier as string,
+      entryThesis: r.entry_thesis as string,
+      whatHappened: r.what_happened as string,
+      ruleAdherence: r.rule_adherence as string,
+      errorType: r.error_type as string,
+      classification: r.classification as string,
+      lessonLearned: r.lesson_learned as string,
+      realizedGain: r.realized_gain as number,
+      holdDays: r.hold_days as number,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
 
   getRawDb(): BetterSqlite3.Database {
     if (!this.db) throw new Error('Database not initialized');
