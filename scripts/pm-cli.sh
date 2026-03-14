@@ -460,6 +460,100 @@ trade_analytics() {
   "
 }
 
+trade_journal() {
+  local symbol="${1:-}"
+  local days="${2:-90}"
+  local cutoff=$(date -v-${days}d +%Y-%m-%d 2>/dev/null || date -d "$days days ago" +%Y-%m-%d)
+
+  echo ""
+  echo "═══════════════════════════════════════"
+  echo "  TRADE JOURNAL${symbol:+ — $symbol} (last ${days}d)"
+  echo "═══════════════════════════════════════"
+  echo ""
+
+  local query="
+    SELECT
+      s.symbol,
+      t.date as sell_date,
+      t.quantity as sell_qty,
+      t.price as sell_price,
+      t.amount as proceeds,
+      (SELECT tb.date FROM transactions tb
+       WHERE tb.security_id = t.security_id AND tb.account_id = t.account_id
+       AND tb.type = 'buy' AND tb.date <= t.date
+       ORDER BY tb.date DESC LIMIT 1) as buy_date,
+      (SELECT tb.price FROM transactions tb
+       WHERE tb.security_id = t.security_id AND tb.account_id = t.account_id
+       AND tb.type = 'buy' AND tb.date <= t.date
+       ORDER BY tb.date DESC LIMIT 1) as buy_price,
+      (SELECT dr.regime_type FROM daily_rituals dr WHERE dr.date = t.date) as regime_at_sell,
+      (SELECT dr.action_chosen FROM daily_rituals dr WHERE dr.date = t.date) as action_chosen,
+      (SELECT dr.journal FROM daily_rituals dr WHERE dr.date = t.date) as journal,
+      (SELECT dl.decision FROM decision_logs dl
+       WHERE dl.security_id = t.security_id
+       AND dl.decision_date BETWEEN date(t.date, '-3 days') AND t.date
+       ORDER BY dl.decision_date DESC LIMIT 1) as decision_note,
+      a.account_number
+    FROM transactions t
+    JOIN securities s ON t.security_id = s.id
+    JOIN accounts a ON t.account_id = a.id
+    WHERE t.type = 'sell'
+      AND t.date >= '$cutoff'
+      ${symbol:+AND UPPER(s.symbol) = UPPER('$symbol')}
+    ORDER BY t.date DESC
+    LIMIT 100
+  "
+
+  local results=$(sqlite3 -separator '|' "$DB" "$query" 2>/dev/null)
+
+  if [ -z "$results" ]; then
+    echo "  No sell transactions found${symbol:+ for $symbol} in last ${days} days."
+    echo ""
+    return
+  fi
+
+  local prev_date=""
+  echo "$results" | while IFS='|' read -r sym sell_date sell_qty sell_price proceeds buy_date buy_price regime_sell action journal decision acct; do
+    # Date header
+    if [ "$sell_date" != "$prev_date" ]; then
+      [ -n "$prev_date" ] && echo ""
+      echo "── $sell_date ──────────────────────────"
+      [ -n "$regime_sell" ] && echo "  Regime: $regime_sell"
+      [ -n "$action" ] && echo "  Action: $action"
+      [ -n "$journal" ] && echo "  Journal: $journal"
+      echo ""
+      prev_date="$sell_date"
+    fi
+
+    # P&L calculation
+    local pnl_info=""
+    if [ -n "$buy_price" ] && [ "$buy_price" != "" ]; then
+      pnl_info=$(python3 -c "
+bp=float('$buy_price'); sp=float('$sell_price'); q=float('$sell_qty')
+gain=(sp-bp)*q; pct=((sp/bp)-1)*100 if bp>0 else 0
+print(f'\${gain:+,.0f} ({pct:+.1f}%)')
+" 2>/dev/null)
+    fi
+
+    # Hold period
+    local hold=""
+    if [ -n "$buy_date" ] && [ "$buy_date" != "" ]; then
+      hold=$(python3 -c "
+from datetime import datetime
+d1=datetime.strptime('$buy_date','%Y-%m-%d')
+d2=datetime.strptime('$sell_date','%Y-%m-%d')
+print(f'{(d2-d1).days}d')
+" 2>/dev/null)
+    fi
+
+    echo "  SELL $sell_qty $sym @ \$$sell_price  $pnl_info"
+    [ -n "$buy_date" ] && [ "$buy_date" != "" ] && echo "    Entry: $buy_date @ \$$buy_price (held $hold)"
+    [ -n "$decision" ] && [ "$decision" != "" ] && echo "    Decision: $decision"
+  done
+
+  echo ""
+}
+
 case "$1" in
   morning)
     # Combined: refresh prices + briefing + ritual status
@@ -2901,6 +2995,10 @@ PYEOF
     trade_analytics
     ;;
 
+  trade-journal)
+    trade_journal "$2" "$3"
+    ;;
+
   cancel-order)
     ORDER_ID="${2:-}"
     if [ -z "$ORDER_ID" ]; then
@@ -2981,5 +3079,6 @@ PYEOF
     echo "  orders [all]       - List open/working orders (or all orders in last 7 days)"
     echo "  cancel-order <id>  - Cancel an open order by order ID"
     echo "  trade-analytics    - Trade performance: win rate, P&L, top winners/losers"
+    echo "  trade-journal [sym] [days] - Sell log with entry, P&L, regime, decisions (default 90d)"
     ;;
 esac
