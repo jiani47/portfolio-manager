@@ -219,27 +219,30 @@ Every action tagged with:
 - One-sentence rationale
 - Position(s) affected
 
-### 8.2 Memory Recall
+### 8.2 Memory Recall ✅
 
 When contemplating an action, the co-pilot surfaces:
-- What you did last time in a similar situation
-- Why you did it
-- How it turned out (factual P&L, not judgment)
+- [x] What you did last time in a similar situation
+- [x] Why you did it
+- [x] How it turned out (factual P&L, not judgment)
+- [x] `getDecisionMemory(symbol)` joins past trades, post-mortems, decision logs, intent changes
+- [x] CLI: `pm-cli.sh recall <symbol>` — full decision history
+- [x] Auto-surfaced in pre-trade checklist (CLI and Electron IPC)
 
 This defeats emotional recursion and hindsight bias.
 
-### 8.3 Conflict Surfacing
+### 8.3 Conflict Surfacing ✅
 
 Not alerts — questions:
-- "This increases consumer beta by +8%. Is that intentional?"
-- "This adds duration exposure after you reduced it this morning."
-- "You trimmed DDOG for duration risk — this add reintroduces it."
+- [x] Action conflict: "Today's action is 'reduce' — buying conflicts"
+- [x] Sector conflict: "You sold other Tech names in the last 7 days — adding reintroduces exposure"
+- [x] Wired into both CLI pre-trade check and Electron PreTradeValidator
 
-### 8.4 Sequencing Enforcement
+### 8.4 Sequencing Enforcement ✅
 
-- "You haven't completed the regime read"
-- "Adds are disabled on sorting days"
-- "This conflicts with yesterday's trim logic"
+- [x] "You haven't completed the regime read" (checkRegimeRead — hard fail)
+- [x] "Adds are disabled on sorting days" (checkSortingDay — warn)
+- [x] "This conflicts with today's action" (checkActionConflict — warn)
 
 ---
 
@@ -247,15 +250,17 @@ Not alerts — questions:
 
 **Goal:** Structured review of every closed position. Win/loss classification, pattern detection, and institutional memory that compounds over time.
 
-### 9.1 Post-Mortem Template
+### 9.1 Post-Mortem Template ✅
 
 For every closed position (mandatory for large losses or big wins):
-- Original intent (investment vs trade, tier/setup)
-- Thesis vs reality (what happened vs what was expected)
-- Rule adherence audit (sizing, stops, no averaging down, no thesis upgrade)
-- Primary error classification (entry timing, sizing, stop discipline, thesis quality, boundary leakage, regime misread)
-- One concrete change for next time
-- Classification: good loss / bad loss / good win / bad win
+- [x] Original intent (investment vs trade, tier/setup)
+- [x] Thesis vs reality (what happened vs what was expected)
+- [x] Rule adherence audit (sizing, stops, no averaging down, no thesis upgrade)
+- [x] Primary error classification (entry timing, sizing, stop discipline, thesis quality, regime misread, overtrading, none)
+- [x] One concrete change for next time
+- [x] Classification: good loss / bad loss / good win / bad win
+- [x] `post_mortems` table with full schema, CRUD in database.ts
+- [x] CLI: `pm-cli.sh post-mortem <symbol>` (interactive) + `post-mortems [symbol]` (list)
 
 ### 9.2 Transaction Analytics ✅
 
@@ -392,8 +397,8 @@ Automated trade journal from transaction + ritual + decision data:
 | **5** | ✅ Done | Data infrastructure | Backfill, snapshots, news feed |
 | **6** | ✅ Done | Technical analysis | Support/resistance, indicators, risk/reward |
 | **7** | ✅ Done | Pre-trade checklists | Gates action with process |
-| **8** | Partial | Decision logging & memory | Institutional memory that compounds |
-| **9.1** | Planned | Post-mortem template | Structured review of closed positions |
+| **8** | ✅ Done | Decision logging & memory | Institutional memory that compounds |
+| **9.1** | ✅ Done | Post-mortem template | Structured review of closed positions |
 | **9.2-9.4** | ✅ Done | Transaction analytics, patterns, journal | Closes the learning loop |
 | **10** | Planned | Portfolio optimization & exposure | Quantitative portfolio construction |
 | **11** | Planned | Equity research engine | Structured thesis building and tracking |

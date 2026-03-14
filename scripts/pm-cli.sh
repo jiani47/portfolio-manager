@@ -424,6 +424,42 @@ pre_trade_check() {
     echo ""
   fi
 
+  # Conflict surfacing (buys only)
+  if [ "$side" = "BUY" ]; then
+    # Check if today's ritual action conflicts
+    local action=$(sqlite3 "$DB" "SELECT action_chosen FROM daily_rituals WHERE date = date('now')" 2>/dev/null)
+    if [ "$action" = "reduce" ]; then
+      echo "  ⚠ CONFLICT: Today's action is 'reduce' but you're buying."
+      read -p "    Override? (y/n): " ov
+      [ "$ov" != "y" ] && { echo "  Checklist abandoned."; return 1; }
+    elif [ "$action" = "nothing" ]; then
+      echo "  ⚠ CONFLICT: Today's action is 'nothing' but you're trading."
+      read -p "    Override? (y/n): " ov
+      [ "$ov" != "y" ] && { echo "  Checklist abandoned."; return 1; }
+    fi
+
+    # Check if recently sold same sector
+    local sector=$(sqlite3 "$DB" "SELECT sector FROM securities WHERE symbol='$symbol'" 2>/dev/null)
+    if [ -n "$sector" ] && [ "$sector" != "" ]; then
+      local recent_sector_sells=$(sqlite3 "$DB" "
+        SELECT s.symbol || ' on ' || t.date
+        FROM transactions t
+        JOIN securities s ON t.security_id = s.id
+        WHERE s.sector = '$sector' AND t.type = 'sell'
+        AND t.date >= date('now', '-7 days')
+        AND s.symbol != '$symbol'
+        ORDER BY t.date DESC LIMIT 3
+      " 2>/dev/null)
+      if [ -n "$recent_sector_sells" ]; then
+        echo "  ⚠ CONFLICT: You sold other $sector names in the last 7 days:"
+        echo "$recent_sector_sells" | while read -r line; do echo "    $line"; done
+        echo "    Adding $symbol reintroduces sector exposure you just reduced."
+        read -p "    Acknowledged? (y/n): " ack
+        [ "$ack" != "y" ] && { echo "  Checklist abandoned."; return 1; }
+      fi
+    fi
+  fi
+
   if [ "$side" = "SELL" ]; then
     check_regime_read || return 1
     check_rapid_flip "$symbol" "sell" "$price" || return 1

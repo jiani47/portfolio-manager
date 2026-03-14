@@ -2990,14 +2990,15 @@ export class Database {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limit = opts?.limit ? `LIMIT ${opts.limit}` : '';
+    const limitClause = opts?.limit ? 'LIMIT ?' : '';
+    if (opts?.limit) params.push(opts.limit);
 
     return this.db.prepare(`
       SELECT pm.*, s.symbol FROM post_mortems pm
       JOIN securities s ON pm.security_id = s.id
       ${where}
       ORDER BY pm.close_date DESC
-      ${limit}
+      ${limitClause}
     `).all(...params).map(this.mapRowToPostMortem);
   }
 

@@ -68,6 +68,7 @@ export class PreTradeValidator {
     items.push(this.checkReentryCooldown(req.symbol));
     items.push(this.checkRapidFlip(req.symbol, 'buy'));
     items.push(this.checkPositionSize(req, 'investing'));
+    items.push(this.checkActionConflict(req.instruction));
     items.push({
       id: 'invest-hold-months',
       label: 'This is an investment — I expect to hold for months+',
@@ -91,6 +92,7 @@ export class PreTradeValidator {
     items.push(this.checkReentryCooldown(req.symbol));
     items.push(this.checkRapidFlip(req.symbol, 'buy'));
     items.push(this.checkPositionSize(req, 'trading'));
+    items.push(this.checkActionConflict(req.instruction));
     items.push({
       id: 'trade-stop-defined',
       label: 'I have a stop level defined — technical, not emotional',
@@ -290,5 +292,22 @@ export class PreTradeValidator {
       return { id: 'position-size', label: `Position size ${afterTradePct.toFixed(1)}% > ${tier} limit (${limit}%)`, type: 'auto', status: 'warn', detail: `After trade: ${afterTradePct.toFixed(1)}% of portfolio` };
     }
     return { id: 'position-size', label: `Position size ${afterTradePct.toFixed(1)}% (≤${limit}% ${tier})`, type: 'auto', status: 'pass' };
+  }
+
+  /** Warn if today's ritual action conflicts with this trade */
+  private checkActionConflict(instruction: string): PreTradeCheckItem {
+    const today = new Date().toISOString().split('T')[0];
+    const rituals = this.db.listDailyRituals(1);
+    const todayRitual = rituals.find(r => r.date === today);
+    if (!todayRitual?.actionChosen) {
+      return { id: 'action-conflict', label: 'Action alignment', type: 'auto', status: 'pass', detail: 'No action chosen today' };
+    }
+    if (todayRitual.actionChosen === 'reduce' && instruction === 'BUY') {
+      return { id: 'action-conflict', label: `Today's action is "reduce" — buying conflicts`, type: 'auto', status: 'warn', detail: `You chose "reduce" today. This buy contradicts that decision.` };
+    }
+    if (todayRitual.actionChosen === 'nothing' && instruction !== 'SELL') {
+      return { id: 'action-conflict', label: `Today's action is "nothing" — this trade conflicts`, type: 'auto', status: 'warn', detail: 'You chose to do nothing today.' };
+    }
+    return { id: 'action-conflict', label: `Action aligned (${todayRitual.actionChosen})`, type: 'auto', status: 'pass' };
   }
 }
