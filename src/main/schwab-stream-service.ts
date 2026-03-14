@@ -508,6 +508,10 @@ export class SchwabStreamService {
     });
   }
 
+  getLatestQuotes(): StreamingQuote[] {
+    return Array.from(this.latestQuotes.values());
+  }
+
   getStatus(): StreamingState {
     return {
       status: this.status,

@@ -9,8 +9,14 @@ import type {
 export class TransactionAnalyticsService {
   constructor(private db: Database) {}
 
-  getTradeAnalytics(): TradeAnalytics {
-    const trades = this.db.getClosedTrades();
+  getTradeAnalytics(days?: number): TradeAnalytics {
+    let trades = this.db.getClosedTrades();
+    if (days) {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - days);
+      const cutoffStr = cutoff.toISOString().split('T')[0];
+      trades = trades.filter(t => t.sellDate >= cutoffStr);
+    }
     return {
       summary: this.computeSummary(trades),
       byHoldPeriod: this.breakdownByHoldPeriod(trades),

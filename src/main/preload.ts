@@ -130,7 +130,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Analytics
   getPortfolioAnalytics: (days?: number) => ipcRenderer.invoke('analytics:portfolio', days),
   getPositionBetas: (days?: number) => ipcRenderer.invoke('analytics:position-betas', days),
-  getTradeAnalytics: () => ipcRenderer.invoke('analytics:trade-performance'),
+  getTradeAnalytics: (days?: number) => ipcRenderer.invoke('analytics:trade-performance', days),
 
   // Sector performance
   getSectorPerformance: () => ipcRenderer.invoke('fmp:sector-performance'),
@@ -230,6 +230,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   streamingStart: (symbols: string[]) => ipcRenderer.invoke('streaming:start', symbols),
   streamingStop: () => ipcRenderer.invoke('streaming:stop'),
   streamingGetStatus: () => ipcRenderer.invoke('streaming:get-status'),
+  streamingGetQuotes: () => ipcRenderer.invoke('streaming:get-quotes'),
   streamingUpdateSymbols: (symbols: string[]) => ipcRenderer.invoke('streaming:update-symbols', symbols),
 
   // News operations

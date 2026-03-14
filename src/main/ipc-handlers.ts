@@ -1094,6 +1094,11 @@ export function setupIpcHandlers(
     return streamService.getStatus();
   });
 
+  ipcMain.handle('streaming:get-quotes', () => {
+    if (!streamService) return [];
+    return streamService.getLatestQuotes();
+  });
+
   ipcMain.handle('streaming:update-symbols', async (_, symbols: string[]) => {
     streamService?.updateSymbols(symbols);
   });
@@ -1109,9 +1114,9 @@ export function setupIpcHandlers(
     return analyticsService.getPositionBetas(days);
   });
 
-  ipcMain.handle('analytics:trade-performance', () => {
+  ipcMain.handle('analytics:trade-performance', (_, days?: number) => {
     if (!transactionAnalyticsService) return null;
-    return transactionAnalyticsService.getTradeAnalytics();
+    return transactionAnalyticsService.getTradeAnalytics(days);
   });
 
   // Price levels (support/resistance)

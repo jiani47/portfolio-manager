@@ -192,7 +192,7 @@ declare global {
       // Analytics
       getPortfolioAnalytics: (days?: number) => Promise<PortfolioAnalytics | null>;
       getPositionBetas: (days?: number) => Promise<PositionBeta[]>;
-      getTradeAnalytics: () => Promise<TradeAnalytics | null>;
+      getTradeAnalytics: (days?: number) => Promise<TradeAnalytics | null>;
 
       // Price levels
       getPriceLevels: (symbol?: string) => Promise<PriceLevel[]>;
@@ -264,6 +264,7 @@ declare global {
       streamingStart: (symbols: string[]) => Promise<void>;
       streamingStop: () => Promise<void>;
       streamingGetStatus: () => Promise<StreamingState>;
+      streamingGetQuotes: () => Promise<StreamingQuote[]>;
       streamingUpdateSymbols: (symbols: string[]) => Promise<void>;
 
       // News operations
@@ -1779,10 +1780,10 @@ export function useTradeAnalytics() {
   const [data, setData] = useState<TradeAnalytics | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const fetchTradeAnalytics = useCallback(async () => {
+  const fetchTradeAnalytics = useCallback(async (days?: number) => {
     setLoading(true);
     try {
-      const result = await window.electronAPI.getTradeAnalytics();
+      const result = await window.electronAPI.getTradeAnalytics(days);
       setData(result);
     } finally {
       setLoading(false);

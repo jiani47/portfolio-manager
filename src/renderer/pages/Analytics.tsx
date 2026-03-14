@@ -91,6 +91,7 @@ export default function Analytics() {
   }, [selectedPeriod, fetchAnalytics]);
 
   const { tradeAnalytics, loading: tpLoading, fetchTradeAnalytics } = useTradeAnalytics();
+  const [tpPeriod, setTpPeriod] = useState<number | undefined>(undefined); // undefined = all time
 
   useEffect(() => {
     if (activeTab === 'transactions') {
@@ -101,8 +102,8 @@ export default function Analytics() {
   }, [activeTab, fetchTransactions, fetchAccounts, fetchSecurities]);
 
   useEffect(() => {
-    if (activeTab === 'trade-performance') fetchTradeAnalytics();
-  }, [activeTab, fetchTradeAnalytics]);
+    if (activeTab === 'trade-performance') fetchTradeAnalytics(tpPeriod);
+  }, [activeTab, tpPeriod, fetchTradeAnalytics]);
 
   const securityMap = useMemo(() => new Map(securities.map(s => [s.id, s])), [securities]);
   const accountMap = useMemo(() => new Map(accounts.map(a => [a.id, a])), [accounts]);
@@ -493,6 +494,27 @@ export default function Analytics() {
 
       {activeTab === 'trade-performance' && (
         <>
+          <div className="flex gap-1 mb-4">
+            {([
+              { label: '30D', value: 30 },
+              { label: '90D', value: 90 },
+              { label: '180D', value: 180 },
+              { label: '1Y', value: 365 },
+              { label: 'All', value: undefined },
+            ] as Array<{ label: string; value: number | undefined }>).map(({ label, value }) => (
+              <button
+                key={label}
+                onClick={() => setTpPeriod(value)}
+                className={`px-3 py-1 text-sm rounded-md ${
+                  tpPeriod === value
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-white text-gray-600 hover:bg-gray-50 border border-gray-200'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           {tpLoading ? (
             <div className="flex items-center justify-center h-64">
               <div className="text-gray-500">Loading...</div>

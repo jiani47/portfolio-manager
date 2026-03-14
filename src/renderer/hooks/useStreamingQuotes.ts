@@ -22,9 +22,22 @@ export function useStreamingQuotes(symbols: string[]) {
       setStatus(newStatus as StreamingStatus);
     });
 
-    // Get initial status
+    // Get initial status and bootstrap quotes (covers race where main sent quotes before renderer mounted)
     window.electronAPI.streamingGetStatus().then(state => {
       setStatus(state.status);
+    });
+    window.electronAPI.streamingGetQuotes().then((initialQuotes: StreamingQuote[]) => {
+      if (initialQuotes.length > 0) {
+        setQuotes(prev => {
+          const next = new Map(prev);
+          for (const q of initialQuotes) {
+            if (!next.has(q.symbol)) {
+              next.set(q.symbol, q);
+            }
+          }
+          return next;
+        });
+      }
     });
 
     return () => {
