@@ -1,6 +1,7 @@
 import type { Database } from './database';
 import type {
   ClosedTrade,
+  DecisionMemory,
   TradeAnalytics,
   TradeAnalyticsSummary,
   TradeBreakdown,
@@ -339,6 +340,116 @@ export class TransactionAnalyticsService {
       decisionNote: r.decision_note,
       accountNumber: r.account_number,
     }));
+  }
+
+  getDecisionMemory(symbol: string): DecisionMemory {
+    const db = this.db.getRawDb();
+    const upperSymbol = symbol.toUpperCase();
+
+    // Look up security_id
+    const secRow = db.prepare('SELECT id FROM securities WHERE UPPER(symbol) = ?').get(upperSymbol) as { id: string } | undefined;
+    if (!secRow) {
+      return {
+        symbol: upperSymbol,
+        pastTrades: [],
+        postMortems: [],
+        decisionLogs: [],
+        intentChanges: [],
+        summary: `No data for ${upperSymbol}.`,
+      };
+    }
+    const securityId = secRow.id;
+
+    // Past trades from FIFO closed trades
+    const allTrades = this.db.getClosedTrades();
+    const symbolTrades = allTrades
+      .filter(t => t.symbol.toUpperCase() === upperSymbol)
+      .sort((a, b) => b.sellDate.localeCompare(a.sellDate))
+      .slice(0, 20);
+
+    const pastTrades = symbolTrades.map(t => ({
+      sellDate: t.sellDate,
+      buyPrice: t.buyPrice,
+      sellPrice: t.sellPrice,
+      realizedGain: t.realizedGain,
+      holdDays: t.holdDays,
+      isWin: t.isWin,
+    }));
+
+    // Post mortems
+    const pmRows = db.prepare(`
+      SELECT close_date, classification, error_type, lesson_learned
+      FROM post_mortems
+      WHERE security_id = ?
+      ORDER BY close_date DESC
+      LIMIT 10
+    `).all(securityId) as Array<{ close_date: string; classification: string; error_type: string; lesson_learned: string }>;
+
+    const postMortems = pmRows.map(r => ({
+      closeDate: r.close_date,
+      classification: r.classification,
+      errorType: r.error_type,
+      lesson: r.lesson_learned,
+    }));
+
+    // Decision logs
+    const dlRows = db.prepare(`
+      SELECT decision_date, decision_type, decision, background
+      FROM decision_logs
+      WHERE security_id = ?
+      ORDER BY decision_date DESC
+      LIMIT 10
+    `).all(securityId) as Array<{ decision_date: string; decision_type: string; decision: string; background: string | null }>;
+
+    const decisionLogs = dlRows.map(r => ({
+      date: r.decision_date,
+      type: r.decision_type,
+      decision: r.decision,
+      background: r.background,
+    }));
+
+    // Intent changes (join positions on security_id)
+    const icRows = db.prepare(`
+      SELECT picl.ritual_date, picl.field_changed, picl.old_value, picl.new_value, picl.reason
+      FROM position_intent_change_logs picl
+      JOIN positions p ON picl.position_id = p.id
+      WHERE p.security_id = ?
+      ORDER BY picl.created_at DESC
+      LIMIT 10
+    `).all(securityId) as Array<{ ritual_date: string | null; field_changed: string; old_value: string | null; new_value: string | null; reason: string | null }>;
+
+    const intentChanges = icRows.map(r => ({
+      date: r.ritual_date || '',
+      field: r.field_changed,
+      oldValue: r.old_value,
+      newValue: r.new_value,
+      reason: r.reason,
+    }));
+
+    // Build summary
+    const wins = symbolTrades.filter(t => t.isWin).length;
+    const losses = symbolTrades.length - wins;
+    const totalPnL = symbolTrades.reduce((s, t) => s + t.realizedGain, 0);
+    const avgHold = symbolTrades.length > 0
+      ? Math.round(symbolTrades.reduce((s, t) => s + t.holdDays, 0) / symbolTrades.length)
+      : 0;
+
+    let summary = `${upperSymbol}: ${symbolTrades.length} past trades (${wins}W/${losses}L), total P&L $${totalPnL.toFixed(2)}, avg hold ${avgHold}d.`;
+    if (postMortems.length > 0) {
+      summary += ` Last lesson: '${postMortems[0].lesson}'.`;
+    }
+    if (decisionLogs.length > 0) {
+      summary += ` Last decision: ${decisionLogs[0].type} — ${decisionLogs[0].decision}`;
+    }
+
+    return {
+      symbol: upperSymbol,
+      pastTrades,
+      postMortems,
+      decisionLogs,
+      intentChanges,
+      summary,
+    };
   }
 
   private getOverallInsight(trades: ClosedTrade[], timingPatterns: TimingPattern[]): string {

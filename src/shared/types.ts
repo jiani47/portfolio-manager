@@ -876,6 +876,38 @@ export interface PostMortem {
   updatedAt: string;
 }
 
+export interface DecisionMemory {
+  symbol: string;
+  pastTrades: Array<{
+    sellDate: string;
+    buyPrice: number;
+    sellPrice: number;
+    realizedGain: number;
+    holdDays: number;
+    isWin: boolean;
+  }>;
+  postMortems: Array<{
+    closeDate: string;
+    classification: string;
+    errorType: string;
+    lesson: string;
+  }>;
+  decisionLogs: Array<{
+    date: string;
+    type: string;
+    decision: string;
+    background: string | null;
+  }>;
+  intentChanges: Array<{
+    date: string;
+    field: string;
+    oldValue: string | null;
+    newValue: string | null;
+    reason: string | null;
+  }>;
+  summary: string;
+}
+
 export interface TradeJournalEntry {
   symbol: string;
   sellDate: string;
