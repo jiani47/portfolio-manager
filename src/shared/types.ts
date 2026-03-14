@@ -856,3 +856,20 @@ export interface TradePatterns {
   holdPeriodInsight: string;
   overallInsight: string;
 }
+
+export interface TradeJournalEntry {
+  symbol: string;
+  sellDate: string;
+  sellPrice: number;
+  sellQty: number;
+  buyDate: string | null;
+  buyPrice: number | null;
+  holdDays: number | null;
+  realizedGain: number | null;
+  realizedGainPct: number | null;
+  regimeAtExit: string | null;
+  actionChosen: string | null;
+  journal: string | null;
+  decisionNote: string | null;
+  accountNumber: string;
+}

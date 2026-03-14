@@ -1119,6 +1119,11 @@ export function setupIpcHandlers(
     return transactionAnalyticsService.getTradeAnalytics(days);
   });
 
+  ipcMain.handle('analytics:trade-journal', (_, opts?: { symbol?: string; days?: number }) => {
+    if (!transactionAnalyticsService) return [];
+    return transactionAnalyticsService.getTradeJournal(opts);
+  });
+
   // Price levels (support/resistance)
   ipcMain.handle('db:price-levels', (_, symbol?: string) => {
     return db.getPriceLevels(symbol);

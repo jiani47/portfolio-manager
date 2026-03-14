@@ -6,6 +6,7 @@ import type {
   TradeBreakdown,
   SymbolPattern,
   TimingPattern,
+  TradeJournalEntry,
 } from '../shared/types';
 
 export class TransactionAnalyticsService {
@@ -273,6 +274,71 @@ export class TransactionAnalyticsService {
     const longPct = (trades.filter(t => t.holdDays >= 90).length / trades.length) * 100;
     const shortPct = (trades.filter(t => t.holdDays < 30).length / trades.length) * 100;
     return `Average hold: ${Math.round(avgHold)}d. ${longPct.toFixed(1)}% held 90d+, ${shortPct.toFixed(1)}% held <30d.`;
+  }
+
+  getTradeJournal(opts?: { symbol?: string; days?: number }): TradeJournalEntry[] {
+    const db = this.db.getRawDb();
+    let cutoff = '2000-01-01';
+    if (opts?.days) {
+      const d = new Date();
+      d.setDate(d.getDate() - opts.days);
+      cutoff = d.toISOString().split('T')[0];
+    }
+
+    const symbolFilter = opts?.symbol ? "AND UPPER(s.symbol) = UPPER(?)" : "";
+    const params: any[] = [cutoff];
+    if (opts?.symbol) params.push(opts.symbol);
+
+    const rows = db.prepare(`
+      SELECT
+        s.symbol,
+        t.date as sell_date,
+        t.quantity as sell_qty,
+        t.price as sell_price,
+        (SELECT tb.date FROM transactions tb
+         WHERE tb.security_id = t.security_id AND tb.account_id = t.account_id
+         AND tb.type = 'buy' AND tb.date <= t.date
+         ORDER BY tb.date DESC LIMIT 1) as buy_date,
+        (SELECT tb.price FROM transactions tb
+         WHERE tb.security_id = t.security_id AND tb.account_id = t.account_id
+         AND tb.type = 'buy' AND tb.date <= t.date
+         ORDER BY tb.date DESC LIMIT 1) as buy_price,
+        (SELECT dr.regime_type FROM daily_rituals dr WHERE dr.date = t.date) as regime_at_exit,
+        (SELECT dr.action_chosen FROM daily_rituals dr WHERE dr.date = t.date) as action_chosen,
+        (SELECT dr.journal FROM daily_rituals dr WHERE dr.date = t.date) as journal,
+        (SELECT dl.decision FROM decision_logs dl
+         WHERE dl.security_id = t.security_id
+         AND dl.decision_date BETWEEN date(t.date, '-3 days') AND t.date
+         ORDER BY dl.decision_date DESC LIMIT 1) as decision_note,
+        a.account_number
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      JOIN accounts a ON t.account_id = a.id
+      WHERE t.type = 'sell'
+        AND t.date >= ?
+        ${symbolFilter}
+      ORDER BY t.date DESC
+      LIMIT 200
+    `).all(...params) as any[];
+
+    return rows.map(r => ({
+      symbol: r.symbol,
+      sellDate: r.sell_date,
+      sellPrice: r.sell_price,
+      sellQty: r.sell_qty,
+      buyDate: r.buy_date,
+      buyPrice: r.buy_price,
+      holdDays: r.buy_date && r.sell_date
+        ? Math.round((new Date(r.sell_date).getTime() - new Date(r.buy_date).getTime()) / 86400000)
+        : null,
+      realizedGain: r.buy_price ? (r.sell_price - r.buy_price) * r.sell_qty : null,
+      realizedGainPct: r.buy_price && r.buy_price > 0 ? ((r.sell_price / r.buy_price) - 1) * 100 : null,
+      regimeAtExit: r.regime_at_exit,
+      actionChosen: r.action_chosen,
+      journal: r.journal,
+      decisionNote: r.decision_note,
+      accountNumber: r.account_number,
+    }));
   }
 
   private getOverallInsight(trades: ClosedTrade[], timingPatterns: TimingPattern[]): string {

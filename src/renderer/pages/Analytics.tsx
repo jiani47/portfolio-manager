@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
-import { useAnalytics, useTransactions, useAccounts, useSecurities, useTradeAnalytics } from '../hooks/useApi';
-import type { PortfolioAnalytics, PositionBeta, Transaction, Security } from '../../shared/types';
+import { useAnalytics, useTransactions, useAccounts, useSecurities, useTradeAnalytics, useTradeJournal } from '../hooks/useApi';
+import type { PortfolioAnalytics, PositionBeta, Transaction, Security, TradeJournalEntry } from '../../shared/types';
 import { format } from 'date-fns';
 import TransactionImportModal from '../components/TransactionImportModal';
 
@@ -92,6 +92,9 @@ export default function Analytics() {
 
   const { tradeAnalytics, loading: tpLoading, fetchTradeAnalytics } = useTradeAnalytics();
   const [tpPeriod, setTpPeriod] = useState<number | undefined>(undefined); // undefined = all time
+  const [tpView, setTpView] = useState<'summary' | 'journal'>('summary');
+  const { entries: journalEntries, loading: journalLoading, fetchJournal } = useTradeJournal();
+  const [journalSymbolFilter, setJournalSymbolFilter] = useState('');
 
   useEffect(() => {
     if (activeTab === 'transactions') {
@@ -104,6 +107,12 @@ export default function Analytics() {
   useEffect(() => {
     if (activeTab === 'trade-performance') fetchTradeAnalytics(tpPeriod);
   }, [activeTab, tpPeriod, fetchTradeAnalytics]);
+
+  useEffect(() => {
+    if (activeTab === 'trade-performance' && tpView === 'journal') {
+      fetchJournal({ symbol: journalSymbolFilter || undefined, days: tpPeriod });
+    }
+  }, [activeTab, tpView, tpPeriod, journalSymbolFilter, fetchJournal]);
 
   const securityMap = useMemo(() => new Map(securities.map(s => [s.id, s])), [securities]);
   const accountMap = useMemo(() => new Map(accounts.map(a => [a.id, a])), [accounts]);
@@ -494,27 +503,39 @@ export default function Analytics() {
 
       {activeTab === 'trade-performance' && (
         <>
-          <div className="flex gap-1 mb-4">
-            {([
-              { label: '30D', value: 30 },
-              { label: '90D', value: 90 },
-              { label: '180D', value: 180 },
-              { label: '1Y', value: 365 },
-              { label: 'All', value: undefined },
-            ] as Array<{ label: string; value: number | undefined }>).map(({ label, value }) => (
-              <button
-                key={label}
-                onClick={() => setTpPeriod(value)}
-                className={`px-3 py-1 text-sm rounded-md ${
-                  tpPeriod === value
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-white text-gray-600 hover:bg-gray-50 border border-gray-200'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex gap-1">
+              {([
+                { label: '30D', value: 30 },
+                { label: '90D', value: 90 },
+                { label: '180D', value: 180 },
+                { label: '1Y', value: 365 },
+                { label: 'All', value: undefined },
+              ] as Array<{ label: string; value: number | undefined }>).map(({ label, value }) => (
+                <button
+                  key={label}
+                  onClick={() => setTpPeriod(value)}
+                  className={`px-3 py-1 text-sm rounded-md ${
+                    tpPeriod === value
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white text-gray-600 hover:bg-gray-50 border border-gray-200'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-1">
+              {(['summary', 'journal'] as const).map(v => (
+                <button key={v} onClick={() => setTpView(v)}
+                  className={`px-3 py-1 text-sm rounded-md ${tpView === v ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50 border border-gray-200'}`}>
+                  {v === 'summary' ? 'Summary' : 'Journal'}
+                </button>
+              ))}
+            </div>
           </div>
+          {tpView === 'summary' && (
+          <>
           {tpLoading ? (
             <div className="flex items-center justify-center h-64">
               <div className="text-gray-500">Loading...</div>
@@ -717,6 +738,73 @@ export default function Analytics() {
                 </>
               )}
             </div>
+          )}
+          </>
+          )}
+          {tpView === 'journal' && (
+            <>
+              {/* Symbol filter */}
+              <div className="mb-4">
+                <input
+                  type="text"
+                  placeholder="Filter by symbol..."
+                  value={journalSymbolFilter}
+                  onChange={e => setJournalSymbolFilter(e.target.value.toUpperCase())}
+                  className="px-3 py-1.5 text-sm border border-gray-200 rounded-md w-48"
+                />
+              </div>
+              {journalLoading ? (
+                <div className="flex items-center justify-center h-64">
+                  <div className="text-gray-500">Loading...</div>
+                </div>
+              ) : journalEntries.length === 0 ? (
+                <div className="card text-center py-12">
+                  <p className="text-gray-500">No trades found for this period.</p>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {journalEntries.map((entry, i) => {
+                    const isWin = entry.realizedGain !== null && entry.realizedGain >= 0;
+                    return (
+                      <div key={i} className="card py-2 px-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs text-gray-400 w-20">{entry.sellDate}</span>
+                            <span className="font-medium text-gray-900 w-14">{entry.symbol}</span>
+                            <span className="text-sm text-gray-600">{entry.sellQty} @ ${entry.sellPrice.toFixed(2)}</span>
+                            {entry.buyPrice && (
+                              <span className="text-xs text-gray-400">from ${entry.buyPrice.toFixed(2)}</span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-3">
+                            {entry.holdDays !== null && (
+                              <span className="text-xs text-gray-400">{entry.holdDays}d</span>
+                            )}
+                            {entry.realizedGain !== null && (
+                              <span className={`text-sm font-medium ${isWin ? 'text-green-600' : 'text-red-600'}`}>
+                                ${entry.realizedGain >= 0 ? '+' : ''}{entry.realizedGain.toFixed(0)}
+                              </span>
+                            )}
+                            {entry.realizedGainPct !== null && (
+                              <span className={`text-xs ${isWin ? 'text-green-600' : 'text-red-600'}`}>
+                                ({entry.realizedGainPct >= 0 ? '+' : ''}{entry.realizedGainPct.toFixed(1)}%)
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        {/* Context row - only show if there's context data */}
+                        {(entry.regimeAtExit || entry.decisionNote) && (
+                          <div className="mt-1 flex gap-3 text-xs text-gray-400">
+                            {entry.regimeAtExit && <span>Regime: {entry.regimeAtExit}</span>}
+                            {entry.decisionNote && <span>Decision: {entry.decisionNote}</span>}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
           )}
         </>
       )}
