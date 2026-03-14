@@ -4,6 +4,8 @@ import type {
   TradeAnalytics,
   TradeAnalyticsSummary,
   TradeBreakdown,
+  SymbolPattern,
+  TimingPattern,
 } from '../shared/types';
 
 export class TransactionAnalyticsService {
@@ -17,6 +19,11 @@ export class TransactionAnalyticsService {
       const cutoffStr = cutoff.toISOString().split('T')[0];
       trades = trades.filter(t => t.sellDate >= cutoffStr);
     }
+    const symbolPatterns = this.getSymbolPatterns(trades);
+    const timingPatterns = this.getTimingPatterns(trades, symbolPatterns);
+    const holdPeriodInsight = this.getHoldPeriodInsight(trades);
+    const overallInsight = this.getOverallInsight(trades, timingPatterns);
+
     return {
       summary: this.computeSummary(trades),
       byHoldPeriod: this.breakdownByHoldPeriod(trades),
@@ -24,6 +31,7 @@ export class TransactionAnalyticsService {
       byEntryStyle: this.breakdownByEntryStyle(trades),
       topWinners: [...trades].sort((a, b) => b.realizedGain - a.realizedGain).slice(0, 5),
       topLosers: [...trades].sort((a, b) => a.realizedGain - b.realizedGain).slice(0, 5),
+      patterns: { symbolPatterns, timingPatterns, holdPeriodInsight, overallInsight },
     };
   }
 
@@ -144,5 +152,142 @@ export class TransactionAnalyticsService {
     const map = new Map<string, string>();
     for (const row of rows) map.set(row.security_id, row.entry_style);
     return map;
+  }
+
+  private getSymbolPatterns(trades: ClosedTrade[]): SymbolPattern[] {
+    const bySymbol = new Map<string, ClosedTrade[]>();
+    for (const t of trades) {
+      if (!bySymbol.has(t.symbol)) bySymbol.set(t.symbol, []);
+      bySymbol.get(t.symbol)!.push(t);
+    }
+
+    const patterns: SymbolPattern[] = [];
+    for (const [symbol, group] of bySymbol) {
+      const wins = group.filter(t => t.isWin);
+      const winRate = (wins.length / group.length) * 100;
+      const totalGain = group.reduce((s, t) => s + t.realizedGain, 0);
+      const avgHoldDays = group.reduce((s, t) => s + t.holdDays, 0) / group.length;
+      const avgGainPct = group.reduce((s, t) => s + t.realizedGainPct, 0) / group.length;
+
+      let flag: string | undefined;
+      if (group.length >= 15) {
+        flag = 'overtrading';
+      } else if (group.length >= 10 && winRate < 35) {
+        flag = 'consistent loser';
+      } else if (group.length >= 10 && winRate >= 60 && totalGain > 0) {
+        flag = 'strong performer';
+      }
+
+      patterns.push({
+        symbol,
+        tradeCount: group.length,
+        wins: wins.length,
+        losses: group.length - wins.length,
+        winRate: Math.round(winRate * 10) / 10,
+        totalGain: Math.round(totalGain * 100) / 100,
+        avgHoldDays: Math.round(avgHoldDays * 10) / 10,
+        avgGainPct: Math.round(avgGainPct * 100) / 100,
+        flag,
+      });
+    }
+
+    return patterns.sort((a, b) => b.tradeCount - a.tradeCount);
+  }
+
+  private getTimingPatterns(trades: ClosedTrade[], symbolPatterns: SymbolPattern[]): TimingPattern[] {
+    const patterns: TimingPattern[] = [];
+
+    // 1. Rapid flips (<5 day holds)
+    const rapidFlips = trades.filter(t => t.holdDays < 5);
+    if (rapidFlips.length > 0) {
+      const rfWins = rapidFlips.filter(t => t.isWin);
+      const rfWinRate = (rfWins.length / rapidFlips.length) * 100;
+      const rfPnl = rapidFlips.reduce((s, t) => s + t.realizedGain, 0);
+      patterns.push({
+        label: 'Rapid Flips',
+        description: `${rapidFlips.length} trades held <5 days`,
+        severity: rfWinRate < 40 ? 'warn' : 'info',
+        detail: `Win rate: ${rfWinRate.toFixed(1)}%, P&L: $${rfPnl.toFixed(2)}`,
+      });
+    }
+
+    // 2. Long holds outperformance (90d+ vs <30d)
+    const longHolds = trades.filter(t => t.holdDays >= 90);
+    const shortHolds = trades.filter(t => t.holdDays < 30);
+    if (longHolds.length >= 5 && shortHolds.length >= 5) {
+      const longWinRate = (longHolds.filter(t => t.isWin).length / longHolds.length) * 100;
+      const shortWinRate = (shortHolds.filter(t => t.isWin).length / shortHolds.length) * 100;
+      const diff = longWinRate - shortWinRate;
+      if (Math.abs(diff) >= 10) {
+        patterns.push({
+          label: diff > 0 ? 'Long Holds Outperform' : 'Short Holds Outperform',
+          description: `90d+ win rate ${longWinRate.toFixed(1)}% vs <30d win rate ${shortWinRate.toFixed(1)}%`,
+          severity: diff > 0 ? 'strength' : 'info',
+          detail: `Difference: ${Math.abs(diff).toFixed(1)} percentage points (${longHolds.length} long, ${shortHolds.length} short trades)`,
+        });
+      }
+    }
+
+    // 3. Monthly overtrading
+    const byMonth = new Map<string, ClosedTrade[]>();
+    for (const t of trades) {
+      const month = t.sellDate.substring(0, 7); // YYYY-MM
+      if (!byMonth.has(month)) byMonth.set(month, []);
+      byMonth.get(month)!.push(t);
+    }
+    const overtradedMonths: string[] = [];
+    for (const [month, group] of byMonth) {
+      if (group.length > 50) {
+        const winRate = (group.filter(t => t.isWin).length / group.length) * 100;
+        if (winRate < 40) {
+          overtradedMonths.push(`${month} (${group.length} trades, ${winRate.toFixed(1)}% win rate)`);
+        }
+      }
+    }
+    if (overtradedMonths.length > 0) {
+      patterns.push({
+        label: 'Monthly Overtrading',
+        description: `${overtradedMonths.length} month(s) with >50 trades and <40% win rate`,
+        severity: 'warn',
+        detail: overtradedMonths.join('; '),
+      });
+    }
+
+    // 4. Symbol churn
+    const churnSymbols = symbolPatterns.filter(sp => sp.flag === 'overtrading');
+    if (churnSymbols.length > 0) {
+      patterns.push({
+        label: 'Symbol Churn',
+        description: `${churnSymbols.length} symbol(s) with 15+ trades`,
+        severity: 'warn',
+        detail: churnSymbols.map(s => `${s.symbol} (${s.tradeCount} trades, ${s.winRate}% win rate)`).join('; '),
+      });
+    }
+
+    return patterns;
+  }
+
+  private getHoldPeriodInsight(trades: ClosedTrade[]): string {
+    if (trades.length === 0) return 'No trades to analyze.';
+    const avgHold = trades.reduce((s, t) => s + t.holdDays, 0) / trades.length;
+    const longPct = (trades.filter(t => t.holdDays >= 90).length / trades.length) * 100;
+    const shortPct = (trades.filter(t => t.holdDays < 30).length / trades.length) * 100;
+    return `Average hold: ${Math.round(avgHold)}d. ${longPct.toFixed(1)}% held 90d+, ${shortPct.toFixed(1)}% held <30d.`;
+  }
+
+  private getOverallInsight(trades: ClosedTrade[], timingPatterns: TimingPattern[]): string {
+    if (trades.length === 0) return 'No trades to analyze.';
+    const warnings = timingPatterns.filter(p => p.severity === 'warn').length;
+    const strengths = timingPatterns.filter(p => p.severity === 'strength').length;
+    if (warnings === 0 && strengths === 0) {
+      return `${trades.length} trades analyzed. No significant patterns detected.`;
+    }
+    if (warnings > strengths) {
+      return `${trades.length} trades analyzed. ${warnings} warning(s) detected — review timing and symbol concentration.`;
+    }
+    if (strengths > warnings) {
+      return `${trades.length} trades analyzed. ${strengths} strength(s) identified with ${warnings} area(s) to watch.`;
+    }
+    return `${trades.length} trades analyzed. ${strengths} strength(s) and ${warnings} warning(s) — mixed signals.`;
   }
 }

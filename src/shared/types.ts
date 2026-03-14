@@ -828,4 +828,31 @@ export interface TradeAnalytics {
   byEntryStyle: TradeBreakdown[];
   topWinners: ClosedTrade[];
   topLosers: ClosedTrade[];
+  patterns?: TradePatterns;
+}
+
+export interface SymbolPattern {
+  symbol: string;
+  tradeCount: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  totalGain: number;
+  avgHoldDays: number;
+  avgGainPct: number;
+  flag?: string;
+}
+
+export interface TimingPattern {
+  label: string;
+  description: string;
+  severity: 'info' | 'warn' | 'strength';
+  detail: string;
+}
+
+export interface TradePatterns {
+  symbolPatterns: SymbolPattern[];
+  timingPatterns: TimingPattern[];
+  holdPeriodInsight: string;
+  overallInsight: string;
 }
