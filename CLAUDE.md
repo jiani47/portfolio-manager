@@ -36,7 +36,7 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh intents                # List all position intents
 ./scripts/pm-cli.sh accounts               # List accounts with book designation
 ./scripts/pm-cli.sh summary                # Portfolio summary with tier coverage
-./scripts/pm-cli.sh set-intent <position_id> <tier> <thesis> <invalidation> [entry_style] [hold_period]
+./scripts/pm-cli.sh set-intent <position_id> <tier> <thesis> <invalidation> [entry_style] [hold_period] [target_alloc_pct]
 ./scripts/pm-cli.sh set-book <account_id> <investing|trading>
 ./scripts/pm-cli.sh ritual-today           # Show today's ritual (or "not started")
 ./scripts/pm-cli.sh ritual-set <field> <value>  # Set a field on today's ritual
@@ -79,6 +79,10 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh earnings-review-decide <id> # Decide on a pending earnings review
 ./scripts/pm-cli.sh recall <symbol>       # Decision memory: trades, post-mortems, decisions, intents
 ./scripts/pm-cli.sh size <symbol> [target] # Position sizing: current vs target, entry plan with S/R tranches
+./scripts/pm-cli.sh plan <symbol>         # Create/view entry plan with tranches and auto-monitors
+./scripts/pm-cli.sh plans [all]           # List active entry plans (or all)
+./scripts/pm-cli.sh plan-fill <id> [price]  # Mark tranche as filled (optionally with fill price)
+./scripts/pm-cli.sh plan-cancel <symbol>  # Cancel active entry plan for symbol
 ./scripts/pm-cli.sh reconcile <csv_path>  # Import Schwab realized P&L CSV
 ./scripts/pm-cli.sh broker-pl [symbol]    # Broker P&L summary (or per-lot detail)
 ```

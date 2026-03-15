@@ -60,6 +60,7 @@ import type {
   TradeAnalytics,
   TradeJournalEntry,
   DecisionMemory,
+  EntryPlan,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -263,6 +264,12 @@ declare global {
       onStreamingQuote: (callback: (quote: StreamingQuote) => void) => () => void;
       onStreamingStatus: (callback: (status: string) => void) => () => void;
       onPositionsSynced: (callback: (data: { positionsSynced: number; accountsSynced: number }) => void) => () => void;
+      // Entry plan operations
+      getEntryPlanBySymbol: (symbol: string) => Promise<EntryPlan | null>;
+      listEntryPlans: (opts?: { status?: string; symbol?: string }) => Promise<EntryPlan[]>;
+      createEntryPlan: (data: unknown) => Promise<EntryPlan>;
+      cancelEntryPlan: (id: string) => Promise<EntryPlan>;
+
       getFmpApiKey: () => Promise<string | null>;
       getSectorPerformance: () => Promise<{ nyse: Record<string, number>; nasdaq: Record<string, number>; date: string } | null>;
       streamingStart: (symbols: string[]) => Promise<void>;

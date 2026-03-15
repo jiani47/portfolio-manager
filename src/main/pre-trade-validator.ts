@@ -88,6 +88,7 @@ export class PreTradeValidator {
     items.push(this.checkSRLevels(req.symbol, 'BUY', req.price));
     items.push(this.checkGapUp(req.symbol));
     items.push(this.checkPendingEarningsReview(req.symbol));
+    items.push(this.checkEntryPlan(req.symbol, req.instruction, req.quantity, req.price));
     items.push({
       id: 'invest-hold-months',
       label: 'This is an investment — I expect to hold for months+',
@@ -118,6 +119,7 @@ export class PreTradeValidator {
     items.push(this.checkSRLevels(req.symbol, 'BUY', req.price));
     items.push(this.checkGapUp(req.symbol));
     items.push(this.checkPendingEarningsReview(req.symbol));
+    items.push(this.checkEntryPlan(req.symbol, req.instruction, req.quantity, req.price));
     items.push({
       id: 'trade-stop-defined',
       label: 'I have a stop level defined — technical, not emotional',
@@ -673,6 +675,55 @@ export class PreTradeValidator {
       };
     } catch {
       return { id: 'pending-earnings-review', label: 'Earnings review check', type: 'auto', status: 'pass', detail: 'Could not check — table may not exist yet' };
+    }
+  }
+
+  /** Check if a buy aligns with an active entry plan */
+  private checkEntryPlan(symbol: string, instruction: string, quantity: number, price?: number): PreTradeCheckItem {
+    if (instruction !== 'BUY') {
+      return { id: 'entry-plan', label: 'Entry plan check', type: 'auto', status: 'pass', detail: 'Not a buy order' };
+    }
+
+    try {
+      const plan = this.db.getEntryPlanBySymbol(symbol);
+      if (!plan || !plan.tranches || plan.tranches.length === 0) {
+        return { id: 'entry-plan', label: 'No active entry plan', type: 'auto', status: 'pass' };
+      }
+
+      const pendingTranches = plan.tranches.filter(t => t.status === 'pending');
+      const targetPct = plan.targetAllocationPct ? `${plan.targetAllocationPct}%` : 'unset';
+
+      // Check if order matches any pending tranche
+      const tolerance = 0.02; // 2% price tolerance
+      const matchingTranche = pendingTranches.find(t => {
+        const priceMatch = price
+          ? Math.abs(price - t.triggerPrice) / t.triggerPrice <= tolerance
+          : false;
+        const qtyMatch = quantity === t.shares;
+        return priceMatch && qtyMatch;
+      });
+
+      if (matchingTranche) {
+        return {
+          id: 'entry-plan',
+          label: `Matches tranche ${matchingTranche.trancheNumber} of entry plan`,
+          type: 'auto',
+          status: 'pass',
+          detail: `Active entry plan: target ${targetPct}, ${pendingTranches.length} pending tranches. This buy matches tranche ${matchingTranche.trancheNumber} (${matchingTranche.shares} shares at $${matchingTranche.triggerPrice.toFixed(2)}).`,
+        };
+      }
+
+      // Order exists but doesn't match any tranche
+      const trancheDesc = pendingTranches.map(t => `T${t.trancheNumber}: ${t.shares}@$${t.triggerPrice.toFixed(2)}`).join(', ');
+      return {
+        id: 'entry-plan',
+        label: `Buy deviates from entry plan (target ${targetPct})`,
+        type: 'auto',
+        status: 'warn',
+        detail: `Active entry plan has ${pendingTranches.length} pending tranches: ${trancheDesc}. This buy (${quantity} shares${price ? ` at $${price.toFixed(2)}` : ''}) doesn't match any tranche.`,
+      };
+    } catch {
+      return { id: 'entry-plan', label: 'Entry plan check', type: 'auto', status: 'pass', detail: 'Could not check — table may not exist yet' };
     }
   }
 

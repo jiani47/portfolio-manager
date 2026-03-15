@@ -29,6 +29,8 @@ import {
   PostMortem,
   EarningsReview,
   BrokerPLRecord,
+  EntryPlan,
+  EntryPlanTranche,
 } from '../shared/types';
 
 export class Database {
@@ -639,6 +641,42 @@ export class Database {
       CREATE INDEX IF NOT EXISTS idx_rpl_symbol ON realized_pl_broker(symbol);
       CREATE INDEX IF NOT EXISTS idx_rpl_close_date ON realized_pl_broker(close_date);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_rpl_dedup ON realized_pl_broker(symbol, open_date, close_date, quantity, cost_basis, proceeds, account_name);
+    `);
+
+    // Migration: add target_allocation_pct to position_intents
+    try { this.db.exec('ALTER TABLE position_intents ADD COLUMN target_allocation_pct REAL'); } catch {}
+
+    // Entry plans tables
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS entry_plans (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        target_allocation_pct REAL,
+        status TEXT NOT NULL DEFAULT 'active',
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_entry_plans_security ON entry_plans(security_id);
+      CREATE INDEX IF NOT EXISTS idx_entry_plans_status ON entry_plans(status);
+    `);
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS entry_plan_tranches (
+        id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL,
+        tranche_number INTEGER NOT NULL,
+        trigger_price REAL NOT NULL,
+        shares INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        monitor_id TEXT,
+        filled_at TEXT,
+        filled_price REAL,
+        notes TEXT,
+        FOREIGN KEY (plan_id) REFERENCES entry_plans(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_entry_plan_tranches_plan ON entry_plan_tranches(plan_id);
     `);
 
     // Sync watchlist monitors on startup
@@ -1651,6 +1689,7 @@ export class Database {
         { key: 'invalidation', dbField: 'invalidation' },
         { key: 'entryStyle', dbField: 'entry_style' },
         { key: 'targetHoldPeriod', dbField: 'target_hold_period' },
+        { key: 'targetAllocationPct', dbField: 'target_allocation_pct' },
       ];
       for (const { key, dbField } of intentFields) {
         if (data[key] !== undefined && data[key] !== existing[key]) {
@@ -1675,6 +1714,7 @@ export class Database {
       if (data.invalidation !== undefined) { fields.push('invalidation = ?'); values.push(data.invalidation || null); }
       if (data.entryStyle !== undefined) { fields.push('entry_style = ?'); values.push(data.entryStyle || null); }
       if (data.targetHoldPeriod !== undefined) { fields.push('target_hold_period = ?'); values.push(data.targetHoldPeriod || null); }
+      if (data.targetAllocationPct !== undefined) { fields.push('target_allocation_pct = ?'); values.push(data.targetAllocationPct ?? null); }
 
       values.push(existing.id);
       const stmt = this.db.prepare(`UPDATE position_intents SET ${fields.join(', ')} WHERE id = ?`);
@@ -1683,8 +1723,8 @@ export class Database {
     } else {
       const id = uuidv4();
       const stmt = this.db.prepare(`
-        INSERT INTO position_intents (id, position_id, tier, thesis, invalidation, entry_style, target_hold_period, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO position_intents (id, position_id, tier, thesis, invalidation, entry_style, target_hold_period, target_allocation_pct, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       stmt.run(
         id,
@@ -1694,6 +1734,7 @@ export class Database {
         data.invalidation || null,
         data.entryStyle || null,
         data.targetHoldPeriod || null,
+        data.targetAllocationPct ?? null,
         now,
         now
       );
@@ -1723,6 +1764,7 @@ export class Database {
       invalidation: r.invalidation as string | undefined,
       entryStyle: r.entry_style as string | undefined,
       targetHoldPeriod: r.target_hold_period as string | undefined,
+      targetAllocationPct: r.target_allocation_pct as number | undefined,
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,
     };
@@ -3342,6 +3384,209 @@ export class Database {
       term: r.term as string | null,
       sourceFile: r.source_file as string | null,
       importedAt: r.imported_at as string,
+    };
+  };
+
+  // Entry plan operations
+
+  createEntryPlan(data: {
+    securityId: string;
+    targetAllocationPct?: number;
+    notes?: string;
+    tranches: Array<{
+      trancheNumber: number;
+      triggerPrice: number;
+      shares: number;
+      notes?: string;
+    }>;
+  }): EntryPlan {
+    if (!this.db) throw new Error('Database not initialized');
+    const planId = uuidv4();
+    const now = new Date().toISOString();
+
+    // Get symbol for monitor labels
+    const security = this.db.prepare('SELECT symbol FROM securities WHERE id = ?').get(data.securityId) as { symbol: string } | undefined;
+    const symbol = security?.symbol || 'UNKNOWN';
+
+    this.db.prepare(`
+      INSERT INTO entry_plans (id, security_id, target_allocation_pct, status, notes, created_at, updated_at)
+      VALUES (?, ?, ?, 'active', ?, ?, ?)
+    `).run(planId, data.securityId, data.targetAllocationPct ?? null, data.notes || null, now, now);
+
+    for (const tranche of data.tranches) {
+      const trancheId = uuidv4();
+
+      // Auto-create monitor for the tranche
+      const monitor = this.createMonitor({
+        symbol,
+        direction: 'below',
+        priceLevel: tranche.triggerPrice,
+        label: `Entry plan tranche ${tranche.trancheNumber}: buy ${tranche.shares} shares at $${tranche.triggerPrice.toFixed(2)}`,
+        actionType: 'action_required',
+      });
+
+      this.db.prepare(`
+        INSERT INTO entry_plan_tranches (id, plan_id, tranche_number, trigger_price, shares, status, monitor_id, notes)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+      `).run(trancheId, planId, tranche.trancheNumber, tranche.triggerPrice, tranche.shares, monitor.id, tranche.notes || null);
+    }
+
+    return this.getEntryPlan(planId)!;
+  }
+
+  getEntryPlan(id: string): EntryPlan | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT ep.*, s.symbol FROM entry_plans ep
+      JOIN securities s ON ep.security_id = s.id
+      WHERE ep.id = ?
+    `).get(id);
+    if (!row) return null;
+    const plan = this.mapRowToEntryPlan(row);
+    plan.tranches = this.db.prepare(
+      'SELECT * FROM entry_plan_tranches WHERE plan_id = ? ORDER BY tranche_number'
+    ).all(id).map(this.mapRowToEntryPlanTranche);
+    return plan;
+  }
+
+  getEntryPlanBySymbol(symbol: string): EntryPlan | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT ep.*, s.symbol FROM entry_plans ep
+      JOIN securities s ON ep.security_id = s.id
+      WHERE s.symbol = ? AND ep.status = 'active'
+      ORDER BY ep.created_at DESC LIMIT 1
+    `).get(symbol.toUpperCase());
+    if (!row) return null;
+    const plan = this.mapRowToEntryPlan(row);
+    plan.tranches = this.db.prepare(
+      'SELECT * FROM entry_plan_tranches WHERE plan_id = ? ORDER BY tranche_number'
+    ).all(plan.id).map(this.mapRowToEntryPlanTranche);
+    return plan;
+  }
+
+  listEntryPlans(opts?: { status?: string; symbol?: string }): EntryPlan[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (opts?.status) {
+      conditions.push('ep.status = ?');
+      params.push(opts.status);
+    }
+    if (opts?.symbol) {
+      conditions.push('s.symbol = ?');
+      params.push(opts.symbol.toUpperCase());
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const plans = this.db.prepare(`
+      SELECT ep.*, s.symbol FROM entry_plans ep
+      JOIN securities s ON ep.security_id = s.id
+      ${where}
+      ORDER BY ep.created_at DESC
+    `).all(...params).map(this.mapRowToEntryPlan);
+
+    // Attach tranches to each plan
+    for (const plan of plans) {
+      plan.tranches = this.db!.prepare(
+        'SELECT * FROM entry_plan_tranches WHERE plan_id = ? ORDER BY tranche_number'
+      ).all(plan.id).map(this.mapRowToEntryPlanTranche);
+    }
+
+    return plans;
+  }
+
+  updateEntryPlan(id: string, data: Partial<Pick<EntryPlan, 'targetAllocationPct' | 'status' | 'notes'>>): EntryPlan {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const fields: string[] = ['updated_at = ?'];
+    const values: unknown[] = [now];
+
+    if (data.targetAllocationPct !== undefined) { fields.push('target_allocation_pct = ?'); values.push(data.targetAllocationPct); }
+    if (data.status !== undefined) { fields.push('status = ?'); values.push(data.status); }
+    if (data.notes !== undefined) { fields.push('notes = ?'); values.push(data.notes); }
+
+    values.push(id);
+    this.db.prepare(`UPDATE entry_plans SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    return this.getEntryPlan(id)!;
+  }
+
+  updateTranche(id: string, data: Partial<Pick<EntryPlanTranche, 'status' | 'filledAt' | 'filledPrice' | 'notes'>>): EntryPlanTranche {
+    if (!this.db) throw new Error('Database not initialized');
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    if (data.status !== undefined) { fields.push('status = ?'); values.push(data.status); }
+    if (data.filledAt !== undefined) { fields.push('filled_at = ?'); values.push(data.filledAt); }
+    if (data.filledPrice !== undefined) { fields.push('filled_price = ?'); values.push(data.filledPrice); }
+    if (data.notes !== undefined) { fields.push('notes = ?'); values.push(data.notes); }
+
+    if (fields.length === 0) {
+      const row = this.db.prepare('SELECT * FROM entry_plan_tranches WHERE id = ?').get(id);
+      return this.mapRowToEntryPlanTranche(row);
+    }
+
+    values.push(id);
+    this.db.prepare(`UPDATE entry_plan_tranches SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+
+    const row = this.db.prepare('SELECT * FROM entry_plan_tranches WHERE id = ?').get(id);
+    return this.mapRowToEntryPlanTranche(row);
+  }
+
+  cancelEntryPlan(id: string): EntryPlan {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+
+    // Cancel all pending tranches and dismiss their monitors
+    const tranches = this.db.prepare(
+      "SELECT * FROM entry_plan_tranches WHERE plan_id = ? AND status = 'pending'"
+    ).all(id).map(this.mapRowToEntryPlanTranche);
+
+    for (const tranche of tranches) {
+      this.db.prepare("UPDATE entry_plan_tranches SET status = 'cancelled' WHERE id = ?").run(tranche.id);
+      if (tranche.monitorId) {
+        try {
+          this.updateMonitorStatus(tranche.monitorId, 'dismissed');
+        } catch {
+          // Monitor may already be dismissed/deleted
+        }
+      }
+    }
+
+    // Cancel the plan
+    this.db.prepare("UPDATE entry_plans SET status = 'cancelled', updated_at = ? WHERE id = ?").run(now, id);
+    return this.getEntryPlan(id)!;
+  }
+
+  private mapRowToEntryPlan = (row: unknown): EntryPlan => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      securityId: r.security_id as string,
+      symbol: r.symbol as string | undefined,
+      targetAllocationPct: r.target_allocation_pct as number | null,
+      status: r.status as string,
+      notes: r.notes as string | null,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
+
+  private mapRowToEntryPlanTranche = (row: unknown): EntryPlanTranche => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      planId: r.plan_id as string,
+      trancheNumber: r.tranche_number as number,
+      triggerPrice: r.trigger_price as number,
+      shares: r.shares as number,
+      status: r.status as string,
+      monitorId: r.monitor_id as string | null,
+      filledAt: r.filled_at as string | null,
+      filledPrice: r.filled_price as number | null,
+      notes: r.notes as string | null,
     };
   };
 

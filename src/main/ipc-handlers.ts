@@ -1248,4 +1248,10 @@ export function setupIpcHandlers(
   ipcMain.handle('scheduler:get-task-history', (_, taskId: string, limit?: number) => {
     return db.getTaskRunHistory(taskId, limit);
   });
+
+  // Entry plan handlers
+  ipcMain.handle('db:entry-plans:get-by-symbol', (_, symbol: string) => db.getEntryPlanBySymbol(symbol));
+  ipcMain.handle('db:entry-plans:list', (_, opts?: { status?: string; symbol?: string }) => db.listEntryPlans(opts));
+  ipcMain.handle('db:entry-plans:create', (_, data) => db.createEntryPlan(data));
+  ipcMain.handle('db:entry-plans:cancel', (_, id: string) => db.cancelEntryPlan(id));
 }

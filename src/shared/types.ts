@@ -21,6 +21,7 @@ export interface PositionIntent {
   invalidation?: string;
   entryStyle?: string;
   targetHoldPeriod?: string;
+  targetAllocationPct?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -948,6 +949,31 @@ export interface BrokerPLRecord {
   term: string | null;
   sourceFile: string | null;
   importedAt: string;
+}
+
+export interface EntryPlan {
+  id: string;
+  securityId: string;
+  symbol?: string;
+  targetAllocationPct: number | null;
+  status: string;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  tranches?: EntryPlanTranche[];
+}
+
+export interface EntryPlanTranche {
+  id: string;
+  planId: string;
+  trancheNumber: number;
+  triggerPrice: number;
+  shares: number;
+  status: string;
+  monitorId: string | null;
+  filledAt: string | null;
+  filledPrice: number | null;
+  notes: string | null;
 }
 
 export interface TradeJournalEntry {

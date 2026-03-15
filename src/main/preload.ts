@@ -225,6 +225,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => { ipcRenderer.removeListener('positions:synced', handler); };
   },
 
+  // Entry plan operations
+  getEntryPlanBySymbol: (symbol: string) => ipcRenderer.invoke('db:entry-plans:get-by-symbol', symbol),
+  listEntryPlans: (opts?: { status?: string; symbol?: string }) => ipcRenderer.invoke('db:entry-plans:list', opts),
+  createEntryPlan: (data: unknown) => ipcRenderer.invoke('db:entry-plans:create', data),
+  cancelEntryPlan: (id: string) => ipcRenderer.invoke('db:entry-plans:cancel', id),
+
   // Config helpers
   getFmpApiKey: () => ipcRenderer.invoke('config:get-fmp-key'),
 
