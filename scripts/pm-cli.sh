@@ -4561,6 +4561,25 @@ PYEOF
     fi
     SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
 
+    # Ensure tables exist
+    sqlite3 "$DB" "
+      CREATE TABLE IF NOT EXISTS entry_plans (
+        id TEXT PRIMARY KEY, security_id TEXT NOT NULL, target_allocation_pct REAL,
+        status TEXT NOT NULL DEFAULT 'active', notes TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      );
+      CREATE TABLE IF NOT EXISTS entry_plan_tranches (
+        id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, tranche_number INTEGER NOT NULL,
+        trigger_price REAL NOT NULL, shares INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', monitor_id TEXT,
+        filled_at TEXT, filled_price REAL, notes TEXT,
+        FOREIGN KEY (plan_id) REFERENCES entry_plans(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_ep_security ON entry_plans(security_id);
+      CREATE INDEX IF NOT EXISTS idx_ept_plan ON entry_plan_tranches(plan_id);
+    "
+
     python3 - "$SYMBOL" "$DB" << 'PYEOF'
 import sqlite3, sys, uuid
 from datetime import datetime
