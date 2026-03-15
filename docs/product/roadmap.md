@@ -6,6 +6,7 @@ Design principles (from daily-pm-checklist.md):
 - Automation = **friction + memory**, not speed
 - The co-pilot **slows you down**, it doesn't push trades
 - Human retains all decisions on regime, tier, thesis, and action
+- **App/CLI parity rule:** Every feature must be available in both the Electron app and CLI. No exceptions unless explicitly documented with rationale in this roadmap. CLI-only features create governance leaks — if you can trade through the app without seeing a CLI-only check, the check doesn't exist.
 
 ---
 
@@ -461,6 +462,67 @@ Automated trade journal from transaction + ritual + decision data:
 
 ---
 
+## Phase 13: Entry Plans & Position Lifecycle
+
+**Goal:** Persist sizing decisions and entry plans so they survive across sessions and integrate into the trading workflow.
+
+### 13.1 Entry Plan System (planned)
+
+**Motivation:** ROKU analysis showed we can compute sizing + tranches but can't persist or track them. Decisions made in conversation are lost.
+
+- `target_allocation_pct` field on `position_intents` — e.g. ROKU = 8%
+- `entry_plans` table: symbol, tranche_number, trigger_price, shares, status (pending/filled/cancelled), created_at
+- `pm-cli.sh plan <symbol>` — create, view, update entry plans
+- Auto-create monitors from entry plan tranches
+- When monitor fires, surface full plan context: "Tranche 1 triggered. Buy 60 shares. Current 6.5% → 7.3%. Target 8%."
+- Pre-trade check: if buying a symbol with an active plan, show the plan and warn if deviating
+- **App:** Entry plan modal in Holdings, plan status in pre-trade checklist modal
+
+### 13.2 Target Allocation Tracking (planned)
+
+- Dashboard widget: current allocation vs target per position
+- Drift detection: "NVDA is 2.9% but target is 15%. Underweight by $85K."
+- Combine with `pm-cli.sh size` output in the app
+
+---
+
+## Phase 14: App/CLI Parity — Close Governance Gaps
+
+**Goal:** Every process discipline feature must be accessible in the Electron app. CLI-only governance = governance leak.
+
+### 14.1 Pre-Trade Modal Parity (planned)
+
+**The app's pre-trade checklist modal is missing checks that CLI has:**
+- [ ] Decision memory (last post-mortem lesson, last decision log entry)
+- [ ] S/R level display with proximity warnings
+- [ ] Panic sell cooling-off detection
+- [ ] Entry plan context ("your plan says add 60 at $85, you're buying 100 at $91")
+- [ ] Pending earnings review gate
+- [ ] Earnings gap-up warning
+- [ ] Churn detection + hold duration enforcement
+- [ ] Trading/investing boundary violation
+- [ ] Thesis file hard gate
+
+### 14.2 Missing App Pages (planned)
+
+**CLI-only workflows that need app UI:**
+- [ ] **Post-Mortems page** — list, create, view post-mortems (DB: `post_mortems` table exists)
+- [ ] **Earnings Reviews page** — list, create, decide on reviews (DB: `earnings_reviews` table exists)
+- [ ] **Portfolio History page** — portfolio value over time chart (DB: `portfolio_snapshots` table exists)
+- [ ] **Position Sizing modal** — current vs target allocation, entry plan tranches (in Holdings)
+- [ ] **Broker P&L page** — authoritative realized P&L from Schwab (DB: `realized_pl_broker` table exists)
+- [ ] **Decision Memory view** — recall past trades, post-mortems, decisions per symbol
+
+### 14.3 CLI-Only Exceptions (documented)
+
+The following features are intentionally CLI-only with rationale:
+- **morning** — Compound convenience command (refresh + briefing + ritual-status). The app does these on startup automatically.
+- **backfill** — One-time 3yr historical data fetch. Operational maintenance, not daily workflow.
+- **snapshot** — EOD cron job. Automated, not interactive.
+- **reconcile** — CSV file import. File picker could be added to app but low priority — done quarterly.
+
+---
+
 ## Implementation Priority
 
 | Phase | Status | What | Why |
@@ -483,6 +545,9 @@ Automated trade journal from transaction + ritual + decision data:
 | **9.5** | ✅ Done | P&L reconciliation | Broker-authoritative P&L import |
 | **10.5** | Partial | Position sizing & lifecycle | Hold enforcement + churn detection done, target sizing planned |
 | **11.3** | ✅ Done | Mandatory earnings review | Catches thesis invalidation early |
+| **13.1** | **Next** | Entry plan system | Persist sizing + tranches, auto-create monitors |
+| **14.1** | **Next** | Pre-trade modal parity | Close governance gap — app must match CLI |
+| **14.2** | **Next** | Missing app pages | Post-mortems, earnings reviews, portfolio history, sizing |
 | **10** | Planned | Portfolio optimization & exposure | Quantitative portfolio construction |
 | **11** | Planned | Equity research engine | Structured thesis building and tracking |
 | **12** | Planned | Risk analysis & monitoring | Continuous risk awareness |
