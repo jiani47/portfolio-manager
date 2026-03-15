@@ -878,6 +878,28 @@ export interface PostMortem {
   updatedAt: string;
 }
 
+export interface EarningsReview {
+  id: string;
+  securityId: string;
+  symbol?: string;  // joined from securities
+  quarter: string;
+  earningsDate: string;
+  revenueExpected: number | null;
+  revenueActual: number | null;
+  epsExpected: number | null;
+  epsActual: number | null;
+  revenueGrowthPct: number | null;
+  epsGrowthPct: number | null;
+  growthTrajectory: string | null;
+  thesisImpact: string;
+  invalidationTriggered: boolean;
+  decision: string | null;
+  decisionDeadline: string | null;
+  decisionNotes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DecisionMemory {
   symbol: string;
   pastTrades: Array<{
@@ -910,6 +932,22 @@ export interface DecisionMemory {
     reason: string | null;
   }>;
   summary: string;
+}
+
+export interface BrokerPLRecord {
+  id: string;
+  symbol: string;
+  accountName: string | null;
+  openDate: string | null;
+  closeDate: string | null;
+  quantity: number | null;
+  costBasis: number | null;
+  proceeds: number | null;
+  gainLoss: number | null;
+  gainLossPct: number | null;
+  term: string | null;
+  sourceFile: string | null;
+  importedAt: string;
 }
 
 export interface TradeJournalEntry {

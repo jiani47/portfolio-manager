@@ -27,6 +27,8 @@ import {
   PreTradeCheckRecord,
   ClosedTrade,
   PostMortem,
+  EarningsReview,
+  BrokerPLRecord,
 } from '../shared/types';
 
 export class Database {
@@ -589,6 +591,55 @@ export class Database {
     try { this.db.exec('ALTER TABLE post_mortems ADD COLUMN thesis_quality TEXT NOT NULL DEFAULT \'good\''); } catch {}
     try { this.db.exec('ALTER TABLE post_mortems ADD COLUMN execution_quality TEXT NOT NULL DEFAULT \'good\''); } catch {}
     try { this.db.exec('ALTER TABLE post_mortems ADD COLUMN outcome TEXT NOT NULL DEFAULT \'loss\''); } catch {}
+
+    // Earnings reviews table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS earnings_reviews (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        quarter TEXT NOT NULL,
+        earnings_date TEXT NOT NULL,
+        revenue_expected REAL,
+        revenue_actual REAL,
+        eps_expected REAL,
+        eps_actual REAL,
+        revenue_growth_pct REAL,
+        eps_growth_pct REAL,
+        growth_trajectory TEXT,
+        thesis_impact TEXT NOT NULL DEFAULT 'neutral',
+        invalidation_triggered INTEGER NOT NULL DEFAULT 0,
+        decision TEXT,
+        decision_deadline TEXT,
+        decision_notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_earnings_reviews_security ON earnings_reviews(security_id);
+      CREATE INDEX IF NOT EXISTS idx_earnings_reviews_date ON earnings_reviews(earnings_date);
+    `);
+
+    // Broker realized P&L table (imported from Schwab CSV)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS realized_pl_broker (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        account_name TEXT,
+        open_date TEXT,
+        close_date TEXT,
+        quantity REAL,
+        cost_basis REAL,
+        proceeds REAL,
+        gain_loss REAL,
+        gain_loss_pct REAL,
+        term TEXT,
+        source_file TEXT,
+        imported_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_rpl_symbol ON realized_pl_broker(symbol);
+      CREATE INDEX IF NOT EXISTS idx_rpl_close_date ON realized_pl_broker(close_date);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_rpl_dedup ON realized_pl_broker(symbol, open_date, close_date, quantity, cost_basis, proceeds, account_name);
+    `);
 
     // Sync watchlist monitors on startup
     this.syncWatchlistMonitors();
@@ -2943,6 +2994,31 @@ export class Database {
     return row?.last_buy || null;
   }
 
+  /** Returns the earliest buy date for a symbol (for hold duration checks) */
+  getFirstBuyDate(symbol: string): string | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT MIN(t.date) as first_buy
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      WHERE s.symbol = ? AND t.type IN ('buy', 'Buy')
+    `).get(symbol) as { first_buy: string | null } | undefined;
+    return row?.first_buy || null;
+  }
+
+  /** Returns the count of sell transactions for a symbol in the last N days (proxy for round-trips) */
+  getRoundTripCount(symbol: string, days: number): number {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as cnt
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      WHERE s.symbol = ? AND t.type IN ('sell', 'Sell')
+      AND t.date >= date('now', '-' || ? || ' days')
+    `).get(symbol, days) as { cnt: number };
+    return row.cnt;
+  }
+
   // Post-mortem operations
 
   createPostMortem(data: {
@@ -3063,6 +3139,209 @@ export class Database {
       holdDays: r.hold_days as number,
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,
+    };
+  };
+
+  // Earnings review operations
+
+  createEarningsReview(data: {
+    securityId: string;
+    quarter: string;
+    earningsDate: string;
+    revenueExpected?: number | null;
+    revenueActual?: number | null;
+    epsExpected?: number | null;
+    epsActual?: number | null;
+    revenueGrowthPct?: number | null;
+    epsGrowthPct?: number | null;
+    growthTrajectory?: string | null;
+    thesisImpact: string;
+    invalidationTriggered?: boolean;
+    decision?: string | null;
+    decisionDeadline?: string | null;
+    decisionNotes?: string | null;
+  }): EarningsReview {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO earnings_reviews (id, security_id, quarter, earnings_date, revenue_expected, revenue_actual, eps_expected, eps_actual, revenue_growth_pct, eps_growth_pct, growth_trajectory, thesis_impact, invalidation_triggered, decision, decision_deadline, decision_notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, data.securityId, data.quarter, data.earningsDate,
+      data.revenueExpected ?? null, data.revenueActual ?? null,
+      data.epsExpected ?? null, data.epsActual ?? null,
+      data.revenueGrowthPct ?? null, data.epsGrowthPct ?? null,
+      data.growthTrajectory ?? null, data.thesisImpact,
+      data.invalidationTriggered ? 1 : 0,
+      data.decision ?? null, data.decisionDeadline ?? null,
+      data.decisionNotes ?? null, now, now);
+    return this.getEarningsReview(id)!;
+  }
+
+  getEarningsReview(id: string): EarningsReview | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT er.*, s.symbol FROM earnings_reviews er
+      JOIN securities s ON er.security_id = s.id
+      WHERE er.id = ?
+    `).get(id);
+    return row ? this.mapRowToEarningsReview(row) : null;
+  }
+
+  listEarningsReviews(opts?: { symbol?: string; pending?: boolean; limit?: number }): EarningsReview[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (opts?.symbol) {
+      conditions.push('s.symbol = ?');
+      params.push(opts.symbol.toUpperCase());
+    }
+    if (opts?.pending) {
+      conditions.push('er.decision IS NULL');
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limitClause = opts?.limit ? 'LIMIT ?' : '';
+    if (opts?.limit) params.push(opts.limit);
+
+    return this.db.prepare(`
+      SELECT er.*, s.symbol FROM earnings_reviews er
+      JOIN securities s ON er.security_id = s.id
+      ${where}
+      ORDER BY er.earnings_date DESC
+      ${limitClause}
+    `).all(...params).map(this.mapRowToEarningsReview);
+  }
+
+  updateEarningsReview(id: string, data: Partial<Omit<EarningsReview, 'id' | 'symbol' | 'createdAt' | 'updatedAt'>>): EarningsReview {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const fields: string[] = ['updated_at = ?'];
+    const values: unknown[] = [now];
+
+    if (data.securityId !== undefined) { fields.push('security_id = ?'); values.push(data.securityId); }
+    if (data.quarter !== undefined) { fields.push('quarter = ?'); values.push(data.quarter); }
+    if (data.earningsDate !== undefined) { fields.push('earnings_date = ?'); values.push(data.earningsDate); }
+    if (data.revenueExpected !== undefined) { fields.push('revenue_expected = ?'); values.push(data.revenueExpected); }
+    if (data.revenueActual !== undefined) { fields.push('revenue_actual = ?'); values.push(data.revenueActual); }
+    if (data.epsExpected !== undefined) { fields.push('eps_expected = ?'); values.push(data.epsExpected); }
+    if (data.epsActual !== undefined) { fields.push('eps_actual = ?'); values.push(data.epsActual); }
+    if (data.revenueGrowthPct !== undefined) { fields.push('revenue_growth_pct = ?'); values.push(data.revenueGrowthPct); }
+    if (data.epsGrowthPct !== undefined) { fields.push('eps_growth_pct = ?'); values.push(data.epsGrowthPct); }
+    if (data.growthTrajectory !== undefined) { fields.push('growth_trajectory = ?'); values.push(data.growthTrajectory); }
+    if (data.thesisImpact !== undefined) { fields.push('thesis_impact = ?'); values.push(data.thesisImpact); }
+    if (data.invalidationTriggered !== undefined) { fields.push('invalidation_triggered = ?'); values.push(data.invalidationTriggered ? 1 : 0); }
+    if (data.decision !== undefined) { fields.push('decision = ?'); values.push(data.decision); }
+    if (data.decisionDeadline !== undefined) { fields.push('decision_deadline = ?'); values.push(data.decisionDeadline); }
+    if (data.decisionNotes !== undefined) { fields.push('decision_notes = ?'); values.push(data.decisionNotes); }
+
+    values.push(id);
+    this.db.prepare(`UPDATE earnings_reviews SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    return this.getEarningsReview(id)!;
+  }
+
+  getPendingEarningsReviews(): EarningsReview[] {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare(`
+      SELECT er.*, s.symbol FROM earnings_reviews er
+      JOIN securities s ON er.security_id = s.id
+      WHERE er.decision IS NULL
+      ORDER BY er.decision_deadline ASC
+    `).all().map(this.mapRowToEarningsReview);
+  }
+
+  private mapRowToEarningsReview = (row: unknown): EarningsReview => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      securityId: r.security_id as string,
+      symbol: r.symbol as string,
+      quarter: r.quarter as string,
+      earningsDate: r.earnings_date as string,
+      revenueExpected: r.revenue_expected as number | null,
+      revenueActual: r.revenue_actual as number | null,
+      epsExpected: r.eps_expected as number | null,
+      epsActual: r.eps_actual as number | null,
+      revenueGrowthPct: r.revenue_growth_pct as number | null,
+      epsGrowthPct: r.eps_growth_pct as number | null,
+      growthTrajectory: r.growth_trajectory as string | null,
+      thesisImpact: r.thesis_impact as string,
+      invalidationTriggered: (r.invalidation_triggered as number) === 1,
+      decision: r.decision as string | null,
+      decisionDeadline: r.decision_deadline as string | null,
+      decisionNotes: r.decision_notes as string | null,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
+
+  // === Broker Realized P&L ===
+
+  importBrokerPL(records: BrokerPLRecord[]): number {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO realized_pl_broker
+        (id, symbol, account_name, open_date, close_date, quantity, cost_basis,
+         proceeds, gain_loss, gain_loss_pct, term, source_file, imported_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    let imported = 0;
+    const insertMany = this.db.transaction((recs: BrokerPLRecord[]) => {
+      for (const r of recs) {
+        const result = stmt.run(
+          r.id, r.symbol, r.accountName, r.openDate, r.closeDate,
+          r.quantity, r.costBasis, r.proceeds, r.gainLoss, r.gainLossPct,
+          r.term, r.sourceFile, r.importedAt
+        );
+        if (result.changes > 0) imported++;
+      }
+    });
+    insertMany(records);
+    return imported;
+  }
+
+  getBrokerPLBySymbol(symbol: string): BrokerPLRecord[] {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare(`
+      SELECT * FROM realized_pl_broker WHERE symbol = ? ORDER BY close_date
+    `).all(symbol).map(this.mapRowToBrokerPL);
+  }
+
+  getBrokerPLSummary(): Array<{ symbol: string; totalGainLoss: number; lotCount: number; lastCloseDate: string }> {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare(`
+      SELECT symbol, SUM(gain_loss) as total_gain_loss, COUNT(*) as lot_count,
+             MAX(close_date) as last_close_date
+      FROM realized_pl_broker
+      GROUP BY symbol ORDER BY SUM(gain_loss)
+    `).all().map((row: unknown) => {
+      const r = row as Record<string, unknown>;
+      return {
+        symbol: r.symbol as string,
+        totalGainLoss: r.total_gain_loss as number,
+        lotCount: r.lot_count as number,
+        lastCloseDate: r.last_close_date as string,
+      };
+    });
+  }
+
+  private mapRowToBrokerPL = (row: unknown): BrokerPLRecord => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      symbol: r.symbol as string,
+      accountName: r.account_name as string | null,
+      openDate: r.open_date as string | null,
+      closeDate: r.close_date as string | null,
+      quantity: r.quantity as number | null,
+      costBasis: r.cost_basis as number | null,
+      proceeds: r.proceeds as number | null,
+      gainLoss: r.gain_loss as number | null,
+      gainLossPct: r.gain_loss_pct as number | null,
+      term: r.term as string | null,
+      sourceFile: r.source_file as string | null,
+      importedAt: r.imported_at as string,
     };
   };
 

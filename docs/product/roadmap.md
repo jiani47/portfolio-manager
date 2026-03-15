@@ -119,7 +119,16 @@ One-sentence journal stored in ritual record.
 - [x] Fundamental reminders surfaced in morning briefing when due
 - [x] Monitors page updated with type filter (Price/Earnings/Fundamental) and multi-type add form
 
-### 4.5 External Push (planned)
+### 4.5 Earnings Gap-Up Warning ✅
+
+**Motivation:** NVDA post-mortem — chased a gap-up buy at $202 after earnings without checking resistance. Gap-ups after earnings are high-risk entry points.
+
+- [x] Detect when a symbol has gapped up >5% in the last 5 trading days
+- [x] Surface warning in pre-trade buy flow with mean reversion risk
+- [x] Show nearest resistance level and distance
+- [x] CLI + TypeScript integration in pre-trade flow
+
+### 4.6 External Push (planned)
 - [ ] Slack, SMS, or webhook for remote alerting
 - [ ] Remote control capability
 
@@ -203,14 +212,41 @@ Before any trade entry:
 - Audit trail: all checklist results stored in `pre_trade_checks` table
 - Soft gate: all items are warnings with override, never hard blocks
 
-### 7.4 S/R Level Display in Pre-Trade (planned)
+### 7.4 S/R Level Display in Pre-Trade ✅
 
 **Motivation:** NVDA post-mortem — trimmed Core at $174-185 which was the support zone, and chased a gap-up buy at $202 without checking resistance.
 
-- [ ] Show S/R levels and zones for the symbol during every buy/sell pre-trade checklist
-- [ ] Warn if buying near resistance or selling near support — can only be overridden by a thesis change
-- [ ] CLI: auto-display `pm-cli.sh levels <symbol>` output in pre-trade flow
-- [ ] App: show S/R levels in the pre-trade checklist modal
+- [x] Show S/R levels and zones for the symbol during every buy/sell pre-trade checklist
+- [x] Warn if buying near resistance or selling near support (3% threshold)
+- [x] CLI: auto-display levels in pre-trade flow
+- [x] TypeScript PreTradeValidator: `checkSRLevels()` in all check paths
+
+### 7.5 Panic Sell Cooling-Off ✅
+
+**Motivation:** INTU, SHOP, SOFI — panic sells at or near support on red days. Recurring pattern: sell in fear, buy back higher.
+
+- [x] Detect panic sell conditions: selling on a red day when price is within 3% of support
+- [x] Surface past bad-execution loss lessons from post-mortems
+- [x] Require explicit acknowledgment — not a block, but meaningful friction
+- [x] CLI: `check_panic_sell()` integrated into sell pre-trade flow
+- [x] TypeScript: `checkPanicSell()` in sell checks
+
+### 7.6 Thesis Hard Gate ✅
+
+**Motivation:** ETN, ZETA — entered positions with no documented thesis. Half-conviction entries lead to early exits at losses.
+
+- [x] Pre-trade check: if no thesis doc exists in `docs/positions/<SYMBOL>/thesis.md`, warn
+- [x] For investing book: hard fail — "Investment positions require a thesis doc"
+- [x] For trading book: soft warn — "No thesis doc. Confirm pure technical/momentum trade."
+- [x] CLI + TypeScript integration in pre-trade flow
+
+### 7.7 Trading/Investing Boundary Enforcement ✅
+
+**Motivation:** SOFI, AFRM — positions that blur the line between investing and trading. Frequent adds/trims on what should be a long-term hold destroy value through churn.
+
+- [x] Detect boundary violations: 3+ round-trips in 90 days on investing-book position
+- [x] Detect investing-sized (>2%) positions in trading account
+- [x] CLI + TypeScript integration in pre-trade flow
 
 ---
 
@@ -289,6 +325,16 @@ Surface behavioral patterns over time:
 - [x] Hold period insights and overall behavioral summary
 - [x] Patterns section on Trade Performance tab with insight banner, pattern cards, symbol breakdown table
 
+### 9.5 P&L Reconciliation ✅
+
+**Motivation:** Post-mortem review revealed our FIFO lot matching doesn't match Schwab's realized P&L. Simple sum of buys/sells diverges significantly (e.g. PLTR: we calculated -$5,995, Schwab says +$738). Broker data is authoritative.
+
+- [x] Import Schwab realized gain/loss CSV (`GainLoss_Realized_Details` export)
+- [x] Store broker-reported P&L per lot in `realized_pl_broker` table with dedup
+- [x] CLI: `pm-cli.sh reconcile <csv_path>` — import with summary
+- [x] CLI: `pm-cli.sh broker-pl [symbol]` — view broker P&L summary or per-lot detail
+- [x] Account auto-detection from filename
+
 ### 9.4 Trade Journal ✅
 
 Automated trade journal from transaction + ritual + decision data:
@@ -331,17 +377,17 @@ Automated trade journal from transaction + ritual + decision data:
 - Tax-efficient rebalancing suggestions (harvest losses, avoid wash sales)
 - "Your Core tier is 38% — target is 50%. Consider adding to GOOG/TSM/NVDA"
 
-### 10.5 Position Sizing & Lifecycle Management (planned)
+### 10.5 Position Sizing & Lifecycle Management (partially done ✅)
 
 **Motivation:** SOFI/AFRM — overaggressive adds cut at a loss. SNOW — 2 years of churn on 1,451 shares ($268K deployed) for -$4,763 net. Constant build-trim-rebuild destroys value.
 
 **Every position needs: a target size and a minimum hold duration.**
 
+- [x] **Hold duration enforcement:** Pre-trade warning when selling before `target_hold_period` expires (`checkHoldDuration`)
+- [x] **Churn detection:** Flag 3+ round-trips in 90 days (`checkChurn`)
+- [x] **Add-size guardrails:** Flag oversized adds relative to remaining room in tier allocation (`checkAddSize`)
 - **Target sizing:** Given tier limits and portfolio size, compute target share count and dollar allocation per position
-- **Entry plan:** Suggest add tranches using S/R levels, volatility, ATR (e.g. "add 25% of target at S1, 25% at S2, 50% if thesis confirmed at earnings")
-- **Hold duration enforcement:** Position intents already have `target_hold_period` — surface warnings when selling before it expires. "You set a 6-month hold on SNOW. It's been 3 weeks."
-- **Churn detection:** Flag when a symbol has been bought and sold 3+ times in 90 days — "You've round-tripped SNOW 4 times this quarter. If you believe the thesis, hold."
-- **Add-size guardrails:** Flag when an add is oversized relative to typical add pattern or remaining room in tier allocation
+- **Entry plan:** Suggest add tranches using S/R levels, volatility, ATR
 - CLI: `pm-cli.sh size <symbol> <target_shares>` — suggest entry plan with price levels and tranches
 
 ---
@@ -364,20 +410,22 @@ Automated trade journal from transaction + ritual + decision data:
 - Visual thesis health dashboard per position
 - Alert when thesis score changes materially
 
-### 11.3 Earnings Workflow
+### 11.3 Earnings Workflow ✅
 
 **Motivation:** TTD post-mortem revealed that missing quarterly deceleration signals over 14 months led to -$5,442 loss. Earnings review must be a mandatory process step, not ad-hoc.
 
-- Pre-earnings: key metrics to watch, consensus estimates, thesis implications
-- **Post-earnings review (mandatory for all held positions):**
-  - Actual vs expected on key metrics
-  - Growth rate trajectory — is it accelerating, stable, or decelerating?
-  - Thesis impact assessment: confirmed, neutral, or challenged?
-  - Explicit invalidation check: does this quarter's data trigger any invalidation conditions?
-  - If thesis is challenged: force a re-tier or exit decision within 48 hours
-- Auto-pull earnings data and flag surprises
-- Earnings history stored per position
-- CLI: `pm-cli.sh earnings-review <symbol>` — guided post-earnings checklist
+- [x] `earnings_reviews` table with full schema (revenue/EPS expected vs actual, growth trajectory, thesis impact, invalidation check, decision + deadline)
+- [x] **Post-earnings review (mandatory for all held positions):**
+  - [x] Actual vs expected on key metrics (revenue, EPS)
+  - [x] Growth rate trajectory — accelerating, stable, or decelerating
+  - [x] Thesis impact assessment: confirmed, neutral, or challenged
+  - [x] Explicit invalidation check
+  - [x] If thesis challenged: 48-hour decision deadline (hold/retier/exit)
+- [x] CLI: `pm-cli.sh earnings-review <symbol>` — guided interactive checklist
+- [x] CLI: `pm-cli.sh earnings-reviews [symbol]` — list reviews
+- [x] CLI: `pm-cli.sh earnings-review-decide <id>` — update pending decision
+- [x] Morning briefing: pending/overdue reviews surfaced
+- [x] Pre-trade: `checkPendingEarningsReview()` warns when buying with pending challenged review
 
 ### 11.4 Research Integration
 
@@ -430,6 +478,11 @@ Automated trade journal from transaction + ritual + decision data:
 | **8** | ✅ Done | Decision logging & memory | Institutional memory that compounds |
 | **9.1** | ✅ Done | Post-mortem template | Structured review of closed positions |
 | **9.2-9.4** | ✅ Done | Transaction analytics, patterns, journal | Closes the learning loop |
+| **4.5** | ✅ Done | Earnings gap-up warning | Prevents chasing post-earnings moves |
+| **7.4-7.7** | ✅ Done | S/R pre-trade, panic sell, thesis gate, boundary | Full pre-trade protection suite |
+| **9.5** | ✅ Done | P&L reconciliation | Broker-authoritative P&L import |
+| **10.5** | Partial | Position sizing & lifecycle | Hold enforcement + churn detection done, target sizing planned |
+| **11.3** | ✅ Done | Mandatory earnings review | Catches thesis invalidation early |
 | **10** | Planned | Portfolio optimization & exposure | Quantitative portfolio construction |
 | **11** | Planned | Equity research engine | Structured thesis building and tracking |
 | **12** | Planned | Risk analysis & monitoring | Continuous risk awareness |

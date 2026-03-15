@@ -279,6 +279,203 @@ check_rapid_flip() {
   return 0
 }
 
+check_sr_levels() {
+  local symbol="$1" side="$2" price="${3:-0}"
+
+  # Get current price if not provided
+  if [ "$price" = "0" ]; then
+    price=$(sqlite3 "$DB" "SELECT ph.close_price FROM price_history ph JOIN securities s ON ph.security_id=s.id WHERE s.symbol='$symbol' ORDER BY ph.date DESC LIMIT 1" 2>/dev/null)
+  fi
+  [ -z "$price" ] && { echo "  ✓ PASS: S/R check (no price data)"; return 0; }
+
+  # Get levels
+  local levels=$(sqlite3 -separator '|' "$DB" "SELECT level_type, price, strength FROM price_levels WHERE symbol='$symbol' ORDER BY price" 2>/dev/null)
+  if [ -z "$levels" ]; then
+    echo "  ✓ PASS: S/R check (no levels computed)"
+    return 0
+  fi
+
+  # Display S/R context
+  echo "  ── S/R Levels for $symbol (price: \$$price) ──"
+  echo "$levels" | while IFS='|' read -r LTYPE LPRICE LSTR; do
+    local pct=$(python3 -c "print(f'{abs(($LPRICE - $price) / $price * 100):.1f}')" 2>/dev/null)
+    if [ "$LTYPE" = "resistance" ]; then
+      echo "    R: \$$LPRICE (strength $LSTR) — ${pct}% away"
+    else
+      echo "    S: \$$LPRICE (strength $LSTR) — ${pct}% away"
+    fi
+  done
+
+  # Check proximity warnings
+  if [ "$side" = "BUY" ] || [ "$side" = "buy" ]; then
+    # Nearest resistance above
+    local nearest_r=$(sqlite3 -separator '|' "$DB" "SELECT price, strength FROM price_levels WHERE symbol='$symbol' AND level_type='resistance' AND price > $price ORDER BY price ASC LIMIT 1" 2>/dev/null)
+    if [ -n "$nearest_r" ]; then
+      local r_price=$(echo "$nearest_r" | cut -d'|' -f1)
+      local r_str=$(echo "$nearest_r" | cut -d'|' -f2)
+      local pct_away=$(python3 -c "print(f'{($r_price - $price) / $price * 100:.1f}')" 2>/dev/null)
+      if python3 -c "exit(0 if float('$pct_away') < 3 else 1)" 2>/dev/null; then
+        echo "  ⚠ WARN: Buying within ${pct_away}% of resistance at \$$r_price (strength $r_str)"
+        read -p "    Override? (y/n): " ov
+        [ "$ov" != "y" ] && return 1
+      fi
+    fi
+  else
+    # Nearest support below
+    local nearest_s=$(sqlite3 -separator '|' "$DB" "SELECT price, strength FROM price_levels WHERE symbol='$symbol' AND level_type='support' AND price < $price ORDER BY price DESC LIMIT 1" 2>/dev/null)
+    if [ -n "$nearest_s" ]; then
+      local s_price=$(echo "$nearest_s" | cut -d'|' -f1)
+      local s_str=$(echo "$nearest_s" | cut -d'|' -f2)
+      local pct_away=$(python3 -c "print(f'{($price - $s_price) / $price * 100:.1f}')" 2>/dev/null)
+      if python3 -c "exit(0 if float('$pct_away') < 3 else 1)" 2>/dev/null; then
+        echo "  ⚠ WARN: Selling within ${pct_away}% of support at \$$s_price (strength $s_str)"
+        read -p "    Override? (y/n): " ov
+        [ "$ov" != "y" ] && return 1
+      fi
+    fi
+  fi
+  return 0
+}
+
+check_gap_up() {
+  local symbol="$1"
+
+  # Get last 6 trading days of price history
+  local prices=$(sqlite3 -separator '|' "$DB" "
+    SELECT date, open_price, close_price FROM price_history ph
+    JOIN securities s ON ph.security_id=s.id
+    WHERE s.symbol='$symbol' AND ph.open_price IS NOT NULL
+    ORDER BY ph.date DESC LIMIT 6
+  " 2>/dev/null)
+
+  [ -z "$prices" ] && { echo "  ✓ PASS: Gap-up check (no price data)"; return 0; }
+
+  # Reverse to chronological order and check consecutive days
+  local reversed=$(echo "$prices" | tail -r 2>/dev/null || echo "$prices" | tac 2>/dev/null || echo "$prices")
+  local prev_close=""
+  local gap_found=0
+  local gap_date="" gap_pct=""
+
+  while IFS='|' read -r pdate popen pclose; do
+    if [ -n "$prev_close" ] && [ -n "$popen" ]; then
+      local gpct=$(python3 -c "
+pc = float('$prev_close')
+if pc > 0:
+    print(f'{($popen - pc) / pc * 100:.1f}')
+else:
+    print('0')
+" 2>/dev/null)
+      if python3 -c "exit(0 if float('$gpct') > 5 else 1)" 2>/dev/null; then
+        gap_found=1
+        gap_date="$pdate"
+        gap_pct="$gpct"
+        break
+      fi
+    fi
+    prev_close="$pclose"
+  done <<< "$reversed"
+
+  if [ "$gap_found" = "1" ]; then
+    echo "  ⚠ WARN: $symbol gapped up ${gap_pct}% on $gap_date — mean reversion risk elevated"
+    # Show nearest resistance
+    local latest_close=$(echo "$prices" | head -1 | cut -d'|' -f3)
+    if [ -n "$latest_close" ]; then
+      local nearest_r=$(sqlite3 -separator '|' "$DB" "SELECT price, strength FROM price_levels WHERE symbol='$symbol' AND level_type='resistance' AND price > $latest_close ORDER BY price ASC LIMIT 1" 2>/dev/null)
+      if [ -n "$nearest_r" ]; then
+        local r_price=$(echo "$nearest_r" | cut -d'|' -f1)
+        local r_str=$(echo "$nearest_r" | cut -d'|' -f2)
+        local dist_pct=$(python3 -c "print(f'{($r_price - $latest_close) / $latest_close * 100:.1f}')" 2>/dev/null)
+        echo "          Nearest resistance: \$$r_price (strength $r_str, ${dist_pct}% away)"
+      fi
+    fi
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  else
+    echo "  ✓ PASS: No recent gap-up detected"
+  fi
+  return 0
+}
+
+check_thesis_file() {
+  local symbol="$1" book="$2"
+  local PROJ_ROOT
+  PROJ_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+  local thesis_path="$PROJ_ROOT/docs/positions/$(echo "$symbol" | tr '[:lower:]' '[:upper:]')/thesis.md"
+
+  if [ -f "$thesis_path" ]; then
+    echo "  ✓ PASS: Thesis doc exists"
+    return 0
+  fi
+
+  if [ "$book" = "investing" ]; then
+    echo "  ✗ FAIL: Thesis doc missing — required for investment positions"
+    echo "          Create docs/positions/$(echo "$symbol" | tr '[:lower:]' '[:upper:]')/thesis.md first."
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  else
+    echo "  ⚠ WARN: No thesis doc — confirm this is a pure technical/momentum trade"
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  fi
+  return 0
+}
+
+check_panic_sell() {
+  local symbol="$1" price="${2:-0}"
+
+  # Get current and previous close
+  local prices=$(sqlite3 -separator '|' "$DB" "
+    SELECT close_price FROM price_history ph
+    JOIN securities s ON ph.security_id=s.id
+    WHERE s.symbol='$symbol'
+    ORDER BY ph.date DESC LIMIT 2
+  " 2>/dev/null)
+
+  local current_close=$(echo "$prices" | head -1)
+  local prev_close=$(echo "$prices" | tail -1)
+
+  [ -z "$current_close" ] || [ -z "$prev_close" ] && { echo "  ✓ PASS: Panic sell check (no price data)"; return 0; }
+
+  local is_red=$(python3 -c "print(1 if float('$current_close') < float('$prev_close') else 0)" 2>/dev/null)
+  [ "$is_red" != "1" ] && { echo "  ✓ PASS: Not a red day"; return 0; }
+
+  # Check if near support
+  local use_price="$price"
+  [ "$use_price" = "0" ] && use_price="$current_close"
+
+  local nearest_s=$(sqlite3 -separator '|' "$DB" "SELECT price, strength FROM price_levels WHERE symbol='$symbol' AND level_type='support' AND price < $use_price ORDER BY price DESC LIMIT 1" 2>/dev/null)
+  [ -z "$nearest_s" ] && { echo "  ✓ PASS: No support level below"; return 0; }
+
+  local s_price=$(echo "$nearest_s" | cut -d'|' -f1)
+  local pct_away=$(python3 -c "print(f'{($use_price - $s_price) / $use_price * 100:.1f}')" 2>/dev/null)
+
+  if python3 -c "exit(0 if float('$pct_away') < 3 else 1)" 2>/dev/null; then
+    echo ""
+    echo "  🚨 PANIC SELL PATTERN DETECTED"
+    echo "     Red day + selling within ${pct_away}% of support at \$$s_price"
+
+    # Surface past panic sell post-mortems
+    local past_panics=$(sqlite3 "$DB" "
+      SELECT s.symbol || ': ' || pm.lesson_learned
+      FROM post_mortems pm
+      JOIN securities s ON pm.security_id = s.id
+      WHERE pm.execution_quality = 'bad' AND pm.outcome = 'loss'
+      ORDER BY pm.close_date DESC LIMIT 3
+    " 2>/dev/null)
+    if [ -n "$past_panics" ]; then
+      echo "     Past lessons from bad-execution losses:"
+      echo "$past_panics" | while read -r line; do echo "       • $line"; done
+    fi
+
+    echo ""
+    read -p "    I acknowledge this may be a panic sell. Proceed? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  else
+    echo "  ✓ PASS: Not near support (${pct_away}% away)"
+  fi
+  return 0
+}
+
 recall_symbol() {
   local symbol="$1"
   if [ -z "$symbol" ]; then
@@ -389,6 +586,152 @@ recall_symbol() {
   echo ""
 }
 
+check_boundary() {
+  local symbol="$1" side="$2" book="$3" qty="${4:-0}" price="${5:-0}"
+
+  if [ "$book" = "investing" ]; then
+    # Count sells (proxy for round-trips) in last 90 days
+    local sell_count=$(sqlite3 "$DB" "
+      SELECT COUNT(*) FROM transactions t
+      JOIN securities s ON t.security_id=s.id
+      WHERE s.symbol='$symbol' AND t.type IN ('sell','Sell')
+      AND t.date >= date('now', '-90 days')
+    " 2>/dev/null)
+    if [ "$sell_count" -ge 3 ] 2>/dev/null; then
+      echo "  ⚠ WARN: Boundary violation — $sell_count sells on $symbol in 90 days"
+      echo "          This is an investing position. If you believe the thesis, hold."
+      read -p "    Override? (y/n): " ov
+      [ "$ov" != "y" ] && return 1
+    else
+      echo "  ✓ PASS: Boundary check (investing, $sell_count sells in 90d)"
+    fi
+  elif [ "$book" = "trading" ]; then
+    # Check if position is investing-sized (>2% of portfolio)
+    local portfolio_total=$(sqlite3 "$DB" "
+      SELECT COALESCE(SUM(
+        CASE WHEN s.type IN ('cash') THEN p.quantity
+        ELSE p.quantity * COALESCE((SELECT ph.close_price FROM price_history ph WHERE ph.security_id=p.security_id ORDER BY ph.date DESC LIMIT 1), 0)
+        END
+      ), 0)
+      FROM positions p JOIN securities s ON p.security_id=s.id
+    " 2>/dev/null)
+    local existing_mv=$(sqlite3 "$DB" "
+      SELECT COALESCE(p.quantity * (SELECT ph.close_price FROM price_history ph WHERE ph.security_id=p.security_id ORDER BY ph.date DESC LIMIT 1), 0)
+      FROM positions p JOIN securities s ON p.security_id=s.id WHERE s.symbol='$symbol'
+    " 2>/dev/null)
+    [ -z "$existing_mv" ] && existing_mv=0
+    local order_val=$(python3 -c "print($qty * $price)" 2>/dev/null)
+    [ -z "$order_val" ] && order_val=0
+    local after_mv=$(python3 -c "print($existing_mv + $order_val)" 2>/dev/null)
+    local pct=$(python3 -c "print(f'{$after_mv / $portfolio_total * 100:.1f}' if $portfolio_total > 0 else '0.0')" 2>/dev/null)
+    if python3 -c "exit(0 if float('$pct') > 2.0 else 1)" 2>/dev/null; then
+      echo "  ⚠ WARN: Position ${pct}% — investing-sized for trading account"
+      echo "          Consider moving to investing book or sizing down."
+      read -p "    Override? (y/n): " ov
+      [ "$ov" != "y" ] && return 1
+    else
+      echo "  ✓ PASS: Trading position size OK (${pct}%)"
+    fi
+  fi
+  return 0
+}
+
+check_hold_duration() {
+  local symbol="$1"
+  local hold_period=$(sqlite3 "$DB" "
+    SELECT pi.target_hold_period FROM position_intents pi
+    JOIN positions p ON pi.position_id=p.id
+    JOIN securities s ON p.security_id=s.id
+    WHERE s.symbol='$symbol' LIMIT 1
+  " 2>/dev/null)
+  [ -z "$hold_period" ] && { echo "  ✓ PASS: Hold duration (no target set)"; return 0; }
+
+  local first_buy=$(sqlite3 "$DB" "
+    SELECT MIN(t.date) FROM transactions t
+    JOIN securities s ON t.security_id=s.id
+    WHERE s.symbol='$symbol' AND t.type IN ('buy','Buy')
+  " 2>/dev/null)
+  [ -z "$first_buy" ] && { echo "  ✓ PASS: Hold duration (no buy history)"; return 0; }
+
+  local days_held=$(( ($(date +%s) - $(date -j -f "%Y-%m-%d" "$first_buy" +%s 2>/dev/null || echo 0)) / 86400 ))
+
+  # Parse target hold period to days
+  local target_days=$(python3 -c "
+import re
+p = '$hold_period'.lower()
+m = re.search(r'(\d+)\s*(month|year|week|day)', p)
+if m:
+    n, unit = int(m.group(1)), m.group(2)
+    if 'year' in unit: print(n * 365)
+    elif 'month' in unit: print(n * 30)
+    elif 'week' in unit: print(n * 7)
+    else: print(n)
+else:
+    print(0)
+" 2>/dev/null)
+
+  [ "$target_days" = "0" ] && { echo "  ✓ PASS: Hold duration (unparseable target: $hold_period)"; return 0; }
+
+  if [ "$days_held" -lt "$target_days" ] 2>/dev/null; then
+    local remaining=$((target_days - days_held))
+    echo "  ⚠ WARN: Hold duration — target is '$hold_period' but only held ${days_held}d ($remaining days remaining)"
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  else
+    echo "  ✓ PASS: Hold duration met (${days_held}d, target: $hold_period)"
+  fi
+  return 0
+}
+
+check_churn() {
+  local symbol="$1"
+  local sell_count=$(sqlite3 "$DB" "
+    SELECT COUNT(*) FROM transactions t
+    JOIN securities s ON t.security_id=s.id
+    WHERE s.symbol='$symbol' AND t.type IN ('sell','Sell')
+    AND t.date >= date('now', '-90 days')
+  " 2>/dev/null)
+  if [ "$sell_count" -ge 3 ] 2>/dev/null; then
+    echo "  ⚠ WARN: Churn detected — $sell_count round-trips on $symbol in 90 days"
+    echo "          Constant build-trim-rebuild destroys value."
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  else
+    echo "  ✓ PASS: No churn ($sell_count sells in 90d)"
+  fi
+  return 0
+}
+
+check_pending_earnings_review() {
+  local symbol="$1"
+  local pending=$(sqlite3 -separator '|' "$DB" "
+    SELECT er.quarter, er.thesis_impact, er.invalidation_triggered, er.decision_deadline
+    FROM earnings_reviews er
+    JOIN securities s ON er.security_id = s.id
+    WHERE s.symbol = '$symbol' AND er.decision IS NULL
+    ORDER BY er.earnings_date DESC LIMIT 1;
+  " 2>/dev/null)
+  if [ -z "$pending" ]; then
+    echo "  ✓ PASS: No pending earnings reviews"
+    return 0
+  fi
+  local quarter=$(echo "$pending" | cut -d'|' -f1)
+  local impact=$(echo "$pending" | cut -d'|' -f2)
+  local invalidation=$(echo "$pending" | cut -d'|' -f3)
+  local deadline=$(echo "$pending" | cut -d'|' -f4)
+  if [ "$impact" = "challenged" ] || [ "$invalidation" = "1" ]; then
+    echo "  ✗ FAIL: Pending earnings review for $symbol — thesis $impact"
+    echo "          $quarter review pending${deadline:+ (deadline: $deadline)}. Complete review before trading."
+    read -p "    Override? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  else
+    echo "  ⚠ WARN: Pending $quarter earnings review for $symbol ($impact, no decision yet)"
+    read -p "    Acknowledged? (y/n): " ov
+    [ "$ov" != "y" ] && return 1
+  fi
+  return 0
+}
+
 pre_trade_check() {
   local symbol="$1" side="$2" qty="$3" acct="$4" price="${5:-0}"
 
@@ -463,6 +806,10 @@ pre_trade_check() {
   if [ "$side" = "SELL" ]; then
     check_regime_read || return 1
     check_rapid_flip "$symbol" "sell" "$price" || return 1
+    check_sr_levels "$symbol" "SELL" "$price" || return 1
+    check_panic_sell "$symbol" "$price" || return 1
+    check_hold_duration "$symbol" || return 1
+    [ "$book" = "investing" ] && { check_boundary "$symbol" "sell" "$book" || return 1; }
     echo ""
     echo "  Manual acknowledgments:"
     read -p "  ☐ I have a clear reason for this sell (y/n): " ack
@@ -473,10 +820,16 @@ pre_trade_check() {
   fi
 
   if [ "$book" = "trading" ]; then
+    check_thesis_file "$symbol" "$book" || return 1
     check_regime_read || return 1
     check_sorting_day || return 1
     check_reentry_cooldown "$symbol" || return 1
     check_rapid_flip "$symbol" "buy" || return 1
+    check_sr_levels "$symbol" "BUY" "$price" || return 1
+    check_gap_up "$symbol" || return 1
+    check_boundary "$symbol" "buy" "$book" "$qty" "$price" || return 1
+    check_churn "$symbol" || return 1
+    check_pending_earnings_review "$symbol" || return 1
     echo "  ✓ PASS: Position size ≤1% check (manual verification)"
     echo ""
     echo "  Manual acknowledgments:"
@@ -490,12 +843,18 @@ pre_trade_check() {
   else
     # Investing
     check_intent_exists "$symbol" || return 1
+    check_thesis_file "$symbol" "$book" || return 1
     check_thesis "$symbol" || return 1
     check_invalidation "$symbol" || return 1
     check_regime_read || return 1
     check_sorting_day || return 1
     check_reentry_cooldown "$symbol" || return 1
     check_rapid_flip "$symbol" "buy" || return 1
+    check_sr_levels "$symbol" "BUY" "$price" || return 1
+    check_gap_up "$symbol" || return 1
+    check_boundary "$symbol" "buy" "$book" "$qty" "$price" || return 1
+    check_churn "$symbol" || return 1
+    check_pending_earnings_review "$symbol" || return 1
     echo "  ✓ PASS: Position size check (manual verification)"
     echo ""
     echo "  Manual acknowledgments:"
@@ -1054,6 +1413,37 @@ PYEOF
     if [ -n "$SR_ALERTS" ]; then
       echo "=== S/R Proximity Alerts ==="
       echo "$SR_ALERTS"
+      echo ""
+    fi
+
+    # Pending earnings reviews
+    OVERDUE_REVIEWS=$(sqlite3 -separator '|' "$DB" "
+      SELECT s.symbol, er.quarter, er.thesis_impact, er.decision_deadline,
+             er.invalidation_triggered
+      FROM earnings_reviews er
+      JOIN securities s ON er.security_id = s.id
+      WHERE er.decision IS NULL
+      ORDER BY er.decision_deadline ASC;
+    " 2>/dev/null)
+    if [ -n "$OVERDUE_REVIEWS" ]; then
+      echo "=== Pending Earnings Reviews ==="
+      echo "$OVERDUE_REVIEWS" | while IFS='|' read -r SYM QTR IMPACT DEADLINE INV_TRIG; do
+        NOW_TS=$(date +%s)
+        if [ -n "$DEADLINE" ]; then
+          DL_TS=$(python3 -c "from datetime import datetime; print(int(datetime.fromisoformat('$DEADLINE'.replace('Z','+00:00')).timestamp()))" 2>/dev/null || echo "0")
+          HOURS_LEFT=$(( (DL_TS - NOW_TS) / 3600 ))
+          if [ "$HOURS_LEFT" -lt 0 ]; then
+            echo "  ⚠ OVERDUE: $SYM $QTR earnings review — thesis $IMPACT, deadline was ${DEADLINE:0:10}"
+          elif [ "$HOURS_LEFT" -lt 24 ]; then
+            echo "  ⚠ DUE SOON: $SYM $QTR earnings review — due in ${HOURS_LEFT}h"
+          else
+            DAYS_LEFT=$(( HOURS_LEFT / 24 ))
+            echo "  ⏳ PENDING: $SYM $QTR earnings review — thesis $IMPACT, ${DAYS_LEFT}d remaining"
+          fi
+        else
+          echo "  ⏳ PENDING: $SYM $QTR earnings review — thesis $IMPACT, no deadline"
+        fi
+      done
       echo ""
     fi
 
@@ -3365,6 +3755,482 @@ PYEOF
     fi
     ;;
 
+  earnings-review)
+    # Interactive post-earnings review
+    SYMBOL="$2"
+    if [ -z "$SYMBOL" ]; then
+      echo "Usage: pm-cli.sh earnings-review <symbol>"
+      exit 1
+    fi
+    SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+
+    # Look up security_id
+    SEC_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$SYMBOL' LIMIT 1;")
+    if [ -z "$SEC_ID" ]; then
+      echo "ERROR: Security '$SYMBOL' not found in database."
+      exit 1
+    fi
+
+    echo "=== Earnings Review: $SYMBOL ==="
+    echo ""
+
+    # Show current position info
+    INTENT_INFO=$(sqlite3 -separator '|' "$DB" "
+      SELECT pi.tier, pi.thesis, pi.invalidation
+      FROM position_intents pi
+      JOIN positions p ON pi.position_id = p.id
+      WHERE p.security_id = '$SEC_ID' LIMIT 1;
+    " 2>/dev/null)
+    if [ -n "$INTENT_INFO" ]; then
+      ER_TIER=$(echo "$INTENT_INFO" | cut -d'|' -f1)
+      ER_THESIS=$(echo "$INTENT_INFO" | cut -d'|' -f2)
+      ER_INV=$(echo "$INTENT_INFO" | cut -d'|' -f3)
+      echo "--- Current Position ---"
+      echo "  Tier:           $ER_TIER"
+      echo "  Thesis:         $ER_THESIS"
+      echo "  Invalidation:   $ER_INV"
+      echo ""
+    fi
+
+    # Show previous review if exists (for growth trajectory suggestion)
+    PREV_REVIEW=$(sqlite3 -separator '|' "$DB" "
+      SELECT quarter, revenue_growth_pct, eps_growth_pct, growth_trajectory, thesis_impact
+      FROM earnings_reviews
+      WHERE security_id = '$SEC_ID'
+      ORDER BY earnings_date DESC LIMIT 1;
+    " 2>/dev/null)
+    if [ -n "$PREV_REVIEW" ]; then
+      PR_QTR=$(echo "$PREV_REVIEW" | cut -d'|' -f1)
+      PR_REV_G=$(echo "$PREV_REVIEW" | cut -d'|' -f2)
+      PR_EPS_G=$(echo "$PREV_REVIEW" | cut -d'|' -f3)
+      PR_TRAJ=$(echo "$PREV_REVIEW" | cut -d'|' -f4)
+      PR_IMPACT=$(echo "$PREV_REVIEW" | cut -d'|' -f5)
+      echo "--- Previous Review ($PR_QTR) ---"
+      [ -n "$PR_REV_G" ] && echo "  Revenue growth: ${PR_REV_G}%"
+      [ -n "$PR_EPS_G" ] && echo "  EPS growth:     ${PR_EPS_G}%"
+      [ -n "$PR_TRAJ" ] && echo "  Trajectory:     $PR_TRAJ"
+      echo "  Thesis impact:  $PR_IMPACT"
+      echo ""
+    fi
+
+    # Prompt for data
+    read -p "Quarter (e.g. Q4 2025): " ER_QUARTER
+    read -p "Earnings date (YYYY-MM-DD): " ER_DATE
+    read -p "Revenue expected ($M): " ER_REV_EXP
+    read -p "Revenue actual ($M): " ER_REV_ACT
+    read -p "EPS expected ($): " ER_EPS_EXP
+    read -p "EPS actual ($): " ER_EPS_ACT
+
+    # Compute beat/miss
+    echo ""
+    if [ -n "$ER_REV_EXP" ] && [ -n "$ER_REV_ACT" ]; then
+      REV_RESULT=$(python3 -c "
+exp, act = float('$ER_REV_EXP'), float('$ER_REV_ACT')
+diff_pct = (act - exp) / exp * 100 if exp else 0
+label = 'Beat' if act > exp else 'Miss' if act < exp else 'Inline'
+print(f'  Revenue: {label} ({diff_pct:+.1f}%) — \${exp:.2f}M est vs \${act:.2f}M actual')
+" 2>/dev/null)
+      echo "$REV_RESULT"
+    fi
+    if [ -n "$ER_EPS_EXP" ] && [ -n "$ER_EPS_ACT" ]; then
+      EPS_RESULT=$(python3 -c "
+exp, act = float('$ER_EPS_EXP'), float('$ER_EPS_ACT')
+diff_pct = (act - exp) / exp * 100 if exp else 0
+label = 'Beat' if act > exp else 'Miss' if act < exp else 'Inline'
+print(f'  EPS:     {label} ({diff_pct:+.1f}%) — \${exp:.2f} est vs \${act:.2f} actual')
+" 2>/dev/null)
+      echo "$EPS_RESULT"
+    fi
+    echo ""
+
+    read -p "Revenue YoY growth % (e.g. 15.3): " ER_REV_GROWTH
+    read -p "EPS YoY growth % (e.g. 22.1): " ER_EPS_GROWTH
+
+    # Suggest trajectory if previous review exists
+    if [ -n "$PR_TRAJ" ] && [ -n "$PR_REV_G" ] && [ -n "$ER_REV_GROWTH" ]; then
+      TRAJ_SUGGEST=$(python3 -c "
+prev, curr = float('$PR_REV_G'), float('$ER_REV_GROWTH')
+if curr > prev + 2: print('accelerating')
+elif curr < prev - 2: print('decelerating')
+else: print('stable')
+" 2>/dev/null)
+      echo "  (Suggested trajectory based on prior: $TRAJ_SUGGEST)"
+    fi
+
+    echo "Growth trajectory:"
+    echo "  1) accelerating"
+    echo "  2) stable"
+    echo "  3) decelerating"
+    read -p "Select (1-3): " ER_TRAJ_NUM
+    case "$ER_TRAJ_NUM" in
+      1) ER_TRAJECTORY="accelerating" ;;
+      3) ER_TRAJECTORY="decelerating" ;;
+      *) ER_TRAJECTORY="stable" ;;
+    esac
+
+    echo "Thesis impact:"
+    echo "  1) confirmed  (earnings support the thesis)"
+    echo "  2) neutral    (no change to thesis)"
+    echo "  3) challenged (earnings challenge the thesis)"
+    read -p "Select (1-3): " ER_IMPACT_NUM
+    case "$ER_IMPACT_NUM" in
+      1) ER_IMPACT="confirmed" ;;
+      3) ER_IMPACT="challenged" ;;
+      *) ER_IMPACT="neutral" ;;
+    esac
+
+    read -p "Invalidation triggered? (y/n): " ER_INV_TRIG
+    if [ "$ER_INV_TRIG" = "y" ]; then
+      ER_INV_TRIGGERED=1
+    else
+      ER_INV_TRIGGERED=0
+    fi
+
+    # Set deadline if challenged or invalidation triggered
+    ER_DEADLINE=""
+    if [ "$ER_IMPACT" = "challenged" ] || [ "$ER_INV_TRIGGERED" = "1" ]; then
+      ER_DEADLINE=$(python3 -c "
+from datetime import datetime, timedelta
+deadline = datetime.now() + timedelta(hours=48)
+print(deadline.strftime('%Y-%m-%dT%H:%M:%S.000Z'))
+" 2>/dev/null)
+      echo ""
+      echo "  ⚠ DECISION REQUIRED within 48 hours: hold, retier, or exit"
+      echo "  Deadline: $ER_DEADLINE"
+    fi
+
+    # Decision
+    echo ""
+    echo "Decision:"
+    echo "  1) hold"
+    echo "  2) retier"
+    echo "  3) exit"
+    echo "  4) defer (decide within 48h)"
+    read -p "Select (1-4): " ER_DEC_NUM
+    case "$ER_DEC_NUM" in
+      1) ER_DECISION="hold" ;;
+      2) ER_DECISION="retier" ;;
+      3) ER_DECISION="exit" ;;
+      *) ER_DECISION="" ;;
+    esac
+
+    ER_NOTES=""
+    if [ -n "$ER_DECISION" ]; then
+      echo "Decision notes:"
+      read -p "> " ER_NOTES
+    fi
+
+    # Generate UUID and timestamp
+    ER_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+    # Escape single quotes
+    ER_QUARTER_ESC=$(echo "$ER_QUARTER" | sed "s/'/''/g")
+    ER_NOTES_ESC=$(echo "$ER_NOTES" | sed "s/'/''/g")
+
+    # Default numeric fields
+    [ -z "$ER_REV_EXP" ] && ER_REV_EXP="NULL" || ER_REV_EXP="$ER_REV_EXP"
+    [ -z "$ER_REV_ACT" ] && ER_REV_ACT="NULL" || ER_REV_ACT="$ER_REV_ACT"
+    [ -z "$ER_EPS_EXP" ] && ER_EPS_EXP="NULL" || ER_EPS_EXP="$ER_EPS_EXP"
+    [ -z "$ER_EPS_ACT" ] && ER_EPS_ACT="NULL" || ER_EPS_ACT="$ER_EPS_ACT"
+    [ -z "$ER_REV_GROWTH" ] && ER_REV_GROWTH="NULL" || ER_REV_GROWTH="$ER_REV_GROWTH"
+    [ -z "$ER_EPS_GROWTH" ] && ER_EPS_GROWTH="NULL" || ER_EPS_GROWTH="$ER_EPS_GROWTH"
+
+    # Build decision/deadline SQL values
+    [ -z "$ER_DECISION" ] && ER_DEC_SQL="NULL" || ER_DEC_SQL="'$ER_DECISION'"
+    [ -z "$ER_DEADLINE" ] && ER_DL_SQL="NULL" || ER_DL_SQL="'$ER_DEADLINE'"
+    [ -z "$ER_NOTES" ] && ER_NOTES_SQL="NULL" || ER_NOTES_SQL="'$ER_NOTES_ESC'"
+
+    sqlite3 "$DB" "INSERT INTO earnings_reviews (id, security_id, quarter, earnings_date, revenue_expected, revenue_actual, eps_expected, eps_actual, revenue_growth_pct, eps_growth_pct, growth_trajectory, thesis_impact, invalidation_triggered, decision, decision_deadline, decision_notes, created_at, updated_at) VALUES ('$ER_ID', '$SEC_ID', '$ER_QUARTER_ESC', '$ER_DATE', $ER_REV_EXP, $ER_REV_ACT, $ER_EPS_EXP, $ER_EPS_ACT, $ER_REV_GROWTH, $ER_EPS_GROWTH, '$ER_TRAJECTORY', '$ER_IMPACT', $ER_INV_TRIGGERED, $ER_DEC_SQL, $ER_DL_SQL, $ER_NOTES_SQL, '$NOW', '$NOW');"
+
+    echo ""
+    echo "=== Review Summary ==="
+    echo "  $SYMBOL $ER_QUARTER ($ER_DATE)"
+    echo "  Trajectory: $ER_TRAJECTORY | Impact: $ER_IMPACT"
+    [ "$ER_INV_TRIGGERED" = "1" ] && echo "  ⚠ Invalidation triggered"
+    if [ -n "$ER_DECISION" ]; then
+      echo "  Decision: $ER_DECISION"
+      [ -n "$ER_NOTES" ] && echo "  Notes: $ER_NOTES"
+    else
+      echo "  Decision: DEFERRED (deadline: $ER_DEADLINE)"
+    fi
+    echo "  ID: $ER_ID"
+    ;;
+
+  earnings-reviews)
+    # List earnings reviews, optionally filtered by symbol
+    ER_FILTER="$2"
+    if [ -n "$ER_FILTER" ]; then
+      ER_FILTER=$(echo "$ER_FILTER" | tr '[:lower:]' '[:upper:]')
+      ER_WHERE="WHERE s.symbol = '$ER_FILTER'"
+      echo "=== Earnings Reviews: $ER_FILTER ==="
+    else
+      ER_WHERE=""
+      echo "=== All Earnings Reviews ==="
+    fi
+
+    ER_ROWS=$(sqlite3 -separator '|' "$DB" "
+      SELECT s.symbol, er.quarter, substr(er.earnings_date, 1, 10) as edate,
+             CASE
+               WHEN er.revenue_actual IS NOT NULL AND er.revenue_expected IS NOT NULL
+                 THEN CASE WHEN er.revenue_actual > er.revenue_expected THEN 'Beat' WHEN er.revenue_actual < er.revenue_expected THEN 'Miss' ELSE 'Inline' END
+               ELSE 'N/A'
+             END as rev_result,
+             CASE
+               WHEN er.eps_actual IS NOT NULL AND er.eps_expected IS NOT NULL
+                 THEN CASE WHEN er.eps_actual > er.eps_expected THEN 'Beat' WHEN er.eps_actual < er.eps_expected THEN 'Miss' ELSE 'Inline' END
+               ELSE 'N/A'
+             END as eps_result,
+             COALESCE(er.growth_trajectory, 'N/A') as trajectory,
+             er.thesis_impact,
+             COALESCE(er.decision, 'pending') as decision
+      FROM earnings_reviews er
+      JOIN securities s ON er.security_id = s.id
+      $ER_WHERE
+      ORDER BY er.earnings_date DESC;
+    ")
+
+    if [ -z "$ER_ROWS" ]; then
+      echo "(none)"
+    else
+      printf "%-6s %-10s %-12s %-8s %-8s %-14s %-12s %-8s\n" "SYMBOL" "QUARTER" "DATE" "REV" "EPS" "TRAJECTORY" "IMPACT" "DECISION"
+      printf "%-6s %-10s %-12s %-8s %-8s %-14s %-12s %-8s\n" "------" "----------" "----------" "--------" "--------" "--------------" "----------" "--------"
+      echo "$ER_ROWS" | while IFS='|' read -r SYM QTR EDATE REV_R EPS_R TRAJ IMPACT DEC; do
+        # Color: green for confirmed, red for challenged, yellow for pending
+        if [ "$IMPACT" = "challenged" ]; then
+          COLOR="\033[31m"  # red
+        elif [ "$IMPACT" = "confirmed" ]; then
+          COLOR="\033[32m"  # green
+        else
+          COLOR="\033[33m"  # yellow
+        fi
+        RESET="\033[0m"
+        printf "${COLOR}%-6s %-10s %-12s %-8s %-8s %-14s %-12s %-8s${RESET}\n" "$SYM" "$QTR" "$EDATE" "$REV_R" "$EPS_R" "$TRAJ" "$IMPACT" "$DEC"
+      done
+    fi
+    ;;
+
+  earnings-review-decide)
+    # Update decision on a pending earnings review
+    ER_DEC_ID="$2"
+    if [ -z "$ER_DEC_ID" ]; then
+      echo "Usage: pm-cli.sh earnings-review-decide <review-id>"
+      echo ""
+      echo "Pending reviews:"
+      sqlite3 -separator '|' "$DB" "
+        SELECT er.id, s.symbol, er.quarter, er.thesis_impact, er.decision_deadline
+        FROM earnings_reviews er
+        JOIN securities s ON er.security_id = s.id
+        WHERE er.decision IS NULL
+        ORDER BY er.decision_deadline ASC;
+      " 2>/dev/null | while IFS='|' read -r RID RSYM RQTR RIMP RDL; do
+        echo "  $RID  $RSYM $RQTR ($RIMP) deadline: ${RDL:-none}"
+      done
+      exit 1
+    fi
+
+    # Verify review exists and is pending
+    ER_CHECK=$(sqlite3 -separator '|' "$DB" "
+      SELECT s.symbol, er.quarter, er.thesis_impact
+      FROM earnings_reviews er
+      JOIN securities s ON er.security_id = s.id
+      WHERE er.id = '$ER_DEC_ID' AND er.decision IS NULL;
+    " 2>/dev/null)
+    if [ -z "$ER_CHECK" ]; then
+      echo "ERROR: Review not found or already has a decision."
+      exit 1
+    fi
+    ER_DEC_SYM=$(echo "$ER_CHECK" | cut -d'|' -f1)
+    ER_DEC_QTR=$(echo "$ER_CHECK" | cut -d'|' -f2)
+    ER_DEC_IMP=$(echo "$ER_CHECK" | cut -d'|' -f3)
+
+    echo "=== Decide: $ER_DEC_SYM $ER_DEC_QTR (thesis: $ER_DEC_IMP) ==="
+    echo ""
+    echo "Decision:"
+    echo "  1) hold"
+    echo "  2) retier"
+    echo "  3) exit"
+    read -p "Select (1-3): " ER_DECIDE_NUM
+    case "$ER_DECIDE_NUM" in
+      1) ER_FINAL_DEC="hold" ;;
+      2) ER_FINAL_DEC="retier" ;;
+      3) ER_FINAL_DEC="exit" ;;
+      *) echo "Invalid selection."; exit 1 ;;
+    esac
+    echo "Decision notes:"
+    read -p "> " ER_FINAL_NOTES
+    ER_FINAL_NOTES_ESC=$(echo "$ER_FINAL_NOTES" | sed "s/'/''/g")
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    sqlite3 "$DB" "UPDATE earnings_reviews SET decision = '$ER_FINAL_DEC', decision_notes = '$ER_FINAL_NOTES_ESC', updated_at = '$NOW' WHERE id = '$ER_DEC_ID';"
+    echo ""
+    echo "Decision recorded: $ER_FINAL_DEC for $ER_DEC_SYM $ER_DEC_QTR"
+    ;;
+
+  reconcile)
+    csv_path="$2"
+    [ -z "$csv_path" ] && { echo "Usage: pm-cli.sh reconcile <csv_path>"; exit 1; }
+    [ ! -f "$csv_path" ] && { echo "File not found: $csv_path"; exit 1; }
+
+    CSV_PATH="$csv_path" DB_PATH="$DB" python3 << 'PYEOF'
+import csv, sqlite3, uuid, sys, os
+from datetime import datetime
+
+csv_path = os.environ.get('CSV_PATH', '')
+db_path = os.environ.get('DB_PATH', '')
+
+if not csv_path or not os.path.isfile(csv_path):
+    print(f"File not found: {csv_path}")
+    sys.exit(1)
+
+# Detect account name from filename (e.g. "Jia_GainLoss..." or "Monica_GainLoss...")
+basename = os.path.basename(csv_path)
+account_name = None
+if '_GainLoss' in basename or '_Realized' in basename:
+    parts = basename.split('_')
+    if parts[0] not in ('All', 'GainLoss', 'Realized'):
+        account_name = parts[0]
+
+# Read and parse CSV (handle BOM, skip title row if present)
+records = []
+with open(csv_path, 'r', encoding='utf-8-sig') as f:
+    lines = f.readlines()
+
+# Schwab CSVs have a title row before the header row — detect and skip it
+if len(lines) > 1 and 'Symbol' not in lines[0] and 'Symbol' in lines[1]:
+    lines = lines[1:]
+
+import io
+reader = csv.DictReader(io.StringIO(''.join(lines)))
+for row in reader:
+        symbol = row.get('Symbol', '').strip()
+        if not symbol or symbol == '--' or symbol == '':
+            continue
+
+        def parse_money(val):
+            if not val or val == '--' or val.strip() == '':
+                return None
+            return float(val.replace('$', '').replace(',', ''))
+
+        def parse_pct(val):
+            if not val or val == '--' or val.strip() == '':
+                return None
+            return float(val.replace('%', '').replace(',', ''))
+
+        records.append({
+            'id': str(uuid.uuid4()),
+            'symbol': symbol,
+            'account_name': account_name,
+            'open_date': row.get('Opened Date', row.get('Date Acquired', '')).strip() or None,
+            'close_date': row.get('Closed Date', row.get('Date Sold', '')).strip() or None,
+            'quantity': parse_money(row.get('Quantity', row.get('Qty', ''))),
+            'cost_basis': parse_money(row.get('Cost Basis (CB)', row.get('Cost', ''))),
+            'proceeds': parse_money(row.get('Proceeds', '')),
+            'gain_loss': parse_money(row.get('Gain/Loss ($)', row.get('Gain/loss ($)', ''))),
+            'gain_loss_pct': parse_pct(row.get('Gain/Loss (%)', row.get('Gain/loss (%)', ''))),
+            'term': row.get('Term', '').strip() or None,
+            'source_file': basename,
+            'imported_at': datetime.now().isoformat()
+        })
+
+if not records:
+    print("No records found in CSV")
+    sys.exit(1)
+
+# Import to DB
+conn = sqlite3.connect(db_path)
+conn.execute("""CREATE TABLE IF NOT EXISTS realized_pl_broker (
+    id TEXT PRIMARY KEY, symbol TEXT NOT NULL, account_name TEXT,
+    open_date TEXT, close_date TEXT, quantity REAL, cost_basis REAL,
+    proceeds REAL, gain_loss REAL, gain_loss_pct REAL, term TEXT,
+    source_file TEXT, imported_at TEXT NOT NULL
+)""")
+conn.execute("CREATE INDEX IF NOT EXISTS idx_rpl_symbol ON realized_pl_broker(symbol)")
+conn.execute("CREATE INDEX IF NOT EXISTS idx_rpl_close_date ON realized_pl_broker(close_date)")
+# Add unique constraint on content to prevent re-import duplicates
+try:
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_rpl_dedup ON realized_pl_broker(symbol, open_date, close_date, quantity, cost_basis, proceeds, account_name)")
+except:
+    pass
+
+imported = 0
+skipped = 0
+for r in records:
+    try:
+        conn.execute("""INSERT INTO realized_pl_broker
+            (id, symbol, account_name, open_date, close_date, quantity, cost_basis,
+             proceeds, gain_loss, gain_loss_pct, term, source_file, imported_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (r['id'], r['symbol'], r['account_name'], r['open_date'], r['close_date'],
+             r['quantity'], r['cost_basis'], r['proceeds'], r['gain_loss'],
+             r['gain_loss_pct'], r['term'], r['source_file'], r['imported_at']))
+        imported += 1
+    except sqlite3.IntegrityError:
+        skipped += 1
+conn.commit()
+print(f"Imported {imported} lots from {basename}" + (f" (skipped {skipped} duplicates)" if skipped else ""))
+
+# Show summary
+cursor = conn.execute("""
+    SELECT symbol, COUNT(*) as lots, printf('%.2f', SUM(gain_loss)) as total_pl,
+           MIN(close_date) as first_close, MAX(close_date) as last_close
+    FROM realized_pl_broker
+    WHERE source_file = ?
+    GROUP BY symbol ORDER BY SUM(gain_loss)
+""", (basename,))
+print(f"\n{'SYMBOL':<8} {'LOTS':>5} {'TOTAL P&L':>12} {'FIRST CLOSE':>12} {'LAST CLOSE':>12}")
+print(f"{'------':<8} {'----':>5} {'---------':>12} {'-----------':>12} {'----------':>12}")
+for row in cursor:
+    print(f"{row[0]:<8} {row[1]:>5} {'$'+row[2]:>12} {row[3] or '':>12} {row[4] or '':>12}")
+
+total = conn.execute("SELECT printf('%.2f', SUM(gain_loss)) FROM realized_pl_broker WHERE source_file = ?",
+    (basename,)).fetchone()[0]
+lot_count = conn.execute("SELECT COUNT(*) FROM realized_pl_broker WHERE source_file = ?",
+    (basename,)).fetchone()[0]
+print(f"\nTotal realized P&L: ${total}  ({lot_count} lots)")
+conn.close()
+PYEOF
+    ;;
+
+  broker-pl)
+    symbol="$2"
+    if [ -n "$symbol" ]; then
+      symbol=$(echo "$symbol" | tr '[:lower:]' '[:upper:]')
+      echo "=== Broker P&L: $symbol ==="
+      sqlite3 -header -column "$DB" "
+        SELECT open_date as 'Opened', close_date as 'Closed', quantity as 'Qty',
+               printf('$%.2f', cost_basis) as 'Cost Basis',
+               printf('$%.2f', proceeds) as 'Proceeds',
+               printf('$%.2f', gain_loss) as 'P&L',
+               term as 'Term', account_name as 'Account'
+        FROM realized_pl_broker WHERE symbol='$symbol' ORDER BY close_date
+      "
+      echo ""
+      sqlite3 -column "$DB" "
+        SELECT printf('$%.2f', SUM(gain_loss)) as 'Total P&L',
+               COUNT(*) as 'Lots',
+               printf('$%.2f', SUM(cost_basis)) as 'Total Cost',
+               printf('$%.2f', SUM(proceeds)) as 'Total Proceeds'
+        FROM realized_pl_broker WHERE symbol='$symbol'
+      "
+    else
+      echo "=== Broker Realized P&L Summary ==="
+      sqlite3 -header -column "$DB" "
+        SELECT symbol as Symbol, COUNT(*) as Lots,
+               printf('$%.2f', SUM(gain_loss)) as 'Total P&L',
+               MAX(close_date) as 'Last Close',
+               account_name as Account
+        FROM realized_pl_broker GROUP BY symbol, account_name ORDER BY SUM(gain_loss)
+      "
+      echo ""
+      sqlite3 -column "$DB" "
+        SELECT printf('$%.2f', SUM(gain_loss)) as 'Grand Total',
+               COUNT(*) as 'Total Lots',
+               COUNT(DISTINCT symbol) as Symbols
+        FROM realized_pl_broker
+      "
+    fi
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -3416,6 +4282,11 @@ PYEOF
     echo "  trade-journal [sym] [days] - Sell log with entry, P&L, regime, decisions (default 90d)"
     echo "  post-mortem <symbol> - Create a post-mortem for a closed position"
     echo "  post-mortems [symbol]- List post-mortems (optionally filtered by symbol)"
+    echo "  earnings-review <sym>- Interactive post-earnings review checklist"
+    echo "  earnings-reviews [sym]- List earnings reviews (optionally filtered by symbol)"
+    echo "  earnings-review-decide <id> - Update decision on a pending earnings review"
     echo "  recall <symbol>     - Decision memory: trades, post-mortems, decisions, intents"
+    echo "  reconcile <csv>    - Import Schwab realized P&L CSV"
+    echo "  broker-pl [symbol] - Broker P&L summary (or per-lot detail for symbol)"
     ;;
 esac
