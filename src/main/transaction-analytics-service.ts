@@ -378,16 +378,18 @@ export class TransactionAnalyticsService {
 
     // Post mortems
     const pmRows = db.prepare(`
-      SELECT close_date, classification, error_type, lesson_learned
+      SELECT close_date, thesis_quality, execution_quality, outcome, error_type, lesson_learned
       FROM post_mortems
       WHERE security_id = ?
       ORDER BY close_date DESC
       LIMIT 10
-    `).all(securityId) as Array<{ close_date: string; classification: string; error_type: string; lesson_learned: string }>;
+    `).all(securityId) as Array<{ close_date: string; thesis_quality: string; execution_quality: string; outcome: string; error_type: string; lesson_learned: string }>;
 
     const postMortems = pmRows.map(r => ({
       closeDate: r.close_date,
-      classification: r.classification,
+      thesisQuality: r.thesis_quality,
+      executionQuality: r.execution_quality,
+      outcome: r.outcome,
       errorType: r.error_type,
       lesson: r.lesson_learned,
     }));

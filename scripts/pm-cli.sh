@@ -321,8 +321,8 @@ recall_symbol() {
   echo "── Post-Mortems ──"
   local pms
   pms=$(sqlite3 -separator '|' "$DB" "
-    SELECT pm.close_date, pm.classification, pm.error_type,
-           printf('%.2f', pm.realized_gain) as realized_gain,
+    SELECT pm.close_date, pm.thesis_quality, pm.execution_quality, pm.outcome,
+           pm.error_type, printf('%.2f', pm.realized_gain) as realized_gain,
            pm.hold_days, pm.lesson_learned
     FROM post_mortems pm
     JOIN securities s ON pm.security_id = s.id
@@ -333,14 +333,14 @@ recall_symbol() {
   if [ -z "$pms" ]; then
     echo "  (no post-mortems)"
   else
-    echo "$pms" | while IFS='|' read -r CDATE CLASS ERR GAIN HDAYS LESSON; do
-      if echo "$GAIN" | grep -q '^-'; then
+    echo "$pms" | while IFS='|' read -r CDATE TQ EQ OC ERR GAIN HDAYS LESSON; do
+      if [ "$OC" = "loss" ]; then
         COLOR="\033[31m"
       else
         COLOR="\033[32m"
       fi
       RESET="\033[0m"
-      printf "  ${COLOR}%s | %s | %s | P&L: %s | %s days${RESET}\n" "$CDATE" "$CLASS" "$ERR" "$GAIN" "$HDAYS"
+      printf "  ${COLOR}%s | %s thesis / %s exec / %s | %s | P&L: %s | %s days${RESET}\n" "$CDATE" "$TQ" "$EQ" "$OC" "$ERR" "$GAIN" "$HDAYS"
       echo "    Lesson: $LESSON"
     done
   fi
@@ -3275,20 +3275,26 @@ PYEOF
       PM_ERROR_TYPE="none"
     fi
 
-    # Classification menu
-    CLASSIFICATIONS=("good-win" "bad-win" "good-loss" "bad-loss")
-    echo "Classification:"
-    echo "  1) good-win  (followed rules, made money)"
-    echo "  2) bad-win   (broke rules, got lucky)"
-    echo "  3) good-loss (followed rules, lost money)"
-    echo "  4) bad-loss  (broke rules, lost money)"
-    read -p "Select (1-4): " PM_CLASS_NUM
-    if [ "$PM_CLASS_NUM" -ge 1 ] && [ "$PM_CLASS_NUM" -le 4 ] 2>/dev/null; then
-      PM_CLASSIFICATION="${CLASSIFICATIONS[$((PM_CLASS_NUM - 1))]}"
-    else
-      echo "Invalid selection, defaulting to 'good-loss'"
-      PM_CLASSIFICATION="good-loss"
-    fi
+    # Thesis quality
+    echo "Thesis quality:"
+    echo "  1) good  (thesis was sound, based on real insight)"
+    echo "  2) bad   (thesis was flawed from the start)"
+    read -p "Select (1-2): " PM_TQ_NUM
+    if [ "$PM_TQ_NUM" = "2" ]; then PM_THESIS_QUALITY="bad"; else PM_THESIS_QUALITY="good"; fi
+
+    # Execution quality
+    echo "Execution quality:"
+    echo "  1) good  (followed process, acted on signals)"
+    echo "  2) bad   (broke rules, ignored invalidation, averaged down)"
+    read -p "Select (1-2): " PM_EQ_NUM
+    if [ "$PM_EQ_NUM" = "2" ]; then PM_EXECUTION_QUALITY="bad"; else PM_EXECUTION_QUALITY="good"; fi
+
+    # Outcome
+    echo "Outcome:"
+    echo "  1) win"
+    echo "  2) loss"
+    read -p "Select (1-2): " PM_OC_NUM
+    if [ "$PM_OC_NUM" = "2" ]; then PM_OUTCOME="loss"; else PM_OUTCOME="win"; fi
 
     echo "Lesson learned:"
     read -p "> " PM_LESSON
@@ -3311,10 +3317,10 @@ PYEOF
     if [ -z "$PM_REALIZED" ]; then PM_REALIZED="0"; fi
     if [ -z "$PM_HOLD_DAYS" ]; then PM_HOLD_DAYS="0"; fi
 
-    sqlite3 "$DB" "INSERT INTO post_mortems (id, security_id, close_date, original_intent, tier, entry_thesis, what_happened, rule_adherence, error_type, classification, lesson_learned, realized_gain, hold_days, created_at, updated_at) VALUES ('$PM_ID', '$SEC_ID', '$PM_CLOSE_DATE', '$PM_INTENT_ESC', '$PM_TIER_ESC', '$PM_ENTRY_THESIS_ESC', '$PM_WHAT_HAPPENED_ESC', '$PM_RULE_ADHERENCE_ESC', '$PM_ERROR_TYPE', '$PM_CLASSIFICATION', '$PM_LESSON_ESC', $PM_REALIZED, $PM_HOLD_DAYS, '$NOW', '$NOW');"
+    sqlite3 "$DB" "INSERT INTO post_mortems (id, security_id, close_date, original_intent, tier, entry_thesis, what_happened, rule_adherence, error_type, thesis_quality, execution_quality, outcome, lesson_learned, realized_gain, hold_days, created_at, updated_at) VALUES ('$PM_ID', '$SEC_ID', '$PM_CLOSE_DATE', '$PM_INTENT_ESC', '$PM_TIER_ESC', '$PM_ENTRY_THESIS_ESC', '$PM_WHAT_HAPPENED_ESC', '$PM_RULE_ADHERENCE_ESC', '$PM_ERROR_TYPE', '$PM_THESIS_QUALITY', '$PM_EXECUTION_QUALITY', '$PM_OUTCOME', '$PM_LESSON_ESC', $PM_REALIZED, $PM_HOLD_DAYS, '$NOW', '$NOW');"
 
     echo ""
-    echo "Post-mortem created for $SYMBOL ($PM_CLASSIFICATION, error: $PM_ERROR_TYPE)"
+    echo "Post-mortem created for $SYMBOL ($PM_THESIS_QUALITY thesis / $PM_EXECUTION_QUALITY execution / $PM_OUTCOME, error: $PM_ERROR_TYPE)"
     echo "ID: $PM_ID"
     ;;
 
@@ -3332,8 +3338,8 @@ PYEOF
 
     # Use raw mode to colorize output
     PM_ROWS=$(sqlite3 -separator '|' "$DB" "
-      SELECT s.symbol, pm.close_date, pm.classification, pm.error_type,
-             pm.hold_days, printf('%.2f', pm.realized_gain) as realized_gain,
+      SELECT s.symbol, pm.close_date, pm.thesis_quality, pm.execution_quality, pm.outcome,
+             pm.error_type, pm.hold_days, printf('%.2f', pm.realized_gain) as realized_gain,
              pm.lesson_learned
       FROM post_mortems pm
       JOIN securities s ON pm.security_id = s.id
@@ -3344,17 +3350,17 @@ PYEOF
     if [ -z "$PM_ROWS" ]; then
       echo "(none)"
     else
-      printf "%-6s %-12s %-11s %-16s %5s %12s  %s\n" "SYMBOL" "CLOSE DATE" "CLASS" "ERROR" "DAYS" "P&L" "LESSON"
-      printf "%-6s %-12s %-11s %-16s %5s %12s  %s\n" "------" "----------" "-----------" "----------------" "-----" "------------" "------"
-      echo "$PM_ROWS" | while IFS='|' read -r SYM CDATE CLASS ERR HDAYS GAIN LESSON; do
-        # Color: green for gains, red for losses
-        if echo "$GAIN" | grep -q '^-'; then
+      printf "%-6s %-12s %-7s %-7s %-7s %-16s %5s %12s  %s\n" "SYMBOL" "CLOSE DATE" "THESIS" "EXEC" "RESULT" "ERROR" "DAYS" "P&L" "LESSON"
+      printf "%-6s %-12s %-7s %-7s %-7s %-16s %5s %12s  %s\n" "------" "----------" "-------" "-------" "-------" "----------------" "-----" "------------" "------"
+      echo "$PM_ROWS" | while IFS='|' read -r SYM CDATE TQ EQ OC ERR HDAYS GAIN LESSON; do
+        # Color: green for wins, red for losses
+        if [ "$OC" = "loss" ]; then
           COLOR="\033[31m"  # red
         else
           COLOR="\033[32m"  # green
         fi
         RESET="\033[0m"
-        printf "${COLOR}%-6s %-12s %-11s %-16s %5s %12s${RESET}  %s\n" "$SYM" "$CDATE" "$CLASS" "$ERR" "$HDAYS" "$GAIN" "$LESSON"
+        printf "${COLOR}%-6s %-12s %-7s %-7s %-7s %-16s %5s %12s${RESET}  %s\n" "$SYM" "$CDATE" "$TQ" "$EQ" "$OC" "$ERR" "$HDAYS" "$GAIN" "$LESSON"
       done
     fi
     ;;

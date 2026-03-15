@@ -203,6 +203,15 @@ Before any trade entry:
 - Audit trail: all checklist results stored in `pre_trade_checks` table
 - Soft gate: all items are warnings with override, never hard blocks
 
+### 7.4 S/R Level Display in Pre-Trade (planned)
+
+**Motivation:** NVDA post-mortem — trimmed Core at $174-185 which was the support zone, and chased a gap-up buy at $202 without checking resistance.
+
+- [ ] Show S/R levels and zones for the symbol during every buy/sell pre-trade checklist
+- [ ] Warn if buying near resistance or selling near support — can only be overridden by a thesis change
+- [ ] CLI: auto-display `pm-cli.sh levels <symbol>` output in pre-trade flow
+- [ ] App: show S/R levels in the pre-trade checklist modal
+
 ---
 
 ## Phase 8: Decision Logging & Memory
@@ -322,6 +331,19 @@ Automated trade journal from transaction + ritual + decision data:
 - Tax-efficient rebalancing suggestions (harvest losses, avoid wash sales)
 - "Your Core tier is 38% — target is 50%. Consider adding to GOOG/TSM/NVDA"
 
+### 10.5 Position Sizing & Lifecycle Management (planned)
+
+**Motivation:** SOFI/AFRM — overaggressive adds cut at a loss. SNOW — 2 years of churn on 1,451 shares ($268K deployed) for -$4,763 net. Constant build-trim-rebuild destroys value.
+
+**Every position needs: a target size and a minimum hold duration.**
+
+- **Target sizing:** Given tier limits and portfolio size, compute target share count and dollar allocation per position
+- **Entry plan:** Suggest add tranches using S/R levels, volatility, ATR (e.g. "add 25% of target at S1, 25% at S2, 50% if thesis confirmed at earnings")
+- **Hold duration enforcement:** Position intents already have `target_hold_period` — surface warnings when selling before it expires. "You set a 6-month hold on SNOW. It's been 3 weeks."
+- **Churn detection:** Flag when a symbol has been bought and sold 3+ times in 90 days — "You've round-tripped SNOW 4 times this quarter. If you believe the thesis, hold."
+- **Add-size guardrails:** Flag when an add is oversized relative to typical add pattern or remaining room in tier allocation
+- CLI: `pm-cli.sh size <symbol> <target_shares>` — suggest entry plan with price levels and tranches
+
 ---
 
 ## Phase 11: Equity Research Engine
@@ -344,10 +366,18 @@ Automated trade journal from transaction + ritual + decision data:
 
 ### 11.3 Earnings Workflow
 
+**Motivation:** TTD post-mortem revealed that missing quarterly deceleration signals over 14 months led to -$5,442 loss. Earnings review must be a mandatory process step, not ad-hoc.
+
 - Pre-earnings: key metrics to watch, consensus estimates, thesis implications
-- Post-earnings: actual vs expected, thesis impact assessment
+- **Post-earnings review (mandatory for all held positions):**
+  - Actual vs expected on key metrics
+  - Growth rate trajectory — is it accelerating, stable, or decelerating?
+  - Thesis impact assessment: confirmed, neutral, or challenged?
+  - Explicit invalidation check: does this quarter's data trigger any invalidation conditions?
+  - If thesis is challenged: force a re-tier or exit decision within 48 hours
 - Auto-pull earnings data and flag surprises
 - Earnings history stored per position
+- CLI: `pm-cli.sh earnings-review <symbol>` — guided post-earnings checklist
 
 ### 11.4 Research Integration
 

@@ -572,7 +572,9 @@ export class Database {
         what_happened TEXT NOT NULL,
         rule_adherence TEXT,
         error_type TEXT NOT NULL,
-        classification TEXT NOT NULL,
+        thesis_quality TEXT NOT NULL DEFAULT 'good',
+        execution_quality TEXT NOT NULL DEFAULT 'good',
+        outcome TEXT NOT NULL DEFAULT 'loss',
         lesson_learned TEXT NOT NULL,
         realized_gain REAL DEFAULT 0,
         hold_days INTEGER DEFAULT 0,
@@ -582,6 +584,11 @@ export class Database {
       );
       CREATE INDEX IF NOT EXISTS idx_post_mortems_security ON post_mortems(security_id);
     `);
+
+    // Migrate post_mortems: replace classification with thesis_quality, execution_quality, outcome
+    try { this.db.exec('ALTER TABLE post_mortems ADD COLUMN thesis_quality TEXT NOT NULL DEFAULT \'good\''); } catch {}
+    try { this.db.exec('ALTER TABLE post_mortems ADD COLUMN execution_quality TEXT NOT NULL DEFAULT \'good\''); } catch {}
+    try { this.db.exec('ALTER TABLE post_mortems ADD COLUMN outcome TEXT NOT NULL DEFAULT \'loss\''); } catch {}
 
     // Sync watchlist monitors on startup
     this.syncWatchlistMonitors();
@@ -2947,7 +2954,9 @@ export class Database {
     whatHappened: string;
     ruleAdherence?: string;
     errorType: string;
-    classification: string;
+    thesisQuality: string;
+    executionQuality: string;
+    outcome: string;
     lessonLearned: string;
     realizedGain?: number;
     holdDays?: number;
@@ -2956,11 +2965,11 @@ export class Database {
     const id = uuidv4();
     const now = new Date().toISOString();
     this.db.prepare(`
-      INSERT INTO post_mortems (id, security_id, close_date, original_intent, tier, entry_thesis, what_happened, rule_adherence, error_type, classification, lesson_learned, realized_gain, hold_days, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO post_mortems (id, security_id, close_date, original_intent, tier, entry_thesis, what_happened, rule_adherence, error_type, thesis_quality, execution_quality, outcome, lesson_learned, realized_gain, hold_days, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, data.securityId, data.closeDate, data.originalIntent,
       data.tier || null, data.entryThesis || null, data.whatHappened,
-      data.ruleAdherence || null, data.errorType, data.classification,
+      data.ruleAdherence || null, data.errorType, data.thesisQuality, data.executionQuality, data.outcome,
       data.lessonLearned, data.realizedGain ?? 0, data.holdDays ?? 0, now, now);
     return this.getPostMortem(id)!;
   }
@@ -2975,7 +2984,7 @@ export class Database {
     return row ? this.mapRowToPostMortem(row) : null;
   }
 
-  listPostMortems(opts?: { symbol?: string; classification?: string; limit?: number }): PostMortem[] {
+  listPostMortems(opts?: { symbol?: string; outcome?: string; limit?: number }): PostMortem[] {
     if (!this.db) throw new Error('Database not initialized');
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -2984,9 +2993,9 @@ export class Database {
       conditions.push('s.symbol = ?');
       params.push(opts.symbol.toUpperCase());
     }
-    if (opts?.classification) {
-      conditions.push('pm.classification = ?');
-      params.push(opts.classification);
+    if (opts?.outcome) {
+      conditions.push('pm.outcome = ?');
+      params.push(opts.outcome);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -3016,7 +3025,9 @@ export class Database {
     if (data.whatHappened !== undefined) { fields.push('what_happened = ?'); values.push(data.whatHappened); }
     if (data.ruleAdherence !== undefined) { fields.push('rule_adherence = ?'); values.push(data.ruleAdherence); }
     if (data.errorType !== undefined) { fields.push('error_type = ?'); values.push(data.errorType); }
-    if (data.classification !== undefined) { fields.push('classification = ?'); values.push(data.classification); }
+    if (data.thesisQuality !== undefined) { fields.push('thesis_quality = ?'); values.push(data.thesisQuality); }
+    if (data.executionQuality !== undefined) { fields.push('execution_quality = ?'); values.push(data.executionQuality); }
+    if (data.outcome !== undefined) { fields.push('outcome = ?'); values.push(data.outcome); }
     if (data.lessonLearned !== undefined) { fields.push('lesson_learned = ?'); values.push(data.lessonLearned); }
     if (data.realizedGain !== undefined) { fields.push('realized_gain = ?'); values.push(data.realizedGain); }
     if (data.holdDays !== undefined) { fields.push('hold_days = ?'); values.push(data.holdDays); }
@@ -3044,7 +3055,9 @@ export class Database {
       whatHappened: r.what_happened as string,
       ruleAdherence: r.rule_adherence as string,
       errorType: r.error_type as string,
-      classification: r.classification as string,
+      thesisQuality: r.thesis_quality as string,
+      executionQuality: r.execution_quality as string,
+      outcome: r.outcome as string,
       lessonLearned: r.lesson_learned as string,
       realizedGain: r.realized_gain as number,
       holdDays: r.hold_days as number,

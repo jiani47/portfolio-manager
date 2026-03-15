@@ -868,7 +868,9 @@ export interface PostMortem {
   whatHappened: string;
   ruleAdherence: string; // free text: sizing, stops, averaging
   errorType: string; // 'entry-timing' | 'sizing' | 'stop-discipline' | 'thesis-quality' | 'regime-misread' | 'overtrading' | 'none'
-  classification: string; // 'good-win' | 'bad-win' | 'good-loss' | 'bad-loss'
+  thesisQuality: string; // 'good' | 'bad'
+  executionQuality: string; // 'good' | 'bad'
+  outcome: string; // 'win' | 'loss'
   lessonLearned: string; // one concrete change
   realizedGain: number;
   holdDays: number;
@@ -888,7 +890,9 @@ export interface DecisionMemory {
   }>;
   postMortems: Array<{
     closeDate: string;
-    classification: string;
+    thesisQuality: string;
+    executionQuality: string;
+    outcome: string;
     errorType: string;
     lesson: string;
   }>;
