@@ -4072,7 +4072,7 @@ print(deadline.strftime('%Y-%m-%dT%H:%M:%S.000Z'))
     [ ! -f "$csv_path" ] && { echo "File not found: $csv_path"; exit 1; }
 
     CSV_PATH="$csv_path" DB_PATH="$DB" python3 << 'PYEOF'
-import csv, sqlite3, uuid, sys, os
+import csv, sqlite3, uuid, sys, os, io, re
 from datetime import datetime
 
 csv_path = os.environ.get('CSV_PATH', '')
@@ -4082,44 +4082,84 @@ if not csv_path or not os.path.isfile(csv_path):
     print(f"File not found: {csv_path}")
     sys.exit(1)
 
-# Detect account name from filename (e.g. "Jia_GainLoss..." or "Monica_GainLoss...")
 basename = os.path.basename(csv_path)
-account_name = None
-if '_GainLoss' in basename or '_Realized' in basename:
-    parts = basename.split('_')
-    if parts[0] not in ('All', 'GainLoss', 'Realized'):
-        account_name = parts[0]
 
-# Read and parse CSV (handle BOM, skip title row if present)
-records = []
+def parse_money(val):
+    if not val or val == '--' or val.strip() == '':
+        return None
+    return float(val.replace('$', '').replace(',', ''))
+
+def parse_pct(val):
+    if not val or val == '--' or val.strip() == '':
+        return None
+    return float(val.replace('%', '').replace(',', ''))
+
+# Read all lines (handle BOM)
 with open(csv_path, 'r', encoding='utf-8-sig') as f:
     lines = f.readlines()
 
-# Schwab CSVs have a title row before the header row — detect and skip it
-if len(lines) > 1 and 'Symbol' not in lines[0] and 'Symbol' in lines[1]:
-    lines = lines[1:]
+# Multi-section parser: Schwab "All Accounts" CSVs have repeated headers per account
+# Format: title row, account header, CSV header, data rows, empty row, next account header, ...
+records = []
+current_account = None
+i = 0
+while i < len(lines):
+    line = lines[i].strip().strip('"').strip(',').strip('"')
 
-import io
-reader = csv.DictReader(io.StringIO(''.join(lines)))
-for row in reader:
-        symbol = row.get('Symbol', '').strip()
-        if not symbol or symbol == '--' or symbol == '':
+    # Skip empty lines
+    if not line or all(c in ',"' for c in lines[i].strip()):
+        i += 1
+        continue
+
+    # Detect account header lines (e.g. "Trading Book ...005", "Monica ...819", "Jia ...196")
+    if '"Symbol"' not in lines[i] and 'Symbol' not in lines[i].split(',')[0]:
+        # Not a CSV header or data — likely account name or title
+        if re.search(r'\.\.\.\d{3}', line):
+            # Account section header like "Trading Book ...005" or "Monica ...819"
+            # Clean: take just the meaningful part before any empty CSV fields
+            current_account = re.split(r'[",]+\s*$', line)[0].strip().strip('"')
+        # else: title row or other non-data line
+        i += 1
+        continue
+
+    # This is a CSV header row — collect data rows until next section
+    header_line = lines[i]
+    data_lines = [header_line]
+    i += 1
+    while i < len(lines):
+        stripped = lines[i].strip()
+        # Skip empty lines (all commas/quotes)
+        if not stripped or all(c in ',"' for c in stripped):
+            i += 1
             continue
+        # Extract first field
+        first_field = stripped.split(',')[0].strip('"')
+        # Stop at header rows
+        if first_field == 'Symbol':
+            break
+        # Stop at account header rows (e.g. "Monica ...819")
+        if re.search(r'\.\.\.\d{3}', first_field):
+            break
+        if not first_field:
+            i += 1
+            continue
+        data_lines.append(lines[i])
+        i += 1
 
-        def parse_money(val):
-            if not val or val == '--' or val.strip() == '':
-                return None
-            return float(val.replace('$', '').replace(',', ''))
-
-        def parse_pct(val):
-            if not val or val == '--' or val.strip() == '':
-                return None
-            return float(val.replace('%', '').replace(',', ''))
+    # Parse this section
+    reader = csv.DictReader(io.StringIO(''.join(data_lines)))
+    for row in reader:
+        symbol = row.get('Symbol', '').strip()
+        if not symbol or symbol == '--' or symbol == 'Symbol':
+            continue
+        # Skip account header rows that leaked through (e.g. "Jia ...196")
+        if re.search(r'\.\.\.\d{3}', symbol):
+            continue
 
         records.append({
             'id': str(uuid.uuid4()),
             'symbol': symbol,
-            'account_name': account_name,
+            'account_name': current_account,
             'open_date': row.get('Opened Date', row.get('Date Acquired', '')).strip() or None,
             'close_date': row.get('Closed Date', row.get('Date Sold', '')).strip() or None,
             'quantity': parse_money(row.get('Quantity', row.get('Qty', ''))),
@@ -4231,6 +4271,231 @@ PYEOF
     fi
     ;;
 
+  size)
+    # Position sizing: target allocation, current vs target, entry plan with S/R tranches
+    SYMBOL="$2"
+    if [ -z "$SYMBOL" ]; then
+      echo "Usage: pm-cli.sh size <symbol> [target_shares]"
+      echo "  Shows current vs target sizing and suggests entry plan using S/R levels."
+      exit 1
+    fi
+    SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+    TARGET_SHARES="${3:-}"
+
+    python3 - "$SYMBOL" "$TARGET_SHARES" "$DB" << 'PYEOF'
+import sqlite3, sys
+
+symbol = sys.argv[1]
+target_shares_arg = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+db_path = sys.argv[3]
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+# Tier limits
+TIER_LIMITS = {'Core': 25, 'Growth': 10, 'Starter': 5, 'Watchlist': 2}
+
+# Get position info
+pos = conn.execute("""
+    SELECT p.id, p.quantity, p.cost_basis, s.id as sec_id, s.symbol, s.name,
+           pi.tier, pi.thesis, pi.target_hold_period
+    FROM positions p
+    JOIN securities s ON p.security_id = s.id
+    LEFT JOIN position_intents pi ON pi.position_id = p.id
+    WHERE s.symbol = ? AND s.type NOT IN ('cash', 'option')
+""", (symbol,)).fetchall()
+
+if not pos:
+    print(f"  No position found for {symbol}")
+    sys.exit(1)
+
+# Aggregate across accounts
+total_qty = sum(r['quantity'] or 0 for r in pos)
+total_cost = sum(r['cost_basis'] or 0 for r in pos)
+tier = pos[0]['tier'] or 'Starter'
+tier_limit = TIER_LIMITS.get(tier, 5)
+
+# Get current price
+price_row = conn.execute("""
+    SELECT ph.close_price, ph.date FROM price_history ph
+    JOIN securities s ON ph.security_id = s.id
+    WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+""", (symbol,)).fetchone()
+
+if not price_row:
+    print(f"  No price data for {symbol}")
+    sys.exit(1)
+
+current_price = price_row['close_price']
+price_date = price_row['date']
+
+# Compute portfolio total (all positions + cash)
+portfolio_rows = conn.execute("""
+    SELECT p.quantity, s.type, s.symbol,
+           (SELECT ph2.close_price FROM price_history ph2
+            WHERE ph2.security_id = p.security_id ORDER BY ph2.date DESC LIMIT 1) as last_price
+    FROM positions p JOIN securities s ON p.security_id = s.id
+""").fetchall()
+
+portfolio_total = 0
+for r in portfolio_rows:
+    if r['type'] == 'cash':
+        portfolio_total += r['quantity'] or 0
+    elif r['last_price']:
+        portfolio_total += (r['quantity'] or 0) * r['last_price']
+
+if portfolio_total <= 0:
+    print("  Cannot compute — portfolio total is 0")
+    sys.exit(1)
+
+# Current position sizing
+current_mv = total_qty * current_price
+current_pct = (current_mv / portfolio_total) * 100
+avg_cost = total_cost / total_qty if total_qty > 0 else 0
+unrealized_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0
+
+# Target sizing
+target_mv = portfolio_total * tier_limit / 100
+target_shares_computed = int(target_mv / current_price)
+room_mv = target_mv - current_mv
+room_shares = int(room_mv / current_price) if room_mv > 0 else 0
+room_pct = (room_mv / portfolio_total) * 100
+
+# User override
+if target_shares_arg:
+    target_shares_final = int(target_shares_arg)
+    target_mv_final = target_shares_final * current_price
+    target_pct_final = (target_mv_final / portfolio_total) * 100
+else:
+    target_shares_final = target_shares_computed
+    target_mv_final = target_mv
+    target_pct_final = tier_limit
+
+# Get S/R levels
+levels = conn.execute("""
+    SELECT level_type, price, strength FROM price_levels
+    WHERE symbol = ? ORDER BY price
+""", (symbol,)).fetchall()
+
+supports = [r for r in levels if r['level_type'] == 'support' and r['price'] < current_price]
+resistances = [r for r in levels if r['level_type'] == 'resistance' and r['price'] > current_price]
+supports.sort(key=lambda r: r['price'], reverse=True)  # nearest first
+resistances.sort(key=lambda r: r['price'])  # nearest first
+
+# Print report
+print()
+print(f"╔═══════════════════════════════════════════════╗")
+print(f"║  POSITION SIZING: {symbol:<28}║")
+print(f"╚═══════════════════════════════════════════════╝")
+print()
+print(f"  Tier: {tier} (limit: {tier_limit}% of portfolio)")
+print(f"  Price: ${current_price:.2f} (as of {price_date})")
+print(f"  Portfolio total: ${portfolio_total:,.0f}")
+print()
+
+print(f"  ── Current Position ──")
+print(f"  Shares: {total_qty:,.0f}")
+print(f"  Avg cost: ${avg_cost:.2f}  ({unrealized_pct:+.1f}%)")
+print(f"  Market value: ${current_mv:,.0f}")
+print(f"  Weight: {current_pct:.1f}%")
+print()
+
+print(f"  ── Target ({tier} tier max: {tier_limit}%) ──")
+if target_shares_arg:
+    print(f"  Target (user): {target_shares_final:,} shares (${target_mv_final:,.0f}, {target_pct_final:.1f}%)")
+else:
+    print(f"  Target (max): {target_shares_final:,} shares (${target_mv_final:,.0f})")
+
+if room_mv > 0:
+    print(f"  Room to add: {room_shares:,} shares (${room_mv:,.0f}, {room_pct:.1f}% of portfolio)")
+elif room_mv < 0:
+    over_pct = current_pct - tier_limit
+    print(f"  ⚠ OVER-ALLOCATED by {over_pct:.1f}% (${-room_mv:,.0f})")
+else:
+    print(f"  At target allocation")
+print()
+
+# Entry plan using S/R levels
+if room_mv > 0 and (supports or current_price):
+    print(f"  ── Entry Plan (suggested tranches) ──")
+
+    add_shares = room_shares if not target_shares_arg else max(0, target_shares_final - int(total_qty))
+
+    if add_shares <= 0:
+        print(f"  Already at or above target. No adds suggested.")
+    else:
+        tranches = []
+        remaining = add_shares
+
+        if supports:
+            # Tranche 1: 25% at S1 (nearest support)
+            s1 = supports[0]
+            t1_shares = max(1, int(add_shares * 0.25))
+            t1_pct = (current_price - s1['price']) / current_price * 100
+            tranches.append((f"S1 ${s1['price']:.2f}", t1_shares, s1['price'], s1['strength'], t1_pct))
+            remaining -= t1_shares
+
+            if len(supports) >= 2:
+                # Tranche 2: 25% at S2
+                s2 = supports[1]
+                t2_shares = max(1, int(add_shares * 0.25))
+                t2_pct = (current_price - s2['price']) / current_price * 100
+                tranches.append((f"S2 ${s2['price']:.2f}", t2_shares, s2['price'], s2['strength'], t2_pct))
+                remaining -= t2_shares
+
+            # Tranche 3: remaining on thesis confirmation (at current price)
+            if remaining > 0:
+                tranches.append((f"Thesis confirm", remaining, current_price, None, 0))
+        else:
+            # No S/R levels — split into 3 equal tranches by dollar amount
+            t_size = max(1, add_shares // 3)
+            tranches.append(("Now (1/3)", t_size, current_price, None, 0))
+            tranches.append(("Dip -3%", t_size, current_price * 0.97, None, 3.0))
+            if add_shares - 2 * t_size > 0:
+                tranches.append(("Dip -5%", add_shares - 2 * t_size, current_price * 0.95, None, 5.0))
+
+        print(f"  {'TRANCHE':<22} {'SHARES':>7} {'PRICE':>10} {'VALUE':>12} {'FROM HERE':>10} {'STR':>4}")
+        print(f"  {'─'*22} {'─'*7} {'─'*10} {'─'*12} {'─'*10} {'─'*4}")
+        total_cost_plan = 0
+        for label, shares, price, strength, pct_from in tranches:
+            value = shares * price
+            total_cost_plan += value
+            str_label = str(strength) if strength else "—"
+            pct_label = f"-{pct_from:.1f}%" if pct_from > 0 else "at mkt"
+            print(f"  {label:<22} {shares:>7,} {price:>10.2f} {value:>11,.0f} {pct_label:>10} {str_label:>4}")
+
+        print(f"  {'─'*22} {'─'*7} {'─'*10} {'─'*12}")
+        print(f"  {'TOTAL':<22} {add_shares:>7,} {'':>10} {total_cost_plan:>11,.0f}")
+
+        # After-add weight
+        after_mv = current_mv + total_cost_plan
+        after_pct = (after_mv / portfolio_total) * 100
+        print(f"\n  After adds: {total_qty + add_shares:,.0f} shares, ${after_mv:,.0f} ({after_pct:.1f}%)")
+
+elif room_mv < 0:
+    print(f"  ── Trim Suggestion ──")
+    trim_shares = int(-room_mv / current_price)
+    print(f"  Trim {trim_shares:,} shares (${-room_mv:,.0f}) to reach {tier_limit}% target")
+    if resistances:
+        r1 = resistances[0]
+        r1_pct = (r1['price'] - current_price) / current_price * 100
+        print(f"  Consider trimming at R1 ${r1['price']:.2f} ({r1_pct:+.1f}%, strength {r1['strength']})")
+
+# S/R context
+if supports or resistances:
+    print(f"\n  ── S/R Context ──")
+    for s in supports[:3]:
+        pct = (current_price - s['price']) / current_price * 100
+        print(f"  S: ${s['price']:.2f} ({pct:.1f}% below, str {s['strength']})")
+    for r in resistances[:3]:
+        pct = (r['price'] - current_price) / current_price * 100
+        print(f"  R: ${r['price']:.2f} ({pct:.1f}% above, str {r['strength']})")
+
+print()
+conn.close()
+PYEOF
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -4286,6 +4551,7 @@ PYEOF
     echo "  earnings-reviews [sym]- List earnings reviews (optionally filtered by symbol)"
     echo "  earnings-review-decide <id> - Update decision on a pending earnings review"
     echo "  recall <symbol>     - Decision memory: trades, post-mortems, decisions, intents"
+    echo "  size <sym> [target] - Position sizing: current vs target, entry plan with S/R tranches"
     echo "  reconcile <csv>    - Import Schwab realized P&L CSV"
     echo "  broker-pl [symbol] - Broker P&L summary (or per-lot detail for symbol)"
     ;;

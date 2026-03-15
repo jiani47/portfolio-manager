@@ -78,6 +78,7 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh earnings-reviews [symbol] # List earnings reviews (optionally filtered)
 ./scripts/pm-cli.sh earnings-review-decide <id> # Decide on a pending earnings review
 ./scripts/pm-cli.sh recall <symbol>       # Decision memory: trades, post-mortems, decisions, intents
+./scripts/pm-cli.sh size <symbol> [target] # Position sizing: current vs target, entry plan with S/R tranches
 ./scripts/pm-cli.sh reconcile <csv_path>  # Import Schwab realized P&L CSV
 ./scripts/pm-cli.sh broker-pl [symbol]    # Broker P&L summary (or per-lot detail)
 ```
