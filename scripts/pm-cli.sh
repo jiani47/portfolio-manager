@@ -2500,6 +2500,333 @@ db.close()
 PYEOF
     ;;
 
+  attribution)
+    # Brinson-style factor attribution vs QQQ
+    DAYS_ARG="${2:-30}"
+
+    python3 <<PYEOF
+import sqlite3, math, sys
+from datetime import datetime
+
+db = sqlite3.connect("$DB")
+
+days_arg = "$DAYS_ARG"
+
+# Determine number of days
+if days_arg.upper() == "YTD":
+    # Find latest price date and compute days from Jan 1
+    latest = db.execute("SELECT MAX(date) FROM price_history").fetchone()[0]
+    if not latest:
+        print("No price history found.")
+        sys.exit(1)
+    latest_dt = datetime.strptime(latest, "%Y-%m-%d")
+    jan1 = datetime(latest_dt.year, 1, 1)
+    days = (latest_dt - jan1).days
+    if days < 2:
+        print("Not enough YTD data.")
+        sys.exit(1)
+else:
+    days = int(days_arg)
+
+# Excluded symbols (non-core)
+EXCLUDED = {'SGOV', 'USO', 'AMD', 'FCNTX', 'SNOW'}
+
+# Look up QQQ and SPY security IDs
+qqq_row = db.execute("SELECT id FROM securities WHERE symbol = 'QQQ'").fetchone()
+spy_row = db.execute("SELECT id FROM securities WHERE symbol = 'SPY'").fetchone()
+if not qqq_row:
+    print("QQQ not found in securities. Run 'pm-cli.sh backfill QQQ' first.")
+    sys.exit(1)
+if not spy_row:
+    print("SPY not found in securities. Run 'pm-cli.sh backfill SPY' first.")
+    sys.exit(1)
+qqq_id = qqq_row[0]
+spy_id = spy_row[0]
+
+# Get benchmark prices
+def get_prices(sec_id, n):
+    rows = db.execute("""
+        SELECT date, close_price FROM price_history
+        WHERE security_id = ? ORDER BY date DESC LIMIT ?
+    """, (sec_id, n + 1)).fetchall()
+    rows.reverse()
+    return rows
+
+qqq_prices = get_prices(qqq_id, days)
+spy_prices = get_prices(spy_id, days)
+
+if len(qqq_prices) < 3:
+    print("Not enough QQQ price history.")
+    sys.exit(1)
+
+# Build return maps
+def build_return_map(prices):
+    rmap = {}
+    for i in range(1, len(prices)):
+        if prices[i-1][1] > 0:
+            rmap[prices[i][0]] = (prices[i][1] - prices[i-1][1]) / prices[i-1][1]
+    return rmap
+
+qqq_rmap = build_return_map(qqq_prices)
+spy_rmap = build_return_map(spy_prices)
+
+# QQQ total return over period
+qqq_total_ret = (qqq_prices[-1][1] - qqq_prices[0][1]) / qqq_prices[0][1] if qqq_prices[0][1] > 0 else 0
+
+# Get positions (exclude non-core)
+positions = db.execute("""
+    SELECT s.symbol, s.id, s.sector,
+           SUM(p.quantity) as total_qty,
+           SUM(p.cost_basis) as total_cost
+    FROM positions p
+    JOIN securities s ON p.security_id = s.id
+    WHERE s.type NOT IN ('cash', 'option') AND p.quantity > 0
+    GROUP BY s.symbol
+""").fetchall()
+
+# Filter excluded and compute market values using latest price
+pos_data = []
+for sym, sec_id, sector, qty, cost in positions:
+    if sym in EXCLUDED or qty <= 0:
+        continue
+    latest_price = db.execute("""
+        SELECT close_price FROM price_history
+        WHERE security_id = ? ORDER BY date DESC LIMIT 1
+    """, (sec_id,)).fetchone()
+    if not latest_price or latest_price[0] <= 0:
+        continue
+    mv = qty * latest_price[0]
+    pos_data.append({
+        'symbol': sym, 'sec_id': sec_id, 'sector': sector or 'Other',
+        'qty': qty, 'mv': mv
+    })
+
+total_mv = sum(p['mv'] for p in pos_data)
+if total_mv <= 0:
+    print("No positions with market value.")
+    sys.exit(1)
+
+# Assign weights
+for p in pos_data:
+    p['weight'] = p['mv'] / total_mv
+
+# Get per-position returns and compute portfolio return
+pos_returns = {}  # symbol -> return_map
+for p in pos_data:
+    prices = get_prices(p['sec_id'], days)
+    if len(prices) < 3:
+        p['period_return'] = 0
+        continue
+    p['period_return'] = (prices[-1][1] - prices[0][1]) / prices[0][1] if prices[0][1] > 0 else 0
+    pos_returns[p['symbol']] = build_return_map(prices)
+
+# Portfolio weighted return
+port_total_ret = sum(p['weight'] * p['period_return'] for p in pos_data)
+
+# Compute beta vs QQQ and SPY using daily returns
+# Build portfolio daily returns (weight * stock daily return)
+all_dates = sorted(qqq_rmap.keys())
+
+def compute_port_daily_returns(all_dates):
+    port_daily = {}
+    for d in all_dates:
+        daily_r = 0
+        for p in pos_data:
+            sym = p['symbol']
+            if sym in pos_returns and d in pos_returns[sym]:
+                daily_r += p['weight'] * pos_returns[sym][d]
+        port_daily[d] = daily_r
+    return port_daily
+
+port_daily = compute_port_daily_returns(all_dates)
+
+def compute_beta(port_map, bench_map):
+    common = sorted(set(port_map.keys()) & set(bench_map.keys()))
+    if len(common) < 10:
+        return 1.0
+    p_vals = [port_map[d] for d in common]
+    b_vals = [bench_map[d] for d in common]
+    n = len(p_vals)
+    mp = sum(p_vals) / n
+    mb = sum(b_vals) / n
+    cov = sum((p_vals[i] - mp) * (b_vals[i] - mb) for i in range(n))
+    var_b = sum((b_vals[i] - mb) ** 2 for i in range(n))
+    return cov / var_b if var_b > 0 else 1.0
+
+beta_qqq = compute_beta(port_daily, qqq_rmap)
+beta_spy = compute_beta(port_daily, spy_rmap)
+
+# Per-position beta vs QQQ
+for p in pos_data:
+    sym = p['symbol']
+    if sym in pos_returns:
+        p['beta_qqq'] = compute_beta(pos_returns[sym], qqq_rmap)
+    else:
+        p['beta_qqq'] = 1.0
+
+# Tracking error decomposition
+gap = port_total_ret - qqq_total_ret
+
+# Beta effect: (portfolio_beta - 1) * benchmark_return
+beta_effect = (beta_qqq - 1) * qqq_total_ret
+
+# Sector allocation
+# QQQ approximate sector weights
+qqq_sectors = {
+    'Technology': 0.50,
+    'Communication Services': 0.16,
+    'Consumer Cyclical': 0.14,
+    'Healthcare': 0.05,
+    'Consumer Defensive': 0.04,
+    'Industrials': 0.04,
+    'Financial Services': 0.01,
+}
+qqq_other_weight = 1.0 - sum(qqq_sectors.values())  # ~0.06
+
+# Portfolio sector weights
+port_sectors = {}
+for p in pos_data:
+    s = p['sector']
+    port_sectors[s] = port_sectors.get(s, 0) + p['weight']
+
+# Compute sector returns from portfolio positions (weighted avg within sector)
+sector_returns = {}
+for p in pos_data:
+    s = p['sector']
+    if s not in sector_returns:
+        sector_returns[s] = 0
+    # Weight within sector
+    sec_w = p['weight'] / port_sectors[s] if port_sectors[s] > 0 else 0
+    sector_returns[s] += sec_w * p['period_return']
+
+# All sector names from both
+all_sectors = sorted(set(list(qqq_sectors.keys()) + list(port_sectors.keys())))
+
+# Group unknowns into Other
+def normalize_sector(s):
+    if s in qqq_sectors:
+        return s
+    return 'Other'
+
+# Re-aggregate with normalization
+port_sectors_norm = {}
+sector_returns_norm = {}
+for p in pos_data:
+    ns = normalize_sector(p['sector'])
+    port_sectors_norm[ns] = port_sectors_norm.get(ns, 0) + p['weight']
+
+for ns in port_sectors_norm:
+    total_w = 0
+    weighted_ret = 0
+    for p in pos_data:
+        pns = normalize_sector(p['sector'])
+        if pns == ns:
+            weighted_ret += p['weight'] * p['period_return']
+            total_w += p['weight']
+    sector_returns_norm[ns] = weighted_ret / total_w if total_w > 0 else 0
+
+# Compute sector allocation effect
+sector_allocation_details = []
+total_sector_alloc = 0
+display_sectors = sorted(set(list(qqq_sectors.keys()) + list(port_sectors_norm.keys())))
+
+for s in display_sectors:
+    pw = port_sectors_norm.get(s, 0)
+    bw = qqq_sectors.get(s, 0)
+    if s == 'Other':
+        bw = qqq_other_weight
+    sr = sector_returns_norm.get(s, 0)
+    # Brinson allocation effect: (pw - bw) * (sr - qqq_total_ret)
+    alloc_eff = (pw - bw) * (sr - qqq_total_ret)
+    total_sector_alloc += alloc_eff
+    if abs(pw) > 0.001 or abs(bw) > 0.001:
+        sector_allocation_details.append((s, pw, bw, alloc_eff))
+
+# Stock selection = residual
+stock_selection = gap - beta_effect - total_sector_alloc
+
+# Short sector names for display
+short_names = {
+    'Technology': 'Technology',
+    'Communication Services': 'Comm Svcs',
+    'Consumer Cyclical': 'Cons Cyclical',
+    'Healthcare': 'Healthcare',
+    'Consumer Defensive': 'Cons Defensive',
+    'Industrials': 'Industrials',
+    'Financial Services': 'Financials',
+    'Other': 'Other',
+}
+
+# Print output
+period_label = "YTD" if days_arg.upper() == "YTD" else f"{days}-day"
+W = 55
+print()
+print("=" * W)
+title = f"  FACTOR ATTRIBUTION vs QQQ — {period_label}"
+print(title)
+print("=" * W)
+print()
+print(f"  Portfolio: {port_total_ret*100:>7.2f}%    QQQ: {qqq_total_ret*100:>7.2f}%    Gap: {gap*100:>7.2f}%")
+print(f"  Beta vs QQQ: {beta_qqq:.2f}     Beta vs SPY: {beta_spy:.2f}")
+print()
+print("=" * W)
+print("  DECOMPOSITION")
+print("=" * W)
+print()
+print(f"  Beta effect:            {beta_effect*100:>7.2f}%")
+print(f"  Sector allocation:      {total_sector_alloc*100:>7.2f}%")
+
+# Sort sectors by absolute allocation effect descending
+sector_allocation_details.sort(key=lambda x: -abs(x[3]))
+for s, pw, bw, eff in sector_allocation_details:
+    sn = short_names.get(s, s[:14])
+    diff = pw - bw
+    diff_sign = f"{diff*100:>+.0f}%" if abs(diff) > 0.005 else " 0%"
+    print(f"    {sn:<15} {pw*100:>3.0f}% vs {bw*100:>2.0f}%  ({diff_sign:>5})  →  {eff*100:>+.2f}%")
+
+print(f"  Stock selection:        {stock_selection*100:>7.2f}%")
+print(f"  {'─' * 39}")
+print(f"  Total tracking error:   {gap*100:>7.2f}%")
+print()
+
+# Per-position attribution
+print("=" * W)
+print("  PER-POSITION ATTRIBUTION")
+print("=" * W)
+print()
+print(f"  {'Symbol':<7} {'Weight':>6}  {'Return':>7}  {'vs QQQ':>7}  {'Beta':>5}  {'Contrib':>8}")
+
+# Sort by contribution (weight * excess return) ascending (worst first)
+for p in pos_data:
+    p['vs_qqq'] = p['period_return'] - qqq_total_ret
+    p['contribution'] = p['weight'] * p['vs_qqq']
+
+pos_sorted = sorted(pos_data, key=lambda x: x['contribution'])
+
+for p in pos_sorted:
+    ret_str = f"{p['period_return']*100:>+.1f}%"
+    vs_str = f"{p['vs_qqq']*100:>+.1f}%"
+    contrib_str = f"{p['contribution']*100:>+.2f}%"
+    print(f"  {p['symbol']:<7} {p['weight']*100:>5.1f}%  {ret_str:>7}  {vs_str:>7}  {p['beta_qqq']:>5.2f}  {contrib_str:>8}")
+
+print()
+
+# High-beta names
+high_beta = [p for p in pos_data if p['beta_qqq'] > 1.5]
+if high_beta:
+    print("=" * W)
+    print("  HIGH-BETA NAMES (β > 1.5 vs QQQ)")
+    print("=" * W)
+    print()
+    high_beta.sort(key=lambda x: -x['beta_qqq'])
+    parts = [f"  {p['symbol']} β={p['beta_qqq']:.2f}" for p in high_beta]
+    print("  ".join(parts))
+    print()
+
+db.close()
+PYEOF
+    ;;
+
   correlations)
     # Correlation matrix and concentration analysis
     DAYS="${2:-365}"
@@ -5956,6 +6283,7 @@ PYEOF
     echo "  monitor-add-note    - Add fundamental monitor: <symbol> <label> [reminder_date]"
     echo "  earnings [days]     - Upcoming earnings for portfolio symbols (default 14 days)"
     echo "  analytics [days]    - Portfolio analytics: beta, sharpe, volatility, drawdown (default 90)"
+    echo "  attribution [days]  - Factor attribution vs QQQ: beta, sector, selection (default 30, or YTD)"
     echo "  correlations [days] - Correlation matrix & concentration analysis (default 365)"
     echo "  backfill [symbol]   - Backfill 3yr price history from Schwab (all symbols if no arg)"
     echo "  snapshot            - Take EOD portfolio snapshot (one per day)"
