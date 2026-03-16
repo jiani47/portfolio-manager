@@ -133,6 +133,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTradeAnalytics: (days?: number) => ipcRenderer.invoke('analytics:trade-performance', days),
   getTradeJournal: (opts?: { symbol?: string; days?: number }) => ipcRenderer.invoke('analytics:trade-journal', opts),
   getDecisionMemory: (symbol: string) => ipcRenderer.invoke('analytics:decision-memory', symbol),
+  getCorrelationMatrix: (days?: number) => ipcRenderer.invoke('analytics:correlation-matrix', days),
+  getConcentrationAnalysis: () => ipcRenderer.invoke('analytics:concentration'),
 
   // Sector performance
   getSectorPerformance: () => ipcRenderer.invoke('fmp:sector-performance'),
@@ -225,11 +227,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => { ipcRenderer.removeListener('positions:synced', handler); };
   },
 
+  // EMS Basket operations
+  emsListBaskets: () => ipcRenderer.invoke('ems:baskets:list'),
+  emsGetBasket: (name: string) => ipcRenderer.invoke('ems:baskets:get', name),
+
   // Entry plan operations
   getEntryPlanBySymbol: (symbol: string) => ipcRenderer.invoke('db:entry-plans:get-by-symbol', symbol),
   listEntryPlans: (opts?: { status?: string; symbol?: string }) => ipcRenderer.invoke('db:entry-plans:list', opts),
   createEntryPlan: (data: unknown) => ipcRenderer.invoke('db:entry-plans:create', data),
   cancelEntryPlan: (id: string) => ipcRenderer.invoke('db:entry-plans:cancel', id),
+
+  // Post-mortem operations
+  listPostMortems: (opts?: { symbol?: string; outcome?: string; limit?: number }) => ipcRenderer.invoke('db:post-mortems:list', opts),
+  getPostMortem: (id: string) => ipcRenderer.invoke('db:post-mortems:get', id),
+  createPostMortem: (data: unknown) => ipcRenderer.invoke('db:post-mortems:create', data),
+  updatePostMortem: (id: string, data: unknown) => ipcRenderer.invoke('db:post-mortems:update', id, data),
+  deletePostMortem: (id: string) => ipcRenderer.invoke('db:post-mortems:delete', id),
+
+  // Earnings review operations
+  listEarningsReviews: (opts?: { symbol?: string; pending?: boolean; limit?: number }) => ipcRenderer.invoke('db:earnings-reviews:list', opts),
+  createEarningsReview: (data: unknown) => ipcRenderer.invoke('db:earnings-reviews:create', data),
+  updateEarningsReview: (id: string, data: unknown) => ipcRenderer.invoke('db:earnings-reviews:update', id, data),
+  getPendingEarningsReviews: () => ipcRenderer.invoke('db:earnings-reviews:pending'),
+
+  // Broker P&L operations
+  getBrokerPLSummary: () => ipcRenderer.invoke('db:broker-pl:summary'),
+  getBrokerPLBySymbol: (symbol: string) => ipcRenderer.invoke('db:broker-pl:by-symbol', symbol),
+
+  // Portfolio snapshot operations
+  getSnapshotDailyTotals: (days?: number) => ipcRenderer.invoke('db:snapshots:daily-totals', days),
+  getPositionSnapshotHistory: (symbol: string, days?: number) => ipcRenderer.invoke('db:snapshots:position-history', symbol, days),
 
   // Config helpers
   getFmpApiKey: () => ipcRenderer.invoke('config:get-fmp-key'),

@@ -11,6 +11,11 @@ import Watchlists from './pages/Watchlists';
 import Monitors from './pages/Monitors';
 import ActiveManagement from './pages/ActiveManagement';
 import Analytics from './pages/Analytics';
+import PostMortems from './pages/PostMortems';
+import EarningsReviews from './pages/EarningsReviews';
+import BrokerPL from './pages/BrokerPL';
+import PortfolioHistory from './pages/PortfolioHistory';
+import EmsBaskets from './pages/EmsBaskets';
 
 function App() {
   return (
@@ -26,6 +31,11 @@ function App() {
         <Route path="/monitors" element={<Monitors />} />
         <Route path="/active-management" element={<ActiveManagement />} />
         <Route path="/analytics" element={<Analytics />} />
+        <Route path="/post-mortems" element={<PostMortems />} />
+        <Route path="/earnings-reviews" element={<EarningsReviews />} />
+        <Route path="/broker-pl" element={<BrokerPL />} />
+        <Route path="/portfolio-history" element={<PortfolioHistory />} />
+        <Route path="/ems" element={<EmsBaskets />} />
         <Route path="/settings" element={<Settings />} />
       </Routes>
     </Layout>

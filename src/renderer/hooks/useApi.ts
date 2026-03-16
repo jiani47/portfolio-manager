@@ -61,6 +61,10 @@ import type {
   TradeJournalEntry,
   DecisionMemory,
   EntryPlan,
+  PostMortem,
+  EarningsReview,
+  BrokerPLRecord,
+  RebalanceBasket,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -198,6 +202,18 @@ declare global {
       getTradeAnalytics: (days?: number) => Promise<TradeAnalytics | null>;
       getTradeJournal: (opts?: { symbol?: string; days?: number }) => Promise<TradeJournalEntry[]>;
       getDecisionMemory: (symbol: string) => Promise<DecisionMemory | null>;
+      getCorrelationMatrix: (days?: number) => Promise<{
+        symbols: string[];
+        matrix: number[][];
+        highCorrelations: Array<{ symbolA: string; symbolB: string; correlation: number }>;
+      }>;
+      getConcentrationAnalysis: () => Promise<{
+        sectorConcentration: Array<{ sector: string; weight: number; symbols: string[] }>;
+        tierConcentration: Array<{ tier: string; weight: number; count: number }>;
+        top5Weight: number;
+        herfindahlIndex: number;
+        effectivePositions: number;
+      } | null>;
 
       // Price levels
       getPriceLevels: (symbol?: string) => Promise<PriceLevel[]>;
@@ -270,6 +286,27 @@ declare global {
       createEntryPlan: (data: unknown) => Promise<EntryPlan>;
       cancelEntryPlan: (id: string) => Promise<EntryPlan>;
 
+      // Post-mortem operations
+      listPostMortems: (opts?: { symbol?: string; outcome?: string; limit?: number }) => Promise<PostMortem[]>;
+      getPostMortem: (id: string) => Promise<PostMortem | null>;
+      createPostMortem: (data: unknown) => Promise<PostMortem>;
+      updatePostMortem: (id: string, data: unknown) => Promise<PostMortem>;
+      deletePostMortem: (id: string) => Promise<void>;
+
+      // Earnings review operations
+      listEarningsReviews: (opts?: { symbol?: string; pending?: boolean; limit?: number }) => Promise<EarningsReview[]>;
+      createEarningsReview: (data: unknown) => Promise<EarningsReview>;
+      updateEarningsReview: (id: string, data: unknown) => Promise<EarningsReview>;
+      getPendingEarningsReviews: () => Promise<EarningsReview[]>;
+
+      // Broker P&L operations
+      getBrokerPLSummary: () => Promise<Array<{ symbol: string; totalGainLoss: number; lotCount: number; lastCloseDate: string }>>;
+      getBrokerPLBySymbol: (symbol: string) => Promise<BrokerPLRecord[]>;
+
+      // Portfolio snapshot operations
+      getSnapshotDailyTotals: (days?: number) => Promise<Array<{ date: string; totalMv: number; totalCost: number }>>;
+      getPositionSnapshotHistory: (symbol: string, days?: number) => Promise<Array<{ date: string; quantity: number; costBasis: number; closePrice: number; marketValue: number; unrealizedGain: number }>>;
+
       getFmpApiKey: () => Promise<string | null>;
       getSectorPerformance: () => Promise<{ nyse: Record<string, number>; nasdaq: Record<string, number>; date: string } | null>;
       streamingStart: (symbols: string[]) => Promise<void>;
@@ -293,6 +330,10 @@ declare global {
       // Scheduler events
       onSchedulerTaskStarted: (callback: (data: { taskId: string; startedAt: string }) => void) => () => void;
       onSchedulerTaskCompleted: (callback: (data: { taskId: string; status: string; result: string }) => void) => () => void;
+
+      // EMS Basket operations
+      emsListBaskets: () => Promise<RebalanceBasket[]>;
+      emsGetBasket: (name: string) => Promise<RebalanceBasket | null>;
     };
   }
 }
@@ -1923,4 +1964,39 @@ export function usePreTradeCheck() {
   const reset = useCallback(() => setCheckResult(null), []);
 
   return { checkResult, loading, evaluate, record, reset };
+}
+
+export function useEmsBaskets() {
+  const [baskets, setBaskets] = useState<RebalanceBasket[]>([]);
+  const [activeBasket, setActiveBasket] = useState<RebalanceBasket | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchBaskets = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.emsListBaskets();
+      setBaskets(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const fetchBasket = useCallback(async (name: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.emsGetBasket(name);
+      setActiveBasket(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket };
 }

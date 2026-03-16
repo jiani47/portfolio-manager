@@ -1114,6 +1114,16 @@ export function setupIpcHandlers(
     return analyticsService.getPositionBetas(days);
   });
 
+  ipcMain.handle('analytics:correlation-matrix', (_, days?: number) => {
+    if (!analyticsService) return { symbols: [], matrix: [], highCorrelations: [] };
+    return analyticsService.getCorrelationMatrix(days);
+  });
+
+  ipcMain.handle('analytics:concentration', () => {
+    if (!analyticsService) return null;
+    return analyticsService.getConcentrationAnalysis();
+  });
+
   ipcMain.handle('analytics:trade-performance', (_, days?: number) => {
     if (!transactionAnalyticsService) return null;
     return transactionAnalyticsService.getTradeAnalytics(days);
@@ -1249,9 +1259,39 @@ export function setupIpcHandlers(
     return db.getTaskRunHistory(taskId, limit);
   });
 
+  // EMS Basket handlers
+  ipcMain.handle('ems:baskets:list', () => {
+    return db.listRebalanceBaskets();
+  });
+
+  ipcMain.handle('ems:baskets:get', (_event, name: string) => {
+    return db.getRebalanceBasketByName(name);
+  });
+
   // Entry plan handlers
   ipcMain.handle('db:entry-plans:get-by-symbol', (_, symbol: string) => db.getEntryPlanBySymbol(symbol));
   ipcMain.handle('db:entry-plans:list', (_, opts?: { status?: string; symbol?: string }) => db.listEntryPlans(opts));
   ipcMain.handle('db:entry-plans:create', (_, data) => db.createEntryPlan(data));
   ipcMain.handle('db:entry-plans:cancel', (_, id: string) => db.cancelEntryPlan(id));
+
+  // Post-mortem operations
+  ipcMain.handle('db:post-mortems:list', (_, opts?: { symbol?: string; outcome?: string; limit?: number }) => db.listPostMortems(opts));
+  ipcMain.handle('db:post-mortems:get', (_, id: string) => db.getPostMortem(id));
+  ipcMain.handle('db:post-mortems:create', (_, data) => db.createPostMortem(data));
+  ipcMain.handle('db:post-mortems:update', (_, id: string, data) => db.updatePostMortem(id, data));
+  ipcMain.handle('db:post-mortems:delete', (_, id: string) => db.deletePostMortem(id));
+
+  // Earnings review operations
+  ipcMain.handle('db:earnings-reviews:list', (_, opts?: { symbol?: string; pending?: boolean; limit?: number }) => db.listEarningsReviews(opts));
+  ipcMain.handle('db:earnings-reviews:create', (_, data) => db.createEarningsReview(data));
+  ipcMain.handle('db:earnings-reviews:update', (_, id: string, data) => db.updateEarningsReview(id, data));
+  ipcMain.handle('db:earnings-reviews:pending', () => db.getPendingEarningsReviews());
+
+  // Broker P&L operations
+  ipcMain.handle('db:broker-pl:summary', () => db.getBrokerPLSummary());
+  ipcMain.handle('db:broker-pl:by-symbol', (_, symbol: string) => db.getBrokerPLBySymbol(symbol));
+
+  // Portfolio snapshot operations
+  ipcMain.handle('db:snapshots:daily-totals', (_, days?: number) => db.getSnapshotDailyTotals(days));
+  ipcMain.handle('db:snapshots:position-history', (_, symbol: string, days?: number) => db.getPositionSnapshotHistory(symbol, days));
 }
