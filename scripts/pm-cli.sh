@@ -564,6 +564,29 @@ recall_symbol() {
   fi
   echo ""
 
+  # Observations
+  echo "── Observations ──"
+  local obs
+  obs=$(sqlite3 -separator '|' "$DB" "
+    SELECT o.observation_date,
+      CASE o.thesis_impact WHEN 'supports' THEN '+' WHEN 'challenges' THEN '-' ELSE '~' END,
+      o.note
+    FROM observations o
+    JOIN securities s ON o.security_id = s.id
+    WHERE s.symbol = '$symbol'
+    ORDER BY o.observation_date DESC
+    LIMIT 10;
+  " 2>/dev/null)
+
+  if [ -z "$obs" ]; then
+    echo "  (no observations)"
+  else
+    echo "$obs" | while IFS='|' read -r ODATE OIMPACT ONOTE; do
+      echo "  $ODATE [$OIMPACT] $ONOTE"
+    done
+  fi
+  echo ""
+
   # Intent changes
   echo "── Intent Changes ──"
   local intlogs
@@ -3909,6 +3932,83 @@ PYEOF
     recall_symbol "$2"
     ;;
 
+  observe)
+    SYMBOL="$2"
+    NOTE="$3"
+    IMPACT="${4:-neutral}"
+    if [ -z "$SYMBOL" ] || [ -z "$NOTE" ]; then
+      echo "Usage: pm-cli.sh observe <symbol> \"<note>\" [supports|challenges|neutral]"
+      exit 1
+    fi
+    SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+
+    # Validate thesis_impact
+    case "$IMPACT" in
+      supports|challenges|neutral) ;;
+      *) echo "ERROR: thesis_impact must be supports, challenges, or neutral"; exit 1 ;;
+    esac
+
+    # Look up security_id
+    SEC_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$SYMBOL' LIMIT 1;")
+    if [ -z "$SEC_ID" ]; then
+      echo "ERROR: Security '$SYMBOL' not found in database."
+      exit 1
+    fi
+
+    OBS_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    OBS_DATE=$(date +%Y-%m-%d)
+    OBS_NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+
+    sqlite3 "$DB" "
+      INSERT INTO observations (id, security_id, observation_date, note, source, thesis_impact, created_at)
+      VALUES ('$OBS_ID', '$SEC_ID', '$OBS_DATE', '$(echo "$NOTE" | sed "s/'/''/g")', NULL, '$IMPACT', '$OBS_NOW');
+    "
+
+    case "$IMPACT" in
+      supports) IND="+" ;;
+      challenges) IND="-" ;;
+      *) IND="~" ;;
+    esac
+    echo "Observation recorded for $SYMBOL [$IND]: $NOTE"
+    ;;
+
+  observations)
+    SYMBOL="$2"
+    if [ -n "$SYMBOL" ]; then
+      SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+      ROWS=$(sqlite3 -separator '|' "$DB" "
+        SELECT o.observation_date, s.symbol,
+          CASE o.thesis_impact WHEN 'supports' THEN '+' WHEN 'challenges' THEN '-' ELSE '~' END,
+          o.note
+        FROM observations o
+        JOIN securities s ON o.security_id = s.id
+        WHERE s.symbol = '$SYMBOL'
+        ORDER BY o.observation_date DESC
+        LIMIT 20;
+      ")
+    else
+      ROWS=$(sqlite3 -separator '|' "$DB" "
+        SELECT o.observation_date, s.symbol,
+          CASE o.thesis_impact WHEN 'supports' THEN '+' WHEN 'challenges' THEN '-' ELSE '~' END,
+          o.note
+        FROM observations o
+        JOIN securities s ON o.security_id = s.id
+        ORDER BY o.observation_date DESC
+        LIMIT 20;
+      ")
+    fi
+
+    if [ -z "$ROWS" ]; then
+      echo "(no observations found)"
+    else
+      printf "%-12s %-6s %s  %s\n" "DATE" "SYMBOL" "I" "NOTE"
+      printf "%-12s %-6s %s  %s\n" "----------" "------" "-" "----"
+      echo "$ROWS" | while IFS='|' read -r ODATE OSYM OIMPACT ONOTE; do
+        printf "%-12s %-6s %s  %s\n" "$ODATE" "$OSYM" "$OIMPACT" "$ONOTE"
+      done
+    fi
+    ;;
+
   post-mortem)
     # Interactive post-mortem creation
     SYMBOL="$2"
@@ -5878,7 +5978,9 @@ PYEOF
     echo "  earnings-review <sym>- Interactive post-earnings review checklist"
     echo "  earnings-reviews [sym]- List earnings reviews (optionally filtered by symbol)"
     echo "  earnings-review-decide <id> - Update decision on a pending earnings review"
-    echo "  recall <symbol>     - Decision memory: trades, post-mortems, decisions, intents"
+    echo "  recall <symbol>     - Decision memory: trades, post-mortems, decisions, observations, intents"
+    echo "  observe <sym> \"note\" [supports|challenges|neutral] - Record thesis observation"
+    echo "  observations [sym]  - List recent observations (optionally filtered by symbol)"
     echo "  size <sym> [target] - Position sizing: current vs target, entry plan with S/R tranches"
     echo "  plan <symbol>       - Create/view entry plan with tranches and auto-monitors"
     echo "  plans [all]         - List active entry plans (or all)"

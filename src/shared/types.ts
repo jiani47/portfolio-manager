@@ -999,6 +999,17 @@ export interface RebalanceBasket {
   plans?: EntryPlan[];
 }
 
+export interface Observation {
+  id: string;
+  securityId: string;
+  symbol?: string;
+  observationDate: string;
+  note: string;
+  source: string | null;
+  thesisImpact: string;
+  createdAt: string;
+}
+
 export interface TradeJournalEntry {
   symbol: string;
   sellDate: string;

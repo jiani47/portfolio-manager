@@ -32,6 +32,7 @@ import {
   EntryPlan,
   EntryPlanTranche,
   RebalanceBasket,
+  Observation,
 } from '../shared/types';
 
 export class Database {
@@ -724,6 +725,22 @@ export class Database {
         // Column already exists
       }
     }
+
+    // Observations table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS observations (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        observation_date TEXT NOT NULL,
+        note TEXT NOT NULL,
+        source TEXT,
+        thesis_impact TEXT NOT NULL DEFAULT 'neutral',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      )
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_observations_security ON observations(security_id)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_observations_date ON observations(observation_date)');
 
     // Sync watchlist monitors on startup
     this.syncWatchlistMonitors();
@@ -3896,6 +3913,61 @@ export class Database {
       brokerageOrderStatus: (r.brokerage_order_status as string | null) ?? null,
       filledQty: (r.filled_qty as number | null) ?? 0,
       accountId: (r.account_id as string | null) ?? null,
+    };
+  };
+
+  // Observation operations
+  createObservation(data: { securityId: string; note: string; source?: string; thesisImpact?: string; date?: string }): Observation {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    const observationDate = data.date || now.split('T')[0];
+    const thesisImpact = data.thesisImpact || 'neutral';
+    this.db.prepare(`
+      INSERT INTO observations (id, security_id, observation_date, note, source, thesis_impact, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, data.securityId, observationDate, data.note, data.source || null, thesisImpact, now);
+    return this.getObservationById(id)!;
+  }
+
+  getObservationById(id: string): Observation | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT o.*, s.symbol FROM observations o
+      JOIN securities s ON o.security_id = s.id
+      WHERE o.id = ?
+    `).get(id);
+    return row ? this.mapRowToObservation(row) : null;
+  }
+
+  listObservations(opts?: { symbol?: string; limit?: number }): Observation[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const limit = opts?.limit || 20;
+    let sql = `
+      SELECT o.*, s.symbol FROM observations o
+      JOIN securities s ON o.security_id = s.id
+    `;
+    const params: unknown[] = [];
+    if (opts?.symbol) {
+      sql += ' WHERE s.symbol = ?';
+      params.push(opts.symbol.toUpperCase());
+    }
+    sql += ' ORDER BY o.observation_date DESC, o.created_at DESC LIMIT ?';
+    params.push(limit);
+    return this.db.prepare(sql).all(...params).map(this.mapRowToObservation);
+  }
+
+  private mapRowToObservation = (row: unknown): Observation => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      securityId: r.security_id as string,
+      symbol: r.symbol as string | undefined,
+      observationDate: r.observation_date as string,
+      note: r.note as string,
+      source: (r.source as string | null) ?? null,
+      thesisImpact: r.thesis_impact as string,
+      createdAt: r.created_at as string,
     };
   };
 
