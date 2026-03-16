@@ -5139,6 +5139,193 @@ PYEOF
     echo "Basket created: $BASKET_NAME (id: $BASKET_ID)"
     ;;
 
+  basket-add)
+    # Add an entry plan with tranches to a basket
+    # Usage: basket-add <basket> <buy|sell> <symbol> <total_shares> <num_tranches> <date|price> <trigger_values> [options]
+    # Options: --invalidation <text> --invalidation-price <sym> <dir> <price> --account <acct_suffix>
+    shift # consume 'basket-add'
+    if [ $# -lt 7 ]; then
+      echo "Usage: pm-cli.sh basket-add <basket> <buy|sell> <symbol> <total_shares> <num_tranches> <date|price> <trigger_values> [--invalidation <text>] [--invalidation-price <sym> <dir> <price>] [--account <acct>]"
+      echo ""
+      echo "Examples:"
+      echo "  basket-add rebal sell AAPL 80 1 date 2026-03-17 --account 8819"
+      echo "  basket-add rebal buy AMZN 241 6 date 2026-03-31,2026-04-07,2026-04-14,2026-04-21,2026-04-28,2026-05-05 --account 6196"
+      echo "  basket-add rebal buy AMZN 40 1 price 190 --account 6196 --invalidation \"AWS growth single digits\""
+      exit 1
+    fi
+
+    BASKET_NAME="$1"; shift
+    SIDE=$(echo "$1" | tr '[:upper:]' '[:lower:]'); shift
+    SYMBOL=$(echo "$1" | tr '[:lower:]' '[:upper:]'); shift
+    TOTAL_SHARES="$1"; shift
+    NUM_TRANCHES="$1"; shift
+    TRIGGER_TYPE=$(echo "$1" | tr '[:upper:]' '[:lower:]'); shift
+    TRIGGER_VALUES="$1"; shift
+
+    # Parse optional flags
+    INVALIDATION_TEXT=""
+    INVAL_SYMBOL=""
+    INVAL_DIR=""
+    INVAL_PRICE=""
+    ACCOUNT_SUFFIX=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --invalidation)
+          shift; INVALIDATION_TEXT="$1"; shift ;;
+        --invalidation-price)
+          shift; INVAL_SYMBOL=$(echo "$1" | tr '[:lower:]' '[:upper:]'); shift
+          INVAL_DIR="$1"; shift
+          INVAL_PRICE="$1"; shift ;;
+        --account)
+          shift; ACCOUNT_SUFFIX="$1"; shift ;;
+        *)
+          echo "Unknown option: $1"; exit 1 ;;
+      esac
+    done
+
+    # Ensure schema columns exist (migrations may not have run from Electron app)
+    sqlite3 "$DB" "ALTER TABLE entry_plans ADD COLUMN basket_id TEXT REFERENCES rebalance_baskets(id);" 2>/dev/null || true
+    sqlite3 "$DB" "ALTER TABLE entry_plans ADD COLUMN side TEXT;" 2>/dev/null || true
+    sqlite3 "$DB" "ALTER TABLE entry_plans ADD COLUMN invalidation_condition TEXT;" 2>/dev/null || true
+    sqlite3 "$DB" "ALTER TABLE entry_plans ADD COLUMN invalidation_monitor_id TEXT;" 2>/dev/null || true
+    sqlite3 "$DB" "ALTER TABLE entry_plan_tranches ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'price';" 2>/dev/null || true
+    sqlite3 "$DB" "ALTER TABLE entry_plan_tranches ADD COLUMN trigger_date TEXT;" 2>/dev/null || true
+    sqlite3 "$DB" "ALTER TABLE entry_plan_tranches ADD COLUMN limit_price REAL;" 2>/dev/null || true
+    sqlite3 "$DB" "ALTER TABLE entry_plan_tranches ADD COLUMN brokerage_order_id TEXT;" 2>/dev/null || true
+    sqlite3 "$DB" "ALTER TABLE entry_plan_tranches ADD COLUMN brokerage_order_status TEXT;" 2>/dev/null || true
+    sqlite3 "$DB" "ALTER TABLE entry_plan_tranches ADD COLUMN filled_qty REAL DEFAULT 0;" 2>/dev/null || true
+    sqlite3 "$DB" "ALTER TABLE entry_plan_tranches ADD COLUMN account_id TEXT;" 2>/dev/null || true
+
+    # Validate side
+    if [ "$SIDE" != "buy" ] && [ "$SIDE" != "sell" ]; then
+      echo "Error: side must be 'buy' or 'sell', got '$SIDE'"
+      exit 1
+    fi
+
+    # Validate trigger type
+    if [ "$TRIGGER_TYPE" != "date" ] && [ "$TRIGGER_TYPE" != "price" ]; then
+      echo "Error: trigger type must be 'date' or 'price', got '$TRIGGER_TYPE'"
+      exit 1
+    fi
+
+    # Validate basket exists and is active
+    BASKET_ID=$(sqlite3 "$DB" "SELECT id FROM rebalance_baskets WHERE name = '$BASKET_NAME' AND status = 'active';")
+    if [ -z "$BASKET_ID" ]; then
+      echo "Error: Active basket '$BASKET_NAME' not found"
+      exit 1
+    fi
+
+    # Look up security
+    SECURITY_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$SYMBOL';")
+    if [ -z "$SECURITY_ID" ]; then
+      echo "Error: Security '$SYMBOL' not found"
+      exit 1
+    fi
+
+    # Resolve account if provided
+    ACCOUNT_ID=""
+    if [ -n "$ACCOUNT_SUFFIX" ]; then
+      ACCOUNT_ID=$(sqlite3 "$DB" "SELECT id FROM accounts WHERE account_number LIKE '%$ACCOUNT_SUFFIX';")
+      if [ -z "$ACCOUNT_ID" ]; then
+        echo "Error: No account ending in '$ACCOUNT_SUFFIX'"
+        exit 1
+      fi
+    fi
+
+    # Parse trigger values into array
+    IFS=',' read -ra TRIGGERS <<< "$TRIGGER_VALUES"
+
+    # Validate trigger count matches num_tranches
+    if [ "${#TRIGGERS[@]}" -ne 1 ] && [ "${#TRIGGERS[@]}" -ne "$NUM_TRANCHES" ]; then
+      echo "Error: Number of trigger values (${#TRIGGERS[@]}) must be 1 or match num_tranches ($NUM_TRANCHES)"
+      exit 1
+    fi
+
+    # Calculate shares per tranche
+    SHARES_PER=$(( TOTAL_SHARES / NUM_TRANCHES ))
+    REMAINDER=$(( TOTAL_SHARES % NUM_TRANCHES ))
+
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    PLAN_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+
+    # Create invalidation monitor if --invalidation-price provided
+    INVAL_MONITOR_ID=""
+    if [ -n "$INVAL_SYMBOL" ] && [ -n "$INVAL_DIR" ] && [ -n "$INVAL_PRICE" ]; then
+      INVAL_MONITOR_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+      sqlite3 "$DB" "INSERT INTO monitors (id, symbol, direction, price_level, label, action_type, monitor_type, status, created_at, updated_at) VALUES ('$INVAL_MONITOR_ID', '$INVAL_SYMBOL', '$INVAL_DIR', $INVAL_PRICE, 'EMS invalidation: $SYMBOL $SIDE plan', 'action_required', 'price', 'active', '$NOW', '$NOW');"
+    fi
+
+    # Escape invalidation text for SQL
+    INVAL_SQL="NULL"
+    if [ -n "$INVALIDATION_TEXT" ]; then
+      ESCAPED_INVAL=$(echo "$INVALIDATION_TEXT" | sed "s/'/''/g")
+      INVAL_SQL="'$ESCAPED_INVAL'"
+    fi
+
+    INVAL_MON_SQL="NULL"
+    if [ -n "$INVAL_MONITOR_ID" ]; then
+      INVAL_MON_SQL="'$INVAL_MONITOR_ID'"
+    fi
+
+    # Insert entry plan
+    sqlite3 "$DB" "INSERT INTO entry_plans (id, security_id, basket_id, side, invalidation_condition, invalidation_monitor_id, status, notes, created_at, updated_at) VALUES ('$PLAN_ID', '$SECURITY_ID', '$BASKET_ID', '$SIDE', $INVAL_SQL, $INVAL_MON_SQL, 'active', NULL, '$NOW', '$NOW');"
+
+    echo ""
+    echo "=== Basket Add: $SYMBOL $SIDE ==="
+    echo "  Basket: $BASKET_NAME"
+    echo "  Side: $SIDE"
+    echo "  Total shares: $TOTAL_SHARES across $NUM_TRANCHES tranche(s)"
+    if [ -n "$INVALIDATION_TEXT" ]; then
+      echo "  Invalidation: $INVALIDATION_TEXT"
+    fi
+    echo ""
+
+    # Create tranches
+    for (( i=1; i<=NUM_TRANCHES; i++ )); do
+      TRANCHE_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+
+      # Shares: last tranche gets remainder
+      if [ "$i" -eq "$NUM_TRANCHES" ]; then
+        T_SHARES=$(( SHARES_PER + REMAINDER ))
+      else
+        T_SHARES=$SHARES_PER
+      fi
+
+      # Resolve trigger value: use single value if only one provided, otherwise index
+      if [ "${#TRIGGERS[@]}" -eq 1 ]; then
+        TRIG_VAL="${TRIGGERS[0]}"
+      else
+        TRIG_VAL="${TRIGGERS[$((i-1))]}"
+      fi
+
+      ACCT_SQL="NULL"
+      if [ -n "$ACCOUNT_ID" ]; then
+        ACCT_SQL="'$ACCOUNT_ID'"
+      fi
+
+      if [ "$TRIGGER_TYPE" = "date" ]; then
+        # Date-triggered tranche: no monitor, trigger_price=0 (NOT NULL constraint)
+        sqlite3 "$DB" "INSERT INTO entry_plan_tranches (id, plan_id, tranche_number, trigger_type, trigger_date, trigger_price, shares, status, account_id) VALUES ('$TRANCHE_ID', '$PLAN_ID', $i, 'date', '$TRIG_VAL', 0, $T_SHARES, 'pending', $ACCT_SQL);"
+        echo "  Tranche $i: $T_SHARES shares, date trigger $TRIG_VAL"
+      else
+        # Price-triggered tranche: create monitor
+        MONITOR_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+        if [ "$SIDE" = "buy" ]; then
+          DIRECTION="below"
+        else
+          DIRECTION="above"
+        fi
+        sqlite3 "$DB" "INSERT INTO monitors (id, symbol, direction, price_level, label, action_type, monitor_type, status, created_at, updated_at) VALUES ('$MONITOR_ID', '$SYMBOL', '$DIRECTION', $TRIG_VAL, 'EMS $SIDE $SYMBOL T$i: $T_SHARES shares @ \$$TRIG_VAL', 'action_required', 'price', 'active', '$NOW', '$NOW');"
+        sqlite3 "$DB" "INSERT INTO entry_plan_tranches (id, plan_id, tranche_number, trigger_type, trigger_price, shares, status, monitor_id, account_id) VALUES ('$TRANCHE_ID', '$PLAN_ID', $i, 'price', $TRIG_VAL, $T_SHARES, 'pending', '$MONITOR_ID', $ACCT_SQL);"
+        echo "  Tranche $i: $T_SHARES shares, price trigger \$$TRIG_VAL ($DIRECTION), monitor created"
+      fi
+    done
+
+    echo ""
+    echo "  Plan ID: $PLAN_ID"
+    echo "  Done. Use 'pm-cli.sh basket $BASKET_NAME' to view."
+    ;;
+
   baskets)
     echo "=== Rebalance Baskets ==="
     sqlite3 -header -column "$DB" "
@@ -5273,6 +5460,7 @@ PYEOF
     echo "  plan-fill <id> [p]  - Mark tranche as filled (optionally with price)"
     echo "  plan-cancel <sym>   - Cancel active entry plan for symbol"
     echo "  basket-create <name> - Create a rebalance basket"
+    echo "  basket-add          - Add order to basket: <basket> <buy|sell> <sym> <shares> <tranches> <date|price> <values> [opts]"
     echo "  baskets             - List all rebalance baskets with summary"
     echo "  basket <name>       - Detail view: orders and tranches for a basket"
     echo "  reconcile <csv>    - Import Schwab realized P&L CSV"
