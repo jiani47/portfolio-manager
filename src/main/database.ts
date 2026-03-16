@@ -31,6 +31,7 @@ import {
   BrokerPLRecord,
   EntryPlan,
   EntryPlanTranche,
+  RebalanceBasket,
 } from '../shared/types';
 
 export class Database {
@@ -3530,7 +3531,7 @@ export class Database {
     return plan;
   }
 
-  listEntryPlans(opts?: { status?: string; symbol?: string }): EntryPlan[] {
+  listEntryPlans(opts?: { status?: string; symbol?: string; basketId?: string }): EntryPlan[] {
     if (!this.db) throw new Error('Database not initialized');
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -3542,6 +3543,10 @@ export class Database {
     if (opts?.symbol) {
       conditions.push('s.symbol = ?');
       params.push(opts.symbol.toUpperCase());
+    }
+    if (opts?.basketId) {
+      conditions.push('ep.basket_id = ?');
+      params.push(opts.basketId);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -3624,6 +3629,234 @@ export class Database {
     this.db.prepare("UPDATE entry_plans SET status = 'cancelled', updated_at = ? WHERE id = ?").run(now, id);
     return this.getEntryPlan(id)!;
   }
+
+  // === Rebalance Baskets ===
+
+  createRebalanceBasket(data: { name: string; notes?: string }): RebalanceBasket {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO rebalance_baskets (id, name, status, notes, created_at, updated_at)
+      VALUES (?, ?, 'active', ?, ?, ?)
+    `).run(id, data.name, data.notes || null, now, now);
+    return this.getRebalanceBasket(id)!;
+  }
+
+  getRebalanceBasket(id: string): RebalanceBasket | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM rebalance_baskets WHERE id = ?').get(id);
+    if (!row) return null;
+    const basket = this.mapRowToRebalanceBasket(row);
+    basket.plans = this.listEntryPlans({ basketId: basket.id });
+    return basket;
+  }
+
+  getRebalanceBasketByName(name: string): RebalanceBasket | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM rebalance_baskets WHERE name = ?').get(name);
+    if (!row) return null;
+    const basket = this.mapRowToRebalanceBasket(row);
+    basket.plans = this.listEntryPlans({ basketId: basket.id });
+    return basket;
+  }
+
+  listRebalanceBaskets(opts?: { status?: string }): RebalanceBasket[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const where = opts?.status ? "WHERE status = ?" : "";
+    const params = opts?.status ? [opts.status] : [];
+    const rows = this.db.prepare(`SELECT * FROM rebalance_baskets ${where} ORDER BY created_at DESC`).all(...params);
+    return rows.map((row) => {
+      const basket = this.mapRowToRebalanceBasket(row);
+      basket.plans = this.listEntryPlans({ basketId: basket.id });
+      return basket;
+    });
+  }
+
+  updateRebalanceBasket(id: string, data: Partial<Pick<RebalanceBasket, 'status' | 'notes'>>): RebalanceBasket {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    const fields: string[] = ['updated_at = ?'];
+    const values: unknown[] = [now];
+    if (data.status !== undefined) { fields.push('status = ?'); values.push(data.status); }
+    if (data.notes !== undefined) { fields.push('notes = ?'); values.push(data.notes); }
+    values.push(id);
+    this.db.prepare(`UPDATE rebalance_baskets SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    return this.getRebalanceBasket(id)!;
+  }
+
+  createBasketEntryPlan(data: {
+    basketId: string;
+    securityId: string;
+    side: 'buy' | 'sell';
+    invalidationCondition?: string;
+    notes?: string;
+    accountId?: string;
+    tranches: Array<{
+      trancheNumber: number;
+      triggerType: 'date' | 'price';
+      triggerPrice?: number;
+      triggerDate?: string;
+      shares: number;
+      notes?: string;
+    }>;
+  }): EntryPlan {
+    if (!this.db) throw new Error('Database not initialized');
+    const planId = uuidv4();
+    const now = new Date().toISOString();
+
+    const security = this.db.prepare('SELECT symbol FROM securities WHERE id = ?').get(data.securityId) as { symbol: string } | undefined;
+    const symbol = security?.symbol || 'UNKNOWN';
+
+    this.db.prepare(`
+      INSERT INTO entry_plans (id, security_id, basket_id, side, invalidation_condition, status, notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
+    `).run(planId, data.securityId, data.basketId, data.side, data.invalidationCondition || null, data.notes || null, now, now);
+
+    for (const tranche of data.tranches) {
+      const trancheId = uuidv4();
+      let monitorId: string | null = null;
+
+      if (tranche.triggerType === 'price' && tranche.triggerPrice) {
+        const direction = data.side === 'buy' ? 'below' : 'above';
+        const monitor = this.createMonitor({
+          symbol,
+          direction,
+          priceLevel: tranche.triggerPrice,
+          label: `EMS ${data.side} ${symbol}: ${tranche.shares} shares at $${tranche.triggerPrice.toFixed(2)}`,
+          actionType: 'action_required',
+        });
+        monitorId = monitor.id;
+      }
+
+      this.db.prepare(`
+        INSERT INTO entry_plan_tranches (id, plan_id, tranche_number, trigger_type, trigger_price, trigger_date, shares, status, monitor_id, account_id, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+      `).run(
+        trancheId, planId, tranche.trancheNumber,
+        tranche.triggerType,
+        tranche.triggerPrice || null,
+        tranche.triggerDate || null,
+        tranche.shares,
+        monitorId,
+        data.accountId || null,
+        tranche.notes || null
+      );
+    }
+
+    return this.getEntryPlan(planId)!;
+  }
+
+  // === Tranche Lifecycle ===
+
+  triggerTranche(id: string): EntryPlanTranche {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare("UPDATE entry_plan_tranches SET status = 'triggered' WHERE id = ? AND status = 'pending'").run(id);
+    const row = this.db.prepare('SELECT * FROM entry_plan_tranches WHERE id = ?').get(id);
+    return this.mapRowToEntryPlanTranche(row);
+  }
+
+  confirmTranche(id: string, limitPrice: number): EntryPlanTranche {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare("UPDATE entry_plan_tranches SET status = 'confirmed', limit_price = ? WHERE id = ? AND status = 'triggered'").run(limitPrice, id);
+    const row = this.db.prepare('SELECT * FROM entry_plan_tranches WHERE id = ?').get(id);
+    return this.mapRowToEntryPlanTranche(row);
+  }
+
+  submitTranche(id: string, brokerageOrderId: string): EntryPlanTranche {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare("UPDATE entry_plan_tranches SET status = 'submitted', brokerage_order_id = ?, brokerage_order_status = 'WORKING' WHERE id = ?").run(brokerageOrderId, id);
+    const row = this.db.prepare('SELECT * FROM entry_plan_tranches WHERE id = ?').get(id);
+    return this.mapRowToEntryPlanTranche(row);
+  }
+
+  fillTranche(id: string, data: { filledQty: number; filledPrice: number; brokerageOrderStatus: string }): EntryPlanTranche {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE entry_plan_tranches
+      SET status = 'filled', filled_qty = ?, filled_price = ?, filled_at = ?, brokerage_order_status = ?
+      WHERE id = ?
+    `).run(data.filledQty, data.filledPrice, now, data.brokerageOrderStatus, id);
+    const row = this.db.prepare('SELECT * FROM entry_plan_tranches WHERE id = ?').get(id);
+    return this.mapRowToEntryPlanTranche(row);
+  }
+
+  expireTranche(id: string): EntryPlanTranche {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare("UPDATE entry_plan_tranches SET status = 'triggered', brokerage_order_id = NULL, brokerage_order_status = 'EXPIRED' WHERE id = ?").run(id);
+    const row = this.db.prepare('SELECT * FROM entry_plan_tranches WHERE id = ?').get(id);
+    return this.mapRowToEntryPlanTranche(row);
+  }
+
+  getTriggeredTranches(basketName?: string): Array<EntryPlanTranche & { symbol: string; side: string; basketName: string }> {
+    if (!this.db) throw new Error('Database not initialized');
+    let query = `
+      SELECT ept.*, s.symbol, ep.side, rb.name as basket_name
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      LEFT JOIN rebalance_baskets rb ON ep.basket_id = rb.id
+      WHERE ept.status = 'triggered'
+    `;
+    const params: unknown[] = [];
+    if (basketName) {
+      query += ' AND rb.name = ?';
+      params.push(basketName);
+    }
+    query += ' ORDER BY ept.trigger_date, s.symbol, ept.tranche_number';
+    return this.db.prepare(query).all(...params).map((row) => {
+      const r = row as Record<string, unknown>;
+      return {
+        ...this.mapRowToEntryPlanTranche(row),
+        symbol: r.symbol as string,
+        side: (r.side as string) || 'buy',
+        basketName: (r.basket_name as string) || '',
+      };
+    });
+  }
+
+  getSubmittedTranches(): Array<EntryPlanTranche & { symbol: string; side: string }> {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare(`
+      SELECT ept.*, s.symbol, ep.side
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      WHERE ept.status = 'submitted'
+    `).all().map((row) => {
+      const r = row as Record<string, unknown>;
+      return {
+        ...this.mapRowToEntryPlanTranche(row),
+        symbol: r.symbol as string,
+        side: (r.side as string) || 'buy',
+      };
+    });
+  }
+
+  getDateTriggeredPending(): EntryPlanTranche[] {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare(`
+      SELECT ept.* FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      WHERE ept.trigger_type = 'date'
+        AND ept.trigger_date <= date('now')
+        AND ept.status = 'pending'
+        AND ep.status = 'active'
+    `).all().map(this.mapRowToEntryPlanTranche);
+  }
+
+  private mapRowToRebalanceBasket = (row: unknown): RebalanceBasket => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      name: r.name as string,
+      status: r.status as string,
+      notes: r.notes as string | null,
+      createdAt: r.created_at as string,
+      updatedAt: r.updated_at as string,
+    };
+  };
 
   private mapRowToEntryPlan = (row: unknown): EntryPlan => {
     const r = row as Record<string, unknown>;
