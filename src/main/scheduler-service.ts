@@ -105,6 +105,20 @@ export class SchedulerService {
         execute: () => this.executeNews(),
         enabled: true,
       },
+      {
+        id: 'ems-date-check',
+        name: 'EMS Date Trigger Check',
+        schedule: { type: 'daily', dailyHourET: 10 },
+        execute: () => this.executeEmsDateCheck(),
+        enabled: true,
+      },
+      {
+        id: 'ems-eod-reconcile',
+        name: 'EMS EOD Reconcile',
+        schedule: { type: 'after_market_close', afterMarketDelayMinutes: 30 },
+        execute: () => this.executeEmsEodReconcile(),
+        enabled: true,
+      },
     ];
   }
 
@@ -508,6 +522,86 @@ export class SchedulerService {
       }
 
       return { success: true, message: `Fetched ${totalArticles} news articles` };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private async executeEmsDateCheck(): Promise<TaskResult> {
+    try {
+      const pending = this.db.getDateTriggeredPending();
+      if (pending.length === 0) {
+        return { success: true, message: 'No date-triggered tranches due' };
+      }
+
+      for (const tranche of pending) {
+        this.db.triggerTranche(tranche.id);
+      }
+
+      this.notifyRenderer('ems:tranches-triggered', { count: pending.length });
+
+      return {
+        success: true,
+        message: `Triggered ${pending.length} date-based tranche${pending.length > 1 ? 's' : ''}`,
+      };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private async executeEmsEodReconcile(): Promise<TaskResult> {
+    try {
+      const submitted = this.db.getSubmittedTranches();
+      if (submitted.length === 0) {
+        return { success: true, message: 'No submitted tranches to reconcile' };
+      }
+
+      if (!this.schwabService.isConnected()) {
+        return { success: false, message: 'Schwab service not connected' };
+      }
+
+      // Fetch all orders from Schwab
+      const orders = await this.schwabService.getOrdersForAllAccounts();
+      const orderMap = new Map(orders.map(o => [o.orderId, o]));
+
+      let filled = 0;
+      let expired = 0;
+      let skipped = 0;
+
+      for (const tranche of submitted) {
+        if (!tranche.brokerageOrderId) {
+          skipped++;
+          continue;
+        }
+
+        const order = orderMap.get(tranche.brokerageOrderId);
+        if (!order) {
+          // Order not found — may be GTC from a previous day, skip
+          skipped++;
+          continue;
+        }
+
+        const status = order.status.toUpperCase();
+        if (status === 'FILLED') {
+          this.db.fillTranche(tranche.id, {
+            filledQty: order.filledQuantity,
+            filledPrice: order.price || tranche.limitPrice || tranche.triggerPrice,
+            brokerageOrderStatus: 'FILLED',
+          });
+          filled++;
+        } else if (['CANCELED', 'EXPIRED', 'REJECTED'].includes(status)) {
+          this.db.expireTranche(tranche.id);
+          expired++;
+        } else {
+          // WORKING or other active status — leave as-is
+          skipped++;
+        }
+      }
+
+      const summary = `Reconciled ${submitted.length} tranches: ${filled} filled, ${expired} expired/canceled, ${skipped} skipped`;
+      this.notifyRenderer('ems:reconcile-complete', { filled, expired, skipped, total: submitted.length });
+
+      return { success: true, message: summary };
     } catch (err) {
       return { success: false, message: err instanceof Error ? err.message : String(err) };
     }
