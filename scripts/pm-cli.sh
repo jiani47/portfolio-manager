@@ -1312,6 +1312,68 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
       echo ""
     fi
 
+    # === EMS Orders ===
+    EMS_TRIGGERED=$(sqlite3 "$DB" "
+      SELECT s.symbol, ep.side, ept.shares, ept.trigger_type,
+        COALESCE(ept.trigger_date, '\$' || printf('%.2f', ept.trigger_price)) as trigger_val,
+        substr(ept.id, 1, 8) as tid, rb.name as basket
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      LEFT JOIN rebalance_baskets rb ON ep.basket_id = rb.id
+      WHERE ept.status = 'triggered' AND ep.status = 'active';
+    " 2>/dev/null)
+    EMS_SUBMITTED=$(sqlite3 "$DB" "
+      SELECT s.symbol, ep.side, ept.shares, '\$' || printf('%.2f', ept.limit_price) as lim,
+        ept.brokerage_order_status as bstatus, rb.name as basket
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      LEFT JOIN rebalance_baskets rb ON ep.basket_id = rb.id
+      WHERE ept.status = 'submitted' AND ep.status = 'active';
+    " 2>/dev/null)
+    EMS_FILLED_TODAY=$(sqlite3 "$DB" "
+      SELECT s.symbol, ep.side, ept.filled_qty, '\$' || printf('%.2f', ept.filled_price) as fpx,
+        ept.filled_at, rb.name as basket
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      LEFT JOIN rebalance_baskets rb ON ep.basket_id = rb.id
+      WHERE ept.status = 'filled' AND date(ept.filled_at) = date('now');
+    " 2>/dev/null)
+
+    if [ -n "$EMS_TRIGGERED" ] || [ -n "$EMS_SUBMITTED" ] || [ -n "$EMS_FILLED_TODAY" ]; then
+      echo "=== EMS Orders ==="
+      if [ -n "$EMS_TRIGGERED" ]; then
+        echo "  --- Awaiting Confirmation ---"
+        echo "$EMS_TRIGGERED" | while IFS='|' read -r SYM SIDE SHARES TTYPE TVAL TID BNAME; do
+          SIDE_UP=$(echo "$SIDE" | tr '[:lower:]' '[:upper:]')
+          echo "  $SIDE_UP $SHARES $SYM | trigger: $TVAL ($TTYPE) | confirm: pm-cli.sh basket-confirm $TID"
+        done
+      fi
+      if [ -n "$EMS_SUBMITTED" ]; then
+        echo "  --- Working at Broker ---"
+        echo "$EMS_SUBMITTED" | while IFS='|' read -r SYM SIDE SHARES LIM BSTATUS BNAME; do
+          SIDE_UP=$(echo "$SIDE" | tr '[:lower:]' '[:upper:]')
+          echo "  $SIDE_UP $SHARES $SYM @ $LIM | $BSTATUS"
+        done
+      fi
+      if [ -n "$EMS_FILLED_TODAY" ]; then
+        echo "  --- Filled Today ---"
+        echo "$EMS_FILLED_TODAY" | while IFS='|' read -r SYM SIDE QTY FPX FAT BNAME; do
+          SIDE_UP=$(echo "$SIDE" | tr '[:lower:]' '[:upper:]')
+          echo "  $SIDE_UP $QTY $SYM @ $FPX | $FAT"
+        done
+      fi
+      echo ""
+    fi
+
+    EMS_PENDING=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches ept JOIN entry_plans ep ON ept.plan_id = ep.id WHERE ept.status = 'pending' AND ep.status = 'active';" 2>/dev/null)
+    if [ "$EMS_PENDING" -gt 0 ]; then
+      echo "=== EMS: $EMS_PENDING orders pending trigger ==="
+      echo ""
+    fi
+
     # Upcoming earnings (next 7 days) from monitors table
     EARN_MONITORS=$(sqlite3 "$DB" "SELECT symbol, label, expires_at FROM monitors WHERE monitor_type = 'earnings' AND status = 'active' ORDER BY expires_at, symbol;" 2>/dev/null)
     if [ -n "$EARN_MONITORS" ]; then
