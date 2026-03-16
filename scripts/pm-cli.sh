@@ -5397,6 +5397,269 @@ PYEOF
     "
     ;;
 
+  basket-orders)
+    BASKET_NAME="$2"
+    BASKET_FILTER=""
+    if [ -n "$BASKET_NAME" ]; then
+      BASKET_ID=$(sqlite3 "$DB" "SELECT id FROM rebalance_baskets WHERE name = '$BASKET_NAME';")
+      if [ -z "$BASKET_ID" ]; then
+        echo "Error: Basket '$BASKET_NAME' not found"; exit 1
+      fi
+      BASKET_FILTER="AND ep.basket_id = '$BASKET_ID'"
+    fi
+
+    echo "=== Triggered Orders Awaiting Confirmation ==="
+    sqlite3 -header -column "$DB" "
+      SELECT substr(ept.id, 1, 8) as tranche_id,
+        rb.name as basket,
+        ep.side,
+        s.symbol,
+        ept.tranche_number as '#',
+        ept.shares as qty,
+        ept.trigger_type as trig,
+        COALESCE(ept.trigger_date, '\$' || printf('%.2f', ept.trigger_price)) as trigger,
+        COALESCE('\$' || printf('%.2f', (SELECT ph.close_price FROM price_history ph JOIN securities s2 ON ph.security_id = s2.id WHERE s2.symbol = s.symbol ORDER BY ph.date DESC LIMIT 1)), '?') as last_price,
+        COALESCE(a.account_number, 'unset') as account
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      LEFT JOIN rebalance_baskets rb ON ep.basket_id = rb.id
+      LEFT JOIN accounts a ON ept.account_id = a.id
+      WHERE ept.status = 'triggered' $BASKET_FILTER
+      ORDER BY s.symbol, ept.tranche_number;
+    "
+    TRIGGERED_COUNT=$(sqlite3 "$DB" "
+      SELECT COUNT(*) FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      WHERE ept.status = 'triggered' $BASKET_FILTER;
+    ")
+    echo ""
+    if [ "$TRIGGERED_COUNT" -gt 0 ]; then
+      echo "$TRIGGERED_COUNT order(s) awaiting confirmation."
+      echo "Confirm: pm-cli.sh basket-confirm <tranche_id> [limit_price]"
+    else
+      echo "No triggered orders awaiting confirmation."
+    fi
+    ;;
+
+  basket-confirm)
+    TRANCHE_PREFIX="$2"
+    USER_LIMIT_PRICE="$3"
+    if [ -z "$TRANCHE_PREFIX" ]; then
+      echo "Usage: pm-cli.sh basket-confirm <tranche_id_prefix> [limit_price]"
+      echo "  Use 'basket-orders' to see triggered tranches and their IDs."
+      exit 1
+    fi
+
+    # Look up tranche by ID prefix
+    TRANCHE_ROW=$(sqlite3 -separator '|' "$DB" "
+      SELECT ept.id, ep.side, s.symbol, ept.shares, ept.trigger_price,
+        ept.trigger_type, ept.trigger_date, ept.status,
+        COALESCE(a.account_number, ''), ept.plan_id
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      LEFT JOIN accounts a ON ept.account_id = a.id
+      WHERE ept.id LIKE '${TRANCHE_PREFIX}%';
+    ")
+
+    if [ -z "$TRANCHE_ROW" ]; then
+      echo "ERROR: No tranche found matching prefix '$TRANCHE_PREFIX'"
+      exit 1
+    fi
+
+    # Check for ambiguous match
+    MATCH_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches WHERE id LIKE '${TRANCHE_PREFIX}%';")
+    if [ "$MATCH_COUNT" -gt 1 ]; then
+      echo "ERROR: Prefix '$TRANCHE_PREFIX' matches $MATCH_COUNT tranches. Use a longer prefix."
+      exit 1
+    fi
+
+    # Parse fields
+    TRANCHE_ID=$(echo "$TRANCHE_ROW" | cut -d'|' -f1)
+    SIDE=$(echo "$TRANCHE_ROW" | cut -d'|' -f2)
+    SYMBOL=$(echo "$TRANCHE_ROW" | cut -d'|' -f3)
+    QTY=$(echo "$TRANCHE_ROW" | cut -d'|' -f4)
+    TRIGGER_PRICE=$(echo "$TRANCHE_ROW" | cut -d'|' -f5)
+    TRIGGER_TYPE=$(echo "$TRANCHE_ROW" | cut -d'|' -f6)
+    TRIGGER_DATE=$(echo "$TRANCHE_ROW" | cut -d'|' -f7)
+    TRANCHE_STATUS=$(echo "$TRANCHE_ROW" | cut -d'|' -f8)
+    ACCT_NUM=$(echo "$TRANCHE_ROW" | cut -d'|' -f9)
+    PLAN_ID=$(echo "$TRANCHE_ROW" | cut -d'|' -f10)
+
+    # Validate status
+    if [ "$TRANCHE_STATUS" != "triggered" ]; then
+      echo "ERROR: Tranche status is '$TRANCHE_STATUS', expected 'triggered'."
+      echo "Only triggered tranches can be confirmed."
+      exit 1
+    fi
+
+    # Determine instruction
+    INSTRUCTION=$(echo "$SIDE" | tr '[:lower:]' '[:upper:]')
+
+    # Determine limit price: user override > trigger_price (for price-triggered) > prompt
+    if [ -n "$USER_LIMIT_PRICE" ]; then
+      LIMIT_PRICE="$USER_LIMIT_PRICE"
+    elif [ "$TRIGGER_TYPE" = "price" ] && [ -n "$TRIGGER_PRICE" ] && [ "$TRIGGER_PRICE" != "0" ]; then
+      LIMIT_PRICE="$TRIGGER_PRICE"
+    else
+      # Date-triggered: need a limit price
+      LAST_PRICE=$(sqlite3 "$DB" "
+        SELECT ph.close_price FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = '$SYMBOL'
+        ORDER BY ph.date DESC LIMIT 1;
+      ")
+      echo "Date-triggered tranche for $SYMBOL (last price: \$${LAST_PRICE:-unknown})"
+      printf "Enter limit price: \$"
+      read -r LIMIT_PRICE
+      if [ -z "$LIMIT_PRICE" ]; then
+        echo "ERROR: Limit price required for date-triggered tranches."
+        exit 1
+      fi
+    fi
+
+    # Validate account
+    if [ -z "$ACCT_NUM" ]; then
+      echo "ERROR: No account assigned to this tranche. Use basket-add with --account."
+      exit 1
+    fi
+
+    # Resolve account for pre-trade check
+    RESOLVED_ACCOUNT="$ACCT_NUM"
+    ACCT_NAME=$(sqlite3 "$DB" "SELECT name FROM accounts WHERE account_number LIKE '%$ACCT_NUM' LIMIT 1")
+
+    # Pre-trade checklist
+    pre_trade_check "$SYMBOL" "$INSTRUCTION" "$QTY" "$RESOLVED_ACCOUNT" "$LIMIT_PRICE" || exit 1
+
+    # Print order summary
+    echo "==============================="
+    echo "  BASKET ORDER CONFIRMATION"
+    echo "==============================="
+    echo "  Action:   $INSTRUCTION"
+    echo "  Symbol:   $SYMBOL"
+    echo "  Quantity: $QTY"
+    echo "  Type:     LIMIT"
+    echo "  Price:    \$$LIMIT_PRICE"
+    echo "  Duration: DAY"
+    echo "  Account:  $ACCT_NAME ($ACCT_NUM)"
+    echo "  Tranche:  ${TRANCHE_PREFIX}..."
+    echo "==============================="
+
+    printf "Place order? [y/N] "
+    read -r REPLY
+    if [ "$REPLY" != "y" ] && [ "$REPLY" != "Y" ]; then
+      echo "Order cancelled."
+      exit 0
+    fi
+
+    # Update tranche to confirmed with limit price
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    sqlite3 "$DB" "UPDATE entry_plan_tranches SET status = 'confirmed', limit_price = $LIMIT_PRICE WHERE id = '$TRANCHE_ID';"
+
+    # Authenticate and get account hash
+    schwab_ensure_token
+    schwab_get_account_hash "$ACCT_NUM"
+    if [ -z "$ACCOUNT_HASH" ]; then
+      echo "ERROR: Could not resolve account hash. Reverting to triggered."
+      sqlite3 "$DB" "UPDATE entry_plan_tranches SET status = 'triggered', limit_price = NULL WHERE id = '$TRANCHE_ID';"
+      exit 1
+    fi
+
+    # Build order JSON
+    ORDER_JSON=$(python3 -c "
+import json
+order = {
+    'orderType': 'LIMIT',
+    'session': 'NORMAL',
+    'duration': 'DAY',
+    'price': '$LIMIT_PRICE',
+    'orderStrategyType': 'SINGLE',
+    'orderLegCollection': [{
+        'instruction': '$INSTRUCTION',
+        'quantity': $QTY,
+        'instrument': {
+            'symbol': '$SYMBOL',
+            'assetType': 'EQUITY'
+        }
+    }]
+}
+print(json.dumps(order))
+")
+
+    # Place order
+    HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+      "${SCHWAB_API}/trader/v1/accounts/${ACCOUNT_HASH}/orders" \
+      -H "Authorization: ${TOKEN_TYPE} ${ACCESS_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "$ORDER_JSON")
+
+    HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
+    HTTP_STATUS=$(echo "$HTTP_RESPONSE" | tail -1)
+
+    if [ "$HTTP_STATUS" = "201" ]; then
+      echo "Order placed successfully."
+
+      # Update tranche to submitted
+      sqlite3 "$DB" "UPDATE entry_plan_tranches SET status = 'submitted', limit_price = $LIMIT_PRICE WHERE id = '$TRANCHE_ID';"
+
+      # Try to fetch order ID from recent orders
+      ORDER_ID=$(python3 - "$ACCESS_TOKEN" "$SCHWAB_API" "$ACCOUNT_HASH" "$SYMBOL" "$INSTRUCTION" "$QTY" <<'PYEOF'
+import sys, json, urllib.request, datetime
+
+token = sys.argv[1]
+api = sys.argv[2]
+acct_hash = sys.argv[3]
+symbol = sys.argv[4]
+instruction = sys.argv[5]
+qty = int(sys.argv[6])
+
+now = datetime.datetime.now(datetime.timezone.utc)
+from_date = (now - datetime.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+to_date = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+url = f"{api}/trader/v1/accounts/{acct_hash}/orders?fromEnteredTime={from_date}&toEnteredTime={to_date}"
+req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+try:
+    resp = urllib.request.urlopen(req)
+    orders = json.loads(resp.read())
+    # Find matching order (most recent first)
+    for order in sorted(orders, key=lambda o: o.get('enteredTime', ''), reverse=True):
+        legs = order.get('orderLegCollection', [])
+        if legs:
+            leg = legs[0]
+            if (leg.get('instrument', {}).get('symbol') == symbol and
+                leg.get('instruction') == instruction and
+                int(leg.get('quantity', 0)) == qty):
+                print(order.get('orderId', ''))
+                sys.exit(0)
+    print('')
+except Exception as e:
+    print('', file=sys.stderr)
+    print('')
+PYEOF
+)
+
+      if [ -n "$ORDER_ID" ]; then
+        sqlite3 "$DB" "UPDATE entry_plan_tranches SET brokerage_order_id = '$ORDER_ID', brokerage_order_status = 'WORKING' WHERE id = '$TRANCHE_ID';"
+        echo "Brokerage order ID: $ORDER_ID"
+      else
+        echo "Warning: Could not retrieve order ID. Order was placed but ID not captured."
+      fi
+
+      echo "Tranche $(echo $TRANCHE_ID | cut -c1-8) status: submitted"
+    else
+      echo "ERROR: Order failed (HTTP $HTTP_STATUS)"
+      if [ -n "$HTTP_BODY" ]; then
+        echo "$HTTP_BODY" | python3 -m json.tool 2>/dev/null || echo "$HTTP_BODY"
+      fi
+      # Revert tranche to triggered
+      sqlite3 "$DB" "UPDATE entry_plan_tranches SET status = 'triggered', limit_price = NULL WHERE id = '$TRANCHE_ID';"
+      echo "Tranche reverted to triggered."
+      exit 1
+    fi
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -5463,6 +5726,8 @@ PYEOF
     echo "  basket-add          - Add order to basket: <basket> <buy|sell> <sym> <shares> <tranches> <date|price> <values> [opts]"
     echo "  baskets             - List all rebalance baskets with summary"
     echo "  basket <name>       - Detail view: orders and tranches for a basket"
+    echo "  basket-orders [name]- List triggered tranches awaiting confirmation"
+    echo "  basket-confirm <id> [price] - Confirm triggered tranche and place Schwab order"
     echo "  reconcile <csv>    - Import Schwab realized P&L CSV"
     echo "  broker-pl [symbol] - Broker P&L summary (or per-lot detail for symbol)"
     ;;
