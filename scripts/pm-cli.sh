@@ -5660,6 +5660,106 @@ PYEOF
     fi
     ;;
 
+  basket-cancel)
+    TRANCHE_PREFIX="$2"
+    if [ -z "$TRANCHE_PREFIX" ]; then
+      echo "Usage: pm-cli.sh basket-cancel <tranche_id_prefix>"; exit 1
+    fi
+
+    # Look up tranche by prefix — must be in cancellable status (not filled, not already cancelled)
+    TRANCHE_ROW=$(sqlite3 "$DB" "
+      SELECT ept.id, ept.status, ept.brokerage_order_id, s.symbol, ept.shares, ept.monitor_id, ept.account_id, a.account_number
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      LEFT JOIN accounts a ON ept.account_id = a.id
+      WHERE ept.id LIKE '$TRANCHE_PREFIX%' AND ept.status NOT IN ('filled', 'cancelled');
+    ")
+    if [ -z "$TRANCHE_ROW" ]; then
+      echo "Error: No cancellable tranche found matching '$TRANCHE_PREFIX'"; exit 1
+    fi
+
+    IFS='|' read -r TRANCHE_ID STATUS BROKERAGE_ORDER_ID SYMBOL SHARES MONITOR_ID ACCOUNT_ID ACCOUNT_NUMBER <<< "$TRANCHE_ROW"
+    echo "Cancel: $SYMBOL $SHARES shares (status: $STATUS)"
+
+    # If submitted, cancel brokerage order first
+    if [ "$STATUS" = "submitted" ] && [ -n "$BROKERAGE_ORDER_ID" ]; then
+      echo "Cancelling brokerage order $BROKERAGE_ORDER_ID..."
+      schwab_ensure_token
+      schwab_get_account_hash "$ACCOUNT_NUMBER"
+      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "${SCHWAB_API}/trader/v1/accounts/${ACCOUNT_HASH}/orders/${BROKERAGE_ORDER_ID}" \
+        -H "Authorization: Bearer ${ACCESS_TOKEN}")
+      if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
+        echo "Brokerage order cancelled."
+      else
+        echo "Warning: Brokerage cancel returned HTTP $HTTP_CODE — verify manually."
+      fi
+    fi
+
+    # Cancel tranche
+    sqlite3 "$DB" "UPDATE entry_plan_tranches SET status = 'cancelled', brokerage_order_status = 'CANCELLED' WHERE id = '$TRANCHE_ID';"
+
+    # Dismiss linked monitor
+    if [ -n "$MONITOR_ID" ]; then
+      sqlite3 "$DB" "UPDATE monitors SET status = 'dismissed' WHERE id = '$MONITOR_ID' AND status IN ('active', 'triggered');" 2>/dev/null
+    fi
+
+    echo "Tranche cancelled: $SYMBOL $SHARES shares"
+    ;;
+
+  basket-fills)
+    BASKET_NAME="$2"
+    BASKET_FILTER=""
+    if [ -n "$BASKET_NAME" ]; then
+      BASKET_ID=$(sqlite3 "$DB" "SELECT id FROM rebalance_baskets WHERE name = '$BASKET_NAME';")
+      if [ -z "$BASKET_ID" ]; then
+        echo "Error: Basket '$BASKET_NAME' not found"; exit 1
+      fi
+      BASKET_FILTER="AND ep.basket_id = '$BASKET_ID'"
+    fi
+
+    echo "=== Fill History ==="
+    sqlite3 -header -column "$DB" "
+      SELECT s.symbol, ep.side,
+        ept.shares as ordered,
+        ept.filled_qty as filled,
+        '\$' || printf('%.2f', ept.limit_price) as limit_px,
+        '\$' || printf('%.2f', ept.filled_price) as fill_px,
+        ept.filled_at,
+        rb.name as basket
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      LEFT JOIN rebalance_baskets rb ON ep.basket_id = rb.id
+      WHERE ept.status = 'filled' $BASKET_FILTER
+      ORDER BY ept.filled_at DESC;
+    "
+    ;;
+
+  basket-status)
+    echo "=== EMS Status ==="
+    ACTIVE=$(sqlite3 "$DB" "SELECT COUNT(*) FROM rebalance_baskets WHERE status = 'active';")
+    echo "Active baskets: $ACTIVE"
+    echo ""
+
+    TRIGGERED=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches ept JOIN entry_plans ep ON ept.plan_id = ep.id WHERE ept.status = 'triggered' AND ep.status = 'active';")
+    echo "Triggered (awaiting confirmation): $TRIGGERED"
+
+    SUBMITTED=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches ept JOIN entry_plans ep ON ept.plan_id = ep.id WHERE ept.status = 'submitted' AND ep.status = 'active';")
+    echo "Submitted (working): $SUBMITTED"
+
+    PENDING=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches ept JOIN entry_plans ep ON ept.plan_id = ep.id WHERE ept.status = 'pending' AND ep.status = 'active';")
+    echo "Pending (awaiting trigger): $PENDING"
+
+    FILLED_TODAY=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches WHERE status = 'filled' AND date(filled_at) = date('now');")
+    echo "Filled today: $FILLED_TODAY"
+
+    echo ""
+    if [ "$TRIGGERED" -gt 0 ]; then
+      echo "Run: pm-cli.sh basket-orders to review triggered orders"
+    fi
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -5728,6 +5828,9 @@ PYEOF
     echo "  basket <name>       - Detail view: orders and tranches for a basket"
     echo "  basket-orders [name]- List triggered tranches awaiting confirmation"
     echo "  basket-confirm <id> [price] - Confirm triggered tranche and place Schwab order"
+    echo "  basket-cancel <id> - Cancel a tranche (and its brokerage order if submitted)"
+    echo "  basket-fills [name]- Fill history (optionally filtered by basket)"
+    echo "  basket-status      - EMS summary: active baskets, triggered/submitted/pending counts"
     echo "  reconcile <csv>    - Import Schwab realized P&L CSV"
     echo "  broker-pl [symbol] - Broker P&L summary (or per-lot detail for symbol)"
     ;;
