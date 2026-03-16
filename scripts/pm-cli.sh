@@ -1621,6 +1621,81 @@ PYEOF
       WHERE s.type != 'cash';
     "
     ;;
+  drift)
+    echo "=== Allocation Drift ==="
+    echo ""
+    sqlite3 "$DB" "
+      SELECT s.symbol,
+        printf('%.1f', pi.target_allocation_pct) as target_pct,
+        printf('%.1f',
+          SUM(p.quantity * COALESCE(
+            (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
+            0
+          )) * 100.0 /
+          NULLIF((SELECT SUM(p2.quantity * COALESCE(
+            (SELECT ph2.close_price FROM price_history ph2 WHERE ph2.security_id = p2.security_id ORDER BY ph2.date DESC LIMIT 1),
+            0
+          )) FROM positions p2 JOIN securities s2 ON p2.security_id = s2.id WHERE s2.type NOT IN ('cash','option') AND p2.quantity > 0), 0)
+        ) as current_pct,
+        printf('%.1f',
+          SUM(p.quantity * COALESCE(
+            (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
+            0
+          )) * 100.0 /
+          NULLIF((SELECT SUM(p2.quantity * COALESCE(
+            (SELECT ph2.close_price FROM price_history ph2 WHERE ph2.security_id = p2.security_id ORDER BY ph2.date DESC LIMIT 1),
+            0
+          )) FROM positions p2 JOIN securities s2 ON p2.security_id = s2.id WHERE s2.type NOT IN ('cash','option') AND p2.quantity > 0), 0)
+          - pi.target_allocation_pct
+        ) as drift_pct,
+        pi.tier
+      FROM positions p
+      JOIN securities s ON p.security_id = s.id
+      JOIN position_intents pi ON pi.position_id = p.id
+      WHERE s.type NOT IN ('cash','option') AND p.quantity > 0 AND pi.target_allocation_pct IS NOT NULL
+      GROUP BY s.symbol
+      ORDER BY ABS(
+        SUM(p.quantity * COALESCE(
+          (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
+          0
+        )) * 100.0 /
+        NULLIF((SELECT SUM(p2.quantity * COALESCE(
+          (SELECT ph2.close_price FROM price_history ph2 WHERE ph2.security_id = p2.security_id ORDER BY ph2.date DESC LIMIT 1),
+          0
+        )) FROM positions p2 JOIN securities s2 ON p2.security_id = s2.id WHERE s2.type NOT IN ('cash','option') AND p2.quantity > 0), 0)
+        - pi.target_allocation_pct
+      ) DESC;
+    " | while IFS='|' read -r SYMBOL TARGET CURRENT DRIFT TIER; do
+      if [ -z "$SYMBOL" ]; then continue; fi
+      # Color drift
+      ABS_DRIFT=$(echo "$DRIFT" | tr -d '-')
+      if (( $(echo "$ABS_DRIFT > 3" | bc -l 2>/dev/null || echo 0) )); then
+        COLOR="\033[31m"  # red
+      elif (( $(echo "$ABS_DRIFT > 1" | bc -l 2>/dev/null || echo 0) )); then
+        COLOR="\033[33m"  # amber
+      else
+        COLOR="\033[32m"  # green
+      fi
+      RESET="\033[0m"
+      SIGN=""
+      if (( $(echo "$DRIFT > 0" | bc -l 2>/dev/null || echo 0) )); then SIGN="+"; fi
+      printf "  %-6s  %5s%% / %5s%%  ${COLOR}%s%s%%${RESET}  (%s)\n" "$SYMBOL" "$CURRENT" "$TARGET" "$SIGN" "$DRIFT" "$TIER"
+    done
+
+    # Show positions WITHOUT a target (for awareness)
+    NO_TARGET=$(sqlite3 "$DB" "
+      SELECT s.symbol FROM positions p
+      JOIN securities s ON p.security_id = s.id
+      LEFT JOIN position_intents pi ON pi.position_id = p.id
+      WHERE s.type NOT IN ('cash','option') AND p.quantity > 0
+        AND (pi.target_allocation_pct IS NULL)
+      GROUP BY s.symbol ORDER BY s.symbol;
+    ")
+    if [ -n "$NO_TARGET" ]; then
+      echo ""
+      echo "No target set: $(echo $NO_TARGET | tr '\n' ' ')"
+    fi
+    ;;
   ritual-today)
     TODAY=$(date +"%Y-%m-%d")
     RESULT=$(sqlite3 -header -column "$DB" "SELECT * FROM daily_rituals WHERE date = '$TODAY';")
@@ -2336,6 +2411,131 @@ for sym, mv_raw in pos_rows:
 print("-" * 38)
 print(f"{'Total':<8} {'':>6} {'':>6} {'100.0':>6}% {total_wtd_beta:>9.3f}")
 
+db.close()
+PYEOF
+    ;;
+
+  correlations)
+    # Correlation matrix and concentration analysis
+    DAYS="${2:-365}"
+    echo "=== Correlation & Concentration Analysis (${DAYS}-day) ==="
+    echo ""
+
+    python3 <<PYEOF
+import sqlite3, math
+
+db = sqlite3.connect("$DB")
+days = int("$DAYS")
+
+# Get position symbols with weights (aggregate across accounts)
+positions = db.execute("""
+    SELECT s.symbol, s.id, SUM(p.quantity) * COALESCE(
+      (SELECT close_price FROM price_history WHERE security_id = s.id ORDER BY date DESC LIMIT 1), 0
+    ) as mv
+    FROM positions p
+    JOIN securities s ON p.security_id = s.id
+    WHERE s.type NOT IN ('cash', 'option') AND p.quantity > 0
+    GROUP BY s.symbol
+""").fetchall()
+
+total_mv = sum(r[2] for r in positions if r[2] > 0)
+if total_mv == 0:
+    print("No positions with market value found.")
+    db.close()
+    exit(0)
+
+# Build returns for each symbol
+sym_returns = {}
+symbols = []
+for sym, sec_id, mv in positions:
+    if mv <= 0:
+        continue
+    prices = db.execute("""
+        SELECT date, close_price FROM price_history
+        WHERE security_id = ? ORDER BY date DESC LIMIT ?
+    """, (sec_id, days + 1)).fetchall()
+    prices.reverse()
+    if len(prices) < 10:
+        continue
+    rets = {}
+    for i in range(1, len(prices)):
+        if prices[i-1][1] > 0:
+            rets[prices[i][0]] = (prices[i][1] - prices[i-1][1]) / prices[i-1][1]
+    if len(rets) < 10:
+        continue
+    sym_returns[sym] = rets
+    symbols.append(sym)
+
+# --- Concentration ---
+print("--- Concentration ---")
+weights = []
+for sym, _, mv in positions:
+    if mv > 0:
+        weights.append((sym, mv / total_mv))
+weights.sort(key=lambda x: -x[1])
+
+top5 = sum(w for _, w in weights[:5]) * 100
+hhi = sum((w * 100) ** 2 for _, w in weights)
+eff = 10000 / hhi if hhi > 0 else 0
+
+print(f"  Top 5 weight:         {top5:.1f}%")
+print(f"  HHI:                  {hhi:.0f} ({'concentrated' if hhi > 1500 else 'moderate' if hhi > 1000 else 'diversified'})")
+print(f"  Effective positions:  {eff:.1f}")
+print()
+
+# Sector concentration
+sectors = db.execute("""
+    SELECT s.sector, SUM(p.quantity * COALESCE(
+      (SELECT close_price FROM price_history WHERE security_id = s.id ORDER BY date DESC LIMIT 1), 0
+    )) as mv
+    FROM positions p JOIN securities s ON p.security_id = s.id
+    WHERE s.type NOT IN ('cash', 'option') AND p.quantity > 0
+    GROUP BY s.sector ORDER BY mv DESC
+""").fetchall()
+
+if sectors:
+    print("  Sector breakdown:")
+    for sector, smv in sectors:
+        pct = (smv / total_mv * 100) if total_mv > 0 else 0
+        bar = "#" * int(pct / 2)
+        print(f"    {(sector or 'Unknown'):<20} {pct:>5.1f}%  {bar}")
+    print()
+
+# --- High Correlations ---
+print(f"--- High Correlations (|r| >= 0.7, {days}d) ---")
+
+def correlate(a_dict, b_dict):
+    common = sorted(set(a_dict.keys()) & set(b_dict.keys()))
+    if len(common) < 10:
+        return None
+    a = [a_dict[d] for d in common]
+    b = [b_dict[d] for d in common]
+    n = len(a)
+    ma = sum(a) / n
+    mb = sum(b) / n
+    cov = sum((a[i] - ma) * (b[i] - mb) for i in range(n))
+    va = sum((a[i] - ma) ** 2 for i in range(n))
+    vb = sum((b[i] - mb) ** 2 for i in range(n))
+    denom = math.sqrt(va * vb)
+    return cov / denom if denom > 0 else 0
+
+pairs = []
+for i in range(len(symbols)):
+    for j in range(i + 1, len(symbols)):
+        c = correlate(sym_returns[symbols[i]], sym_returns[symbols[j]])
+        if c is not None and abs(c) >= 0.7:
+            pairs.append((symbols[i], symbols[j], c))
+
+pairs.sort(key=lambda x: -abs(x[2]))
+
+if pairs:
+    for a, b, c in pairs:
+        level = "!!!" if abs(c) >= 0.9 else "! " if abs(c) >= 0.8 else "  "
+        print(f"  {level} {a:<6} / {b:<6}  r = {c:+.2f}")
+else:
+    print("  No highly correlated pairs found.")
+
+print()
 db.close()
 PYEOF
     ;;
@@ -4922,6 +5122,94 @@ PYEOF
     echo "  ✓ Entry plan for $SYMBOL cancelled."
     ;;
 
+  basket-create)
+    BASKET_NAME="$2"
+    if [ -z "$BASKET_NAME" ]; then
+      echo "Usage: pm-cli.sh basket-create <name>"
+      exit 1
+    fi
+    EXISTING=$(sqlite3 "$DB" "SELECT id FROM rebalance_baskets WHERE name = '$BASKET_NAME';")
+    if [ -n "$EXISTING" ]; then
+      echo "Error: Basket '$BASKET_NAME' already exists (id: $EXISTING)"
+      exit 1
+    fi
+    BASKET_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    sqlite3 "$DB" "INSERT INTO rebalance_baskets (id, name, status, created_at, updated_at) VALUES ('$BASKET_ID', '$BASKET_NAME', 'active', '$NOW', '$NOW');"
+    echo "Basket created: $BASKET_NAME (id: $BASKET_ID)"
+    ;;
+
+  baskets)
+    echo "=== Rebalance Baskets ==="
+    sqlite3 -header -column "$DB" "
+      SELECT rb.name, rb.status,
+        COUNT(DISTINCT ep.id) as plans,
+        SUM(CASE WHEN ept.status = 'filled' THEN 1 ELSE 0 END) as filled,
+        SUM(CASE WHEN ept.status = 'submitted' THEN 1 ELSE 0 END) as submitted,
+        SUM(CASE WHEN ept.status = 'triggered' THEN 1 ELSE 0 END) as triggered,
+        SUM(CASE WHEN ept.status = 'pending' THEN 1 ELSE 0 END) as pending,
+        rb.created_at
+      FROM rebalance_baskets rb
+      LEFT JOIN entry_plans ep ON ep.basket_id = rb.id
+      LEFT JOIN entry_plan_tranches ept ON ept.plan_id = ep.id
+      GROUP BY rb.id
+      ORDER BY rb.created_at DESC;
+    "
+    ;;
+
+  basket)
+    BASKET_NAME="$2"
+    if [ -z "$BASKET_NAME" ]; then
+      echo "Usage: pm-cli.sh basket <name>"
+      exit 1
+    fi
+    BASKET_ID=$(sqlite3 "$DB" "SELECT id FROM rebalance_baskets WHERE name = '$BASKET_NAME';")
+    if [ -z "$BASKET_ID" ]; then
+      echo "Error: Basket '$BASKET_NAME' not found"
+      exit 1
+    fi
+    BASKET_STATUS=$(sqlite3 "$DB" "SELECT status FROM rebalance_baskets WHERE id = '$BASKET_ID';")
+    echo "=== Basket: $BASKET_NAME ($BASKET_STATUS) ==="
+    echo ""
+    echo "--- Orders by Symbol ---"
+    sqlite3 -header -column "$DB" "
+      SELECT s.symbol, ep.side,
+        SUM(ept.shares) as total_shares,
+        SUM(CASE WHEN ept.status = 'filled' THEN ept.filled_qty ELSE 0 END) as filled_shares,
+        SUM(CASE WHEN ept.status IN ('pending','triggered') THEN ept.shares ELSE 0 END) as remaining_shares,
+        COUNT(ept.id) as tranches,
+        SUM(CASE WHEN ept.status = 'filled' THEN 1 ELSE 0 END) as filled_ct,
+        SUM(CASE WHEN ept.status = 'submitted' THEN 1 ELSE 0 END) as submitted_ct,
+        SUM(CASE WHEN ept.status = 'triggered' THEN 1 ELSE 0 END) as triggered_ct,
+        SUM(CASE WHEN ept.status = 'pending' THEN 1 ELSE 0 END) as pending_ct
+      FROM entry_plans ep
+      JOIN securities s ON ep.security_id = s.id
+      JOIN entry_plan_tranches ept ON ept.plan_id = ep.id
+      WHERE ep.basket_id = '$BASKET_ID'
+      GROUP BY ep.id
+      ORDER BY ep.side, s.symbol;
+    "
+    echo ""
+    echo "--- Tranche Detail ---"
+    sqlite3 -header -column "$DB" "
+      SELECT s.symbol, ep.side, ept.tranche_number as '#',
+        ept.trigger_type as trig_type,
+        COALESCE(ept.trigger_date, '\$' || printf('%.2f', ept.trigger_price)) as trigger,
+        ept.shares as qty,
+        ept.status,
+        CASE WHEN ept.limit_price IS NOT NULL THEN '\$' || printf('%.2f', ept.limit_price) ELSE '' END as limit_px,
+        CASE WHEN ept.filled_price IS NOT NULL THEN '\$' || printf('%.2f', ept.filled_price) ELSE '' END as fill_px,
+        COALESCE(ept.filled_qty, 0) as fill_qty,
+        COALESCE(ept.brokerage_order_status, '') as broker_status,
+        substr(ept.id, 1, 8) as tranche_id
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      WHERE ep.basket_id = '$BASKET_ID'
+      ORDER BY ep.side DESC, s.symbol, ept.tranche_number;
+    "
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -4933,6 +5221,7 @@ PYEOF
     echo "  intents            - List all position intents"
     echo "  accounts           - List accounts with book designation"
     echo "  summary            - Portfolio summary with tier coverage"
+    echo "  drift              - Allocation drift: current vs target per position"
     echo "  set-intent         - Set intent: <pos_id> <tier> <thesis> <invalidation> [entry_style] [hold_period] [target_alloc_pct]"
     echo "  set-book           - Set book: <account_id> <investing|trading>"
     echo "  ritual-today       - Show today's ritual (or 'not started')"
@@ -4955,6 +5244,7 @@ PYEOF
     echo "  monitor-add-note    - Add fundamental monitor: <symbol> <label> [reminder_date]"
     echo "  earnings [days]     - Upcoming earnings for portfolio symbols (default 14 days)"
     echo "  analytics [days]    - Portfolio analytics: beta, sharpe, volatility, drawdown (default 90)"
+    echo "  correlations [days] - Correlation matrix & concentration analysis (default 365)"
     echo "  backfill [symbol]   - Backfill 3yr price history from Schwab (all symbols if no arg)"
     echo "  snapshot            - Take EOD portfolio snapshot (one per day)"
     echo "  snapshot-history [n]- Portfolio totals for last n days (default 30)"
@@ -4982,6 +5272,9 @@ PYEOF
     echo "  plans [all]         - List active entry plans (or all)"
     echo "  plan-fill <id> [p]  - Mark tranche as filled (optionally with price)"
     echo "  plan-cancel <sym>   - Cancel active entry plan for symbol"
+    echo "  basket-create <name> - Create a rebalance basket"
+    echo "  baskets             - List all rebalance baskets with summary"
+    echo "  basket <name>       - Detail view: orders and tranches for a basket"
     echo "  reconcile <csv>    - Import Schwab realized P&L CSV"
     echo "  broker-pl [symbol] - Broker P&L summary (or per-lot detail for symbol)"
     ;;
