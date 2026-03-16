@@ -679,6 +679,51 @@ export class Database {
       CREATE INDEX IF NOT EXISTS idx_entry_plan_tranches_plan ON entry_plan_tranches(plan_id);
     `);
 
+    // Rebalance baskets table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS rebalance_baskets (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'active',
+        notes TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+
+    // Extend entry_plans with EMS columns
+    const entryPlanEmsColumns: [string, string][] = [
+      ['basket_id', 'TEXT REFERENCES rebalance_baskets(id)'],
+      ['side', "TEXT NOT NULL DEFAULT 'buy'"],
+      ['invalidation_condition', 'TEXT'],
+      ['invalidation_monitor_id', 'TEXT'],
+    ];
+    for (const [col, type] of entryPlanEmsColumns) {
+      try {
+        this.db.exec(`ALTER TABLE entry_plans ADD COLUMN ${col} ${type}`);
+      } catch {
+        // Column already exists
+      }
+    }
+
+    // Extend entry_plan_tranches with EMS columns
+    const trancheEmsColumns: [string, string][] = [
+      ['trigger_type', "TEXT NOT NULL DEFAULT 'price'"],
+      ['trigger_date', 'TEXT'],
+      ['limit_price', 'REAL'],
+      ['brokerage_order_id', 'TEXT'],
+      ['brokerage_order_status', 'TEXT'],
+      ['filled_qty', 'REAL DEFAULT 0'],
+      ['account_id', 'TEXT'],
+    ];
+    for (const [col, type] of trancheEmsColumns) {
+      try {
+        this.db.exec(`ALTER TABLE entry_plan_tranches ADD COLUMN ${col} ${type}`);
+      } catch {
+        // Column already exists
+      }
+    }
+
     // Sync watchlist monitors on startup
     this.syncWatchlistMonitors();
   }
@@ -3368,6 +3413,26 @@ export class Database {
     });
   }
 
+  getPositionSnapshotHistory(symbol: string, days: number = 30): Array<{ date: string; quantity: number; costBasis: number; closePrice: number; marketValue: number; unrealizedGain: number }> {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db.prepare(`
+      SELECT date, quantity, cost_basis, close_price, market_value, unrealized_gain
+      FROM portfolio_snapshots
+      WHERE symbol = ? AND date >= date('now', '-' || ? || ' days')
+      ORDER BY date
+    `).all(symbol.toUpperCase(), days).map((row: unknown) => {
+      const r = row as Record<string, unknown>;
+      return {
+        date: r.date as string,
+        quantity: r.quantity as number,
+        costBasis: r.cost_basis as number,
+        closePrice: r.close_price as number,
+        marketValue: r.market_value as number,
+        unrealizedGain: r.unrealized_gain as number,
+      };
+    });
+  }
+
   private mapRowToBrokerPL = (row: unknown): BrokerPLRecord => {
     const r = row as Record<string, unknown>;
     return {
@@ -3571,6 +3636,10 @@ export class Database {
       notes: r.notes as string | null,
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,
+      basketId: (r.basket_id as string | null) ?? null,
+      side: (r.side as string) || 'buy',
+      invalidationCondition: (r.invalidation_condition as string | null) ?? null,
+      invalidationMonitorId: (r.invalidation_monitor_id as string | null) ?? null,
     };
   };
 
@@ -3587,6 +3656,13 @@ export class Database {
       filledAt: r.filled_at as string | null,
       filledPrice: r.filled_price as number | null,
       notes: r.notes as string | null,
+      triggerType: (r.trigger_type as string) || 'price',
+      triggerDate: (r.trigger_date as string | null) ?? null,
+      limitPrice: (r.limit_price as number | null) ?? null,
+      brokerageOrderId: (r.brokerage_order_id as string | null) ?? null,
+      brokerageOrderStatus: (r.brokerage_order_status as string | null) ?? null,
+      filledQty: (r.filled_qty as number | null) ?? 0,
+      accountId: (r.account_id as string | null) ?? null,
     };
   };
 

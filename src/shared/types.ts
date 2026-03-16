@@ -961,6 +961,11 @@ export interface EntryPlan {
   createdAt: string;
   updatedAt: string;
   tranches?: EntryPlanTranche[];
+  // EMS extensions
+  basketId?: string | null;
+  side?: string; // buy | sell
+  invalidationCondition?: string | null;
+  invalidationMonitorId?: string | null;
 }
 
 export interface EntryPlanTranche {
@@ -974,6 +979,24 @@ export interface EntryPlanTranche {
   filledAt: string | null;
   filledPrice: number | null;
   notes: string | null;
+  // EMS extensions
+  triggerType?: string; // date | price
+  triggerDate?: string | null;
+  limitPrice?: number | null;
+  brokerageOrderId?: string | null;
+  brokerageOrderStatus?: string | null;
+  filledQty?: number | null;
+  accountId?: string | null;
+}
+
+export interface RebalanceBasket {
+  id: string;
+  name: string;
+  status: string; // active | completed | cancelled
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  plans?: EntryPlan[];
 }
 
 export interface TradeJournalEntry {
