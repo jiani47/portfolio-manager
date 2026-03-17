@@ -21,6 +21,16 @@ get_fmp_key() {
   get_config "FMP_API_KEY"
 }
 
+# Push notification via ntfy.sh (non-blocking)
+NTFY_TOPIC=$(get_config "NTFY_TOPIC")
+pm_notify() {
+  local title="$1"
+  local message="$2"
+  local priority="${3:-default}"
+  [ -z "$NTFY_TOPIC" ] && return
+  curl -s -H "Title: $title" -H "Priority: $priority" -d "$message" "ntfy.sh/$NTFY_TOPIC" > /dev/null 2>&1 &
+}
+
 # Ensure we have a valid Schwab access token.
 # Sets global vars: ACCESS_TOKEN, TOKEN_TYPE
 schwab_ensure_token() {
@@ -1397,6 +1407,8 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
           SIDE_UP=$(echo "$SIDE" | tr '[:lower:]' '[:upper:]')
           echo "  $SIDE_UP $SHARES $SYM | trigger: $TVAL ($TTYPE) | confirm: pm-cli.sh basket-confirm $TID"
         done
+        TRIGGERED_COUNT=$(echo "$EMS_TRIGGERED" | wc -l | tr -d ' ')
+        pm_notify "EMS: $TRIGGERED_COUNT orders triggered" "Run: pm-cli.sh basket-orders" "high"
       fi
       if [ -n "$EMS_SUBMITTED" ]; then
         echo "  --- Working at Broker ---"
@@ -2010,8 +2022,10 @@ print(f'Updated {updated} prices, {errors} errors')
         ICON="⬇️"
         [ "$dir" = "above" ] && ICON="⬆️"
         TYPE_TAG=""
-        [ "$atype" = "action_required" ] && TYPE_TAG=" [ACTION REQUIRED]"
+        NTFY_PRI="high"
+        [ "$atype" = "action_required" ] && TYPE_TAG=" [ACTION REQUIRED]" && NTFY_PRI="urgent"
         echo "  $ICON $sym \$$price crossed $dir \$$level — $label$TYPE_TAG"
+        pm_notify "Monitor Triggered" "$sym $dir \$$level — $label$TYPE_TAG" "$NTFY_PRI"
       done
       echo "========================="
     fi

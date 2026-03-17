@@ -1,5 +1,6 @@
 import { BrowserWindow } from 'electron';
 import Store from 'electron-store';
+import { exec } from 'child_process';
 import { Database } from './database';
 import { FMPService } from './fmp-service';
 import { SchwabService } from './schwab-service';
@@ -11,6 +12,27 @@ import {
   SchedulerHeartbeat,
   TaskResult,
 } from '../shared/types';
+
+function sendNtfyNotification(title: string, message: string, priority: string = 'default') {
+  try {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const confPath = path.join(os.homedir(), '.pm-cli.conf');
+    if (!fs.existsSync(confPath)) return;
+    const content = fs.readFileSync(confPath, 'utf-8');
+    const match = content.match(/^NTFY_TOPIC=(.+)$/m);
+    const topic = match ? match[1].trim() : null;
+    if (!topic) return;
+    const safeTitle = title.replace(/"/g, '\\"');
+    const safeMessage = message.replace(/"/g, '\\"');
+    exec(`curl -s -H "Title: ${safeTitle}" -H "Priority: ${priority}" -d "${safeMessage}" "ntfy.sh/${topic}"`, (err) => {
+      if (err) console.error('ntfy notification failed:', err);
+    });
+  } catch {
+    // Graceful no-op if config unreadable
+  }
+}
 
 interface TaskDefinition {
   id: string;
@@ -539,6 +561,7 @@ export class SchedulerService {
       }
 
       this.notifyRenderer('ems:tranches-triggered', { count: pending.length });
+      sendNtfyNotification('EMS Orders Triggered', `${pending.length} order${pending.length > 1 ? 's' : ''} ready for confirmation`, 'high');
 
       return {
         success: true,
@@ -600,6 +623,7 @@ export class SchedulerService {
 
       const summary = `Reconciled ${submitted.length} tranches: ${filled} filled, ${expired} expired/canceled, ${skipped} skipped`;
       this.notifyRenderer('ems:reconcile-complete', { filled, expired, skipped, total: submitted.length });
+      sendNtfyNotification('EMS EOD Reconcile', `${filled} filled, ${expired} expired`, 'default');
 
       return { success: true, message: summary };
     } catch (err) {

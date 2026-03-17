@@ -1,10 +1,32 @@
 import WebSocket from 'ws';
 import { BrowserWindow, Notification } from 'electron';
+import { exec } from 'child_process';
 import Store from 'electron-store';
 import { SchwabService } from './schwab-service';
 import { Database } from './database';
 import { logger } from './logger';
 import { AppSettings, StreamingQuote, StreamingStatus, StreamingState, PriceHistory } from '../shared/types';
+
+function sendNtfyNotification(title: string, message: string, priority: string = 'default') {
+  try {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const confPath = path.join(os.homedir(), '.pm-cli.conf');
+    if (!fs.existsSync(confPath)) return;
+    const content = fs.readFileSync(confPath, 'utf-8');
+    const match = content.match(/^NTFY_TOPIC=(.+)$/m);
+    const topic = match ? match[1].trim() : null;
+    if (!topic) return;
+    const safeTitle = title.replace(/"/g, '\\"');
+    const safeMessage = message.replace(/"/g, '\\"');
+    exec(`curl -s -H "Title: ${safeTitle}" -H "Priority: ${priority}" -d "${safeMessage}" "ntfy.sh/${topic}"`, (err) => {
+      if (err) console.error('ntfy notification failed:', err);
+    });
+  } catch {
+    // Graceful no-op if config unreadable
+  }
+}
 
 const EQUITY_FIELDS: Record<number, keyof Omit<StreamingQuote, 'symbol' | 'timestamp'>> = {
   1: 'bid',
@@ -313,6 +335,9 @@ export class SchwabStreamService {
                     body: `${icon} ${sym.toUpperCase()} $${quote.last.toFixed(2)} crossed ${monitor.direction} $${monitor.priceLevel} — ${monitor.label}`,
                   });
                   notification.show();
+
+                  const ntfyPriority = monitor.actionType === 'action_required' ? 'urgent' : 'high';
+                  sendNtfyNotification('Monitor Triggered', `${sym.toUpperCase()} ${monitor.direction} $${monitor.priceLevel} — ${monitor.label}`, ntfyPriority);
 
                   if (mainWindow && !mainWindow.isDestroyed()) {
                     mainWindow.webContents.send('monitor:triggered', monitor);
@@ -634,6 +659,9 @@ export class SchwabStreamService {
               body: `${icon} ${symbol} $${quote.last.toFixed(2)} crossed ${monitor.direction} $${monitor.priceLevel} — ${monitor.label}`,
             });
             notification.show();
+
+            const ntfyPriority = monitor.actionType === 'action_required' ? 'urgent' : 'high';
+            sendNtfyNotification('Monitor Triggered', `${symbol} ${monitor.direction} $${monitor.priceLevel} — ${monitor.label}`, ntfyPriority);
 
             // Also notify renderer
             if (mainWindow && !mainWindow.isDestroyed()) {
