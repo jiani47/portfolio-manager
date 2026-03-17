@@ -40,7 +40,7 @@ export default function Holdings() {
   const [showTagModal, setShowTagModal] = useState(false);
   const [showIntentModal, setShowIntentModal] = useState(false);
   const [intentPosition, setIntentPosition] = useState<PositionWithPercent | null>(null);
-  const [intentForm, setIntentForm] = useState({ tier: '', thesis: '', invalidation: '', entryStyle: '', targetHoldPeriod: '' });
+  const [intentForm, setIntentForm] = useState({ tier: '', thesis: '', invalidation: '', entryStyle: '', targetHoldPeriod: '', targetAllocationPct: '' });
   const [showRiskShape, setShowRiskShape] = useState(false);
   const [editingPosition, setEditingPosition] = useState<Position | null>(null);
   const [taggingPosition, setTaggingPosition] = useState<PositionWithPercent | null>(null);
@@ -258,13 +258,18 @@ export default function Holdings() {
       invalidation: existing?.invalidation || '',
       entryStyle: existing?.entryStyle || '',
       targetHoldPeriod: existing?.targetHoldPeriod || '',
+      targetAllocationPct: existing?.targetAllocationPct != null ? String(existing.targetAllocationPct) : '',
     });
     setShowIntentModal(true);
   }, []);
 
   const handleSaveIntent = useCallback(async () => {
     if (!intentPosition) return;
-    await upsertIntent(intentPosition.id, intentForm);
+    const data = {
+      ...intentForm,
+      targetAllocationPct: intentForm.targetAllocationPct ? parseFloat(intentForm.targetAllocationPct) : null,
+    };
+    await upsertIntent(intentPosition.id, data);
     setShowIntentModal(false);
     setIntentPosition(null);
   }, [intentPosition, intentForm, upsertIntent]);
@@ -329,6 +334,31 @@ export default function Holdings() {
     'Watchlist': { bg: 'bg-orange-100', text: 'text-orange-800' },
   };
 
+  const renderWeight = (position: PositionWithPercent) => {
+    const pct = position.portfolioPercent;
+    const target = position.intent?.targetAllocationPct;
+    const isConcentrated = pct >= 8;
+    return (
+      <div>
+        <span className={isConcentrated ? 'text-amber-700' : ''}>
+          {pct.toFixed(1)}%
+        </span>
+        {target != null && (
+          <div className="text-[10px] leading-tight">
+            <span className="text-gray-400">/ {target.toFixed(1)}%</span>
+            {(() => {
+              const drift = pct - target;
+              const abs = Math.abs(drift);
+              if (abs < 0.5) return null;
+              const color = abs > 3 ? 'text-red-500' : abs > 1 ? 'text-amber-500' : 'text-gray-400';
+              return <span className={`ml-0.5 ${color}`}>{drift > 0 ? '+' : ''}{drift.toFixed(1)}</span>;
+            })()}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderTierBadge = (intent?: PositionIntent) => {
     if (!intent?.tier) return null;
     const colors = TIER_COLORS[intent.tier] || { bg: 'bg-gray-100', text: 'text-gray-800' };
@@ -383,16 +413,57 @@ export default function Holdings() {
   const renderNewsIcon = (position: PositionWithPercent) => {
     const symbol = position.security?.symbol;
     if (!symbol) return null;
+    const isOpen = newsSymbol === symbol;
     return (
-      <button
-        onClick={() => handleNewsClick(symbol)}
-        className={`p-1 rounded hover:bg-gray-100 ${newsSymbol === symbol ? 'text-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
-        title={`News for ${symbol}`}
-      >
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
-        </svg>
-      </button>
+      <div className="relative">
+        <button
+          onClick={() => handleNewsClick(symbol)}
+          className={`p-1 rounded hover:bg-gray-100 ${isOpen ? 'text-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
+          title={`News for ${symbol}`}
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
+          </svg>
+        </button>
+        {isOpen && (
+          <div className="absolute right-0 top-full mt-1 w-96 bg-white rounded-lg shadow-xl border border-gray-200 z-50 p-3">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-sm font-semibold text-gray-900">News: {symbol}</h4>
+              <button onClick={() => setNewsSymbol(null)} className="text-gray-400 hover:text-gray-600 text-xs">&times;</button>
+            </div>
+            {newsLoading ? (
+              <p className="text-xs text-gray-400 py-2">Loading...</p>
+            ) : newsArticles.length === 0 ? (
+              <p className="text-xs text-gray-400 py-2">No recent news</p>
+            ) : (
+              <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                {newsArticles.map((article, i) => (
+                  <div key={i} className="flex items-start gap-2 py-1 border-b border-gray-50 last:border-0">
+                    <span className="text-[10px] text-gray-400 whitespace-nowrap mt-0.5">
+                      {(() => {
+                        const d = new Date(article.publishedAt);
+                        const now = new Date();
+                        const diffH = (now.getTime() - d.getTime()) / 3600000;
+                        if (diffH < 24) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+                        return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                      })()}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      {article.url ? (
+                        <a href={article.url} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline leading-tight">
+                          {article.title}
+                        </a>
+                      ) : (
+                        <span className="text-xs text-gray-700 leading-tight">{article.title}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     );
   };
 
@@ -932,9 +1003,7 @@ export default function Holdings() {
                           {renderTagBadges(position.tags)}
                         </td>
                         <td className="table-cell text-right font-semibold">
-                          <span className={position.portfolioPercent >= 8 ? 'text-amber-700' : ''}>
-                            {position.portfolioPercent.toFixed(1)}%
-                          </span>
+                          {renderWeight(position)}
                         </td>
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
                         <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
@@ -1008,7 +1077,7 @@ export default function Holdings() {
                           </div>
                           {renderTagBadges(position.tags)}
                         </td>
-                        <td className="table-cell text-right font-medium">{position.portfolioPercent.toFixed(1)}%</td>
+                        <td className="table-cell text-right font-medium">{renderWeight(position)}</td>
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
                         <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
                         <td className="table-cell text-right">
@@ -1081,7 +1150,7 @@ export default function Holdings() {
                           </div>
                           {renderTagBadges(position.tags)}
                         </td>
-                        <td className="table-cell text-right text-gray-500">{position.portfolioPercent.toFixed(2)}%</td>
+                        <td className="table-cell text-right text-gray-500">{renderWeight(position)}</td>
                         <td className="table-cell text-right">{position.quantity.toLocaleString()}</td>
                         <td className="table-cell text-right text-gray-500">{position.quantity > 0 ? formatCurrency(position.costBasis / position.quantity) : '-'}</td>
                         <td className="table-cell text-right">
@@ -1431,7 +1500,7 @@ export default function Holdings() {
                   placeholder="What breaks the thesis?"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-3 gap-4">
                 <div>
                   <label className="label">Entry Style</label>
                   <input
@@ -1455,6 +1524,19 @@ export default function Holdings() {
                     <option value="months">Months</option>
                     <option value="years">Years</option>
                   </select>
+                </div>
+                <div>
+                  <label className="label">Target Allocation %</label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0"
+                    max="100"
+                    className="input"
+                    value={intentForm.targetAllocationPct}
+                    onChange={(e) => setIntentForm({ ...intentForm, targetAllocationPct: e.target.value })}
+                    placeholder="e.g., 8"
+                  />
                 </div>
               </div>
             </div>
@@ -1536,50 +1618,6 @@ export default function Holdings() {
       )}
 
       {/* News Panel */}
-      {newsSymbol && (
-        <div className="card mt-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-gray-900">News: {newsSymbol}</h3>
-            <button onClick={() => setNewsSymbol(null)} className="text-gray-400 hover:text-gray-600 text-sm">Close</button>
-          </div>
-          {newsLoading ? (
-            <p className="text-sm text-gray-400">Loading...</p>
-          ) : newsArticles.length === 0 ? (
-            <p className="text-sm text-gray-400">No recent news for {newsSymbol}</p>
-          ) : (
-            <div className="space-y-2 max-h-64 overflow-y-auto">
-              {newsArticles.map((article, i) => (
-                <div key={i} className="flex items-start gap-3 py-1.5 border-b border-gray-100 last:border-0">
-                  <span className="text-xs text-gray-400 whitespace-nowrap mt-0.5 w-20">
-                    {(() => {
-                      const d = new Date(article.publishedAt);
-                      const now = new Date();
-                      const diffH = (now.getTime() - d.getTime()) / 3600000;
-                      if (diffH < 24) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-                      return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-                    })()}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    {article.url ? (
-                      <a href={article.url} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:underline leading-tight">
-                        {article.title}
-                      </a>
-                    ) : (
-                      <span className="text-sm text-gray-700 leading-tight">{article.title}</span>
-                    )}
-                    {article.snippet && (
-                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{article.snippet}</p>
-                    )}
-                  </div>
-                  {article.source && (
-                    <span className="text-xs text-gray-400 whitespace-nowrap">{article.source}</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Chart Modal */}
       {chartSymbol && (

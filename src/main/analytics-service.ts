@@ -129,6 +129,123 @@ export class AnalyticsService {
     return results.sort((a, b) => b.weight - a.weight);
   }
 
+  // --- Correlation & Concentration Analysis (Phase 10.1) ---
+
+  getCorrelationMatrix(days: number = 90): {
+    symbols: string[];
+    matrix: number[][];
+    highCorrelations: Array<{ symbolA: string; symbolB: string; correlation: number }>;
+  } {
+    const positionWeights = this.db.getPositionWeights();
+    if (positionWeights.length < 2) return { symbols: [], matrix: [], highCorrelations: [] };
+
+    // Get returns for each symbol
+    const symbolReturns = new Map<string, Array<{ date: string; ret: number }>>();
+    const symbols: string[] = [];
+
+    for (const pos of positionWeights) {
+      const prices = this.db.getPriceHistoryBySymbol(pos.symbol, days + 1);
+      if (prices.length < 10) continue;
+      const returns = this.computeDailyReturns(
+        prices.map(p => ({ date: p.date, value: p.closePrice }))
+      );
+      if (returns.length < 10) continue;
+      symbolReturns.set(pos.symbol, returns);
+      symbols.push(pos.symbol);
+    }
+
+    const n = symbols.length;
+    const matrix: number[][] = Array.from({ length: n }, () => Array(n).fill(0));
+    const highCorrelations: Array<{ symbolA: string; symbolB: string; correlation: number }> = [];
+
+    for (let i = 0; i < n; i++) {
+      matrix[i][i] = 1.0;
+      for (let j = i + 1; j < n; j++) {
+        const retA = symbolReturns.get(symbols[i])!;
+        const retB = symbolReturns.get(symbols[j])!;
+        const { aligned, alignedBenchmark } = this.alignReturns(retA, retB);
+        if (aligned.length < 10) continue;
+        const corr = this.computeCorrelation(
+          aligned.map(r => r.ret),
+          alignedBenchmark.map(r => r.ret)
+        );
+        matrix[i][j] = corr;
+        matrix[j][i] = corr;
+        if (Math.abs(corr) >= 0.7) {
+          highCorrelations.push({ symbolA: symbols[i], symbolB: symbols[j], correlation: corr });
+        }
+      }
+    }
+
+    highCorrelations.sort((a, b) => Math.abs(b.correlation) - Math.abs(a.correlation));
+    return { symbols, matrix, highCorrelations };
+  }
+
+  getConcentrationAnalysis(): {
+    sectorConcentration: Array<{ sector: string; weight: number; symbols: string[] }>;
+    tierConcentration: Array<{ tier: string; weight: number; count: number }>;
+    top5Weight: number;
+    herfindahlIndex: number;
+    effectivePositions: number;
+  } {
+    const positionWeights = this.db.getPositionWeights();
+    const securities = this.db.listSecurities();
+    const intents = this.db.listPositionIntents();
+
+    const secMap = new Map(securities.map(s => [s.symbol, s]));
+    const intentMap = new Map(intents.map(i => [i.positionId, i]));
+
+    // Get position IDs for intent lookup
+    const positions = this.db.listPositionsWithMTM();
+    const posSymbolToIntent = new Map<string, string>();
+    for (const p of positions) {
+      const sec = securities.find(s => s.id === p.securityId);
+      if (sec) {
+        const intent = intentMap.get(p.id);
+        if (intent?.tier) posSymbolToIntent.set(sec.symbol, intent.tier);
+      }
+    }
+
+    // Sector concentration
+    const sectorMap = new Map<string, { weight: number; symbols: string[] }>();
+    for (const pw of positionWeights) {
+      const sec = secMap.get(pw.symbol);
+      const sector = sec?.sector || 'Unknown';
+      const existing = sectorMap.get(sector) || { weight: 0, symbols: [] };
+      existing.weight += pw.weight;
+      existing.symbols.push(pw.symbol);
+      sectorMap.set(sector, existing);
+    }
+    const sectorConcentration = Array.from(sectorMap.entries())
+      .map(([sector, data]) => ({ sector, weight: data.weight * 100, symbols: data.symbols }))
+      .sort((a, b) => b.weight - a.weight);
+
+    // Tier concentration
+    const tierMap = new Map<string, { weight: number; count: number }>();
+    for (const pw of positionWeights) {
+      const tier = posSymbolToIntent.get(pw.symbol) || 'Untagged';
+      const existing = tierMap.get(tier) || { weight: 0, count: 0 };
+      existing.weight += pw.weight;
+      existing.count++;
+      tierMap.set(tier, existing);
+    }
+    const tierConcentration = Array.from(tierMap.entries())
+      .map(([tier, data]) => ({ tier, weight: data.weight * 100, count: data.count }))
+      .sort((a, b) => b.weight - a.weight);
+
+    // Top 5 weight
+    const sortedWeights = positionWeights.map(p => p.weight).sort((a, b) => b - a);
+    const top5Weight = sortedWeights.slice(0, 5).reduce((s, w) => s + w, 0) * 100;
+
+    // Herfindahl Index (sum of squared weights) — lower = more diversified
+    const hhi = positionWeights.reduce((s, p) => s + (p.weight * 100) ** 2, 0);
+
+    // Effective number of positions (1/HHI normalized)
+    const effectivePositions = hhi > 0 ? 10000 / hhi : 0;
+
+    return { sectorConcentration, tierConcentration, top5Weight, herfindahlIndex: hhi, effectivePositions };
+  }
+
   // --- Internal computation methods ---
 
   private computeDailyReturns(series: Array<{ date: string; value: number }>): Array<{ date: string; ret: number }> {

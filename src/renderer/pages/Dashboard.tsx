@@ -473,6 +473,95 @@ export default function Dashboard() {
             )}
           </div>
 
+          {/* Allocation Drift — current vs target */}
+          {(() => {
+            // Compute per-symbol allocation using streaming prices or fallback
+            const totalPortfolioValue = summary?.totalValue || 0;
+            if (totalPortfolioValue <= 0) return null;
+
+            // Aggregate positions by symbol
+            const symbolAlloc = new Map<string, { symbol: string; currentPct: number; targetPct: number | null; tier: string; marketValue: number }>();
+            const seen = new Set<string>();
+            for (const pos of positions) {
+              const security = securityMap.get(pos.securityId);
+              if (!security || security.type === 'cash' || security.type === 'option') continue;
+              if (seen.has(security.symbol)) continue;
+              seen.add(security.symbol);
+              const intent = intents.get(pos.id);
+              const quote = streamingQuotes.get(security.symbol);
+              const price = quote?.last || (pos.marketValue && pos.quantity > 0 ? pos.marketValue / pos.quantity : 0);
+              const mv = price * pos.quantity;
+              const currentPct = (mv / totalPortfolioValue) * 100;
+              const targetPct = intent?.targetAllocationPct ?? null;
+              symbolAlloc.set(security.symbol, {
+                symbol: security.symbol,
+                currentPct,
+                targetPct,
+                tier: intent?.tier || 'Untagged',
+                marketValue: mv,
+              });
+            }
+
+            // Only show positions that have a target
+            const withTargets = Array.from(symbolAlloc.values()).filter(a => a.targetPct != null);
+            if (withTargets.length === 0) return null;
+
+            // Sort by absolute drift descending
+            withTargets.sort((a, b) => Math.abs((b.currentPct - (b.targetPct || 0))) - Math.abs((a.currentPct - (a.targetPct || 0))));
+
+            return (
+              <div className="card">
+                <h2 className="text-lg font-semibold text-gray-900 mb-3">Allocation Drift</h2>
+                <div className="space-y-2">
+                  {withTargets.map(a => {
+                    const drift = a.currentPct - (a.targetPct || 0);
+                    const absDrift = Math.abs(drift);
+                    const isOver = drift > 0;
+                    const driftDollars = (drift / 100) * totalPortfolioValue;
+                    const tierColor = TIER_COLORS[a.tier] || '#9ca3af';
+                    // Severity: >3% drift = red, >1% = amber, else green
+                    const severity = absDrift > 3 ? 'text-red-600' : absDrift > 1 ? 'text-amber-600' : 'text-gray-500';
+                    return (
+                      <div key={a.symbol} className="flex items-center gap-3 py-1.5 px-2 rounded hover:bg-gray-50">
+                        <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: tierColor }} title={a.tier} />
+                        <span className="text-sm font-medium w-14 text-gray-900">{a.symbol}</span>
+                        {/* Current vs Target bar */}
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 h-3 bg-gray-100 rounded-full relative overflow-hidden">
+                              {/* Target marker */}
+                              <div
+                                className="absolute top-0 h-full w-0.5 bg-gray-400 z-10"
+                                style={{ left: `${Math.min((a.targetPct || 0) / 30 * 100, 100)}%` }}
+                                title={`Target: ${(a.targetPct || 0).toFixed(1)}%`}
+                              />
+                              {/* Current fill */}
+                              <div
+                                className={`h-full rounded-full ${isOver ? 'bg-amber-400' : 'bg-blue-400'}`}
+                                style={{ width: `${Math.min(a.currentPct / 30 * 100, 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right w-32 flex-shrink-0">
+                          <span className="text-xs text-gray-500">{a.currentPct.toFixed(1)}%</span>
+                          <span className="text-xs text-gray-400 mx-1">/</span>
+                          <span className="text-xs text-gray-600 font-medium">{(a.targetPct || 0).toFixed(1)}%</span>
+                        </div>
+                        <span className={`text-xs font-medium w-24 text-right ${severity}`}>
+                          {isOver ? 'Over' : 'Under'} {absDrift.toFixed(1)}%
+                          <span className="block text-[10px] text-gray-400">
+                            {isOver ? '+' : ''}{formatCurrency(driftDollars)}
+                          </span>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Upcoming Earnings */}
           {earnings.length > 0 && (
             <div className="card">

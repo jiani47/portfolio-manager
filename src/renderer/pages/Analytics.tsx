@@ -65,6 +65,205 @@ function getTypeColor(type: Transaction['type']): string {
   }
 }
 
+function CorrelationConcentrationSection({ period: _period }: { period: number }) {
+  // Correlation needs a longer window than other analytics — 1Y minimum for statistical significance
+  const corrPeriod = 365;
+  const [corrData, setCorrData] = useState<{
+    symbols: string[];
+    matrix: number[][];
+    highCorrelations: Array<{ symbolA: string; symbolB: string; correlation: number }>;
+  } | null>(null);
+  const [concData, setConcData] = useState<{
+    sectorConcentration: Array<{ sector: string; weight: number; symbols: string[] }>;
+    tierConcentration: Array<{ tier: string; weight: number; count: number }>;
+    top5Weight: number;
+    herfindahlIndex: number;
+    effectivePositions: number;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [showHeatmap, setShowHeatmap] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([
+      window.electronAPI.getCorrelationMatrix(corrPeriod),
+      window.electronAPI.getConcentrationAnalysis(),
+    ]).then(([corr, conc]) => {
+      if (!cancelled) {
+        setCorrData(corr);
+        setConcData(conc);
+        setLoading(false);
+      }
+    }).catch(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [corrPeriod]);
+
+  if (loading) {
+    return <div className="card"><div className="text-center py-6 text-gray-400">Loading correlation & concentration...</div></div>;
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Concentration Metrics */}
+      {concData && (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="card">
+              <p className="stat-label">Top 5 Weight</p>
+              <p className={`stat-value ${concData.top5Weight > 60 ? 'text-red-600' : concData.top5Weight > 40 ? 'text-yellow-600' : 'text-gray-900'}`}>
+                {concData.top5Weight.toFixed(1)}%
+              </p>
+            </div>
+            <div className="card">
+              <p className="stat-label">Effective Positions</p>
+              <p className="stat-value">{concData.effectivePositions.toFixed(1)}</p>
+              <p className="text-xs text-gray-400 mt-1">1/HHI diversification</p>
+            </div>
+            <div className="card">
+              <p className="stat-label">HHI</p>
+              <p className={`stat-value ${concData.herfindahlIndex > 1500 ? 'text-red-600' : concData.herfindahlIndex > 1000 ? 'text-yellow-600' : 'text-green-600'}`}>
+                {concData.herfindahlIndex.toFixed(0)}
+              </p>
+              <p className="text-xs text-gray-400 mt-1">{concData.herfindahlIndex > 1500 ? 'concentrated' : concData.herfindahlIndex > 1000 ? 'moderate' : 'diversified'}</p>
+            </div>
+            <div className="card">
+              <p className="stat-label">Sectors</p>
+              <p className="stat-value">{concData.sectorConcentration.length}</p>
+            </div>
+          </div>
+
+          {/* Sector & Tier Concentration side by side */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="card">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">Sector Concentration</h3>
+              <div className="space-y-2">
+                {concData.sectorConcentration.map(s => (
+                  <div key={s.sector}>
+                    <div className="flex justify-between text-sm mb-0.5">
+                      <span className="text-gray-700">{s.sector}</span>
+                      <span className="font-medium text-gray-900">{s.weight.toFixed(1)}%</span>
+                    </div>
+                    <div className="w-full bg-gray-100 rounded-full h-2">
+                      <div
+                        className={`h-2 rounded-full ${s.weight > 30 ? 'bg-red-500' : s.weight > 20 ? 'bg-yellow-500' : 'bg-blue-500'}`}
+                        style={{ width: `${Math.min(s.weight, 100)}%` }}
+                      />
+                    </div>
+                    <p className="text-xs text-gray-400 mt-0.5">{s.symbols.join(', ')}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="card">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">Tier Concentration</h3>
+              <div className="space-y-2">
+                {concData.tierConcentration.map(t => (
+                  <div key={t.tier}>
+                    <div className="flex justify-between text-sm mb-0.5">
+                      <span className="text-gray-700">{t.tier} <span className="text-gray-400">({t.count})</span></span>
+                      <span className="font-medium text-gray-900">{t.weight.toFixed(1)}%</span>
+                    </div>
+                    <div className="w-full bg-gray-100 rounded-full h-2">
+                      <div
+                        className="h-2 rounded-full bg-indigo-500"
+                        style={{ width: `${Math.min(t.weight, 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* High Correlations */}
+      {corrData && corrData.highCorrelations.length > 0 && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-900">High Correlations (|r| &ge; 0.7)</h3>
+            {corrData.symbols.length > 0 && (
+              <button
+                onClick={() => setShowHeatmap(!showHeatmap)}
+                className="text-xs text-blue-600 hover:text-blue-700"
+              >
+                {showHeatmap ? 'Hide heatmap' : 'Show heatmap'}
+              </button>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            {corrData.highCorrelations.map((hc, i) => {
+              const abs = Math.abs(hc.correlation);
+              return (
+                <div key={i} className="flex items-center gap-3">
+                  <span className="text-sm font-medium text-gray-900 w-28">{hc.symbolA} / {hc.symbolB}</span>
+                  <div className="flex-1 bg-gray-100 rounded-full h-2">
+                    <div
+                      className={`h-2 rounded-full ${abs >= 0.9 ? 'bg-red-500' : abs >= 0.8 ? 'bg-orange-500' : 'bg-yellow-500'}`}
+                      style={{ width: `${abs * 100}%` }}
+                    />
+                  </div>
+                  <span className={`text-sm font-medium w-12 text-right ${abs >= 0.9 ? 'text-red-600' : abs >= 0.8 ? 'text-orange-600' : 'text-yellow-600'}`}>
+                    {hc.correlation.toFixed(2)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Correlation Heatmap */}
+      {showHeatmap && corrData && corrData.symbols.length > 0 && (
+        <div className="card overflow-x-auto">
+          <h3 className="text-sm font-semibold text-gray-900 mb-3">Correlation Matrix (1Y)</h3>
+          <table className="text-xs">
+            <thead>
+              <tr>
+                <th className="p-1"></th>
+                {corrData.symbols.map(s => (
+                  <th key={s} className="p-1 text-gray-500 font-medium" style={{ writingMode: 'vertical-rl', textOrientation: 'mixed', maxHeight: '80px' }}>{s}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {corrData.symbols.map((rowSym, ri) => (
+                <tr key={rowSym}>
+                  <td className="p-1 font-medium text-gray-700 pr-2">{rowSym}</td>
+                  {corrData.symbols.map((_, ci) => {
+                    const val = corrData.matrix[ri][ci];
+                    const abs = Math.abs(val);
+                    let bg = 'bg-gray-50';
+                    if (ri === ci) bg = 'bg-gray-200';
+                    else if (abs >= 0.9) bg = val > 0 ? 'bg-red-300' : 'bg-blue-300';
+                    else if (abs >= 0.7) bg = val > 0 ? 'bg-red-200' : 'bg-blue-200';
+                    else if (abs >= 0.5) bg = val > 0 ? 'bg-red-100' : 'bg-blue-100';
+                    return (
+                      <td key={ci} className={`p-1 text-center ${bg}`} title={`${rowSym} / ${corrData.symbols[ci]}: ${val.toFixed(2)}`}>
+                        {ri !== ci ? val.toFixed(1) : ''}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* No correlations message */}
+      {corrData && corrData.highCorrelations.length === 0 && corrData.symbols.length > 0 && (
+        <div className="card">
+          <p className="text-sm text-gray-500 text-center py-2">No highly correlated pairs found (all |r| &lt; 0.7)</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Analytics() {
   const { analytics, positionBetas, loading, fetchAnalytics } = useAnalytics();
   const { transactions, loading: txLoading, fetchTransactions, createTransaction, deleteTransaction } = useTransactions();
@@ -281,6 +480,9 @@ export default function Analytics() {
                   </div>
                 </>
               )}
+
+              {/* Concentration & Correlation */}
+              <CorrelationConcentrationSection period={selectedPeriod} />
 
               {/* Position Beta Table */}
               {positionBetas.length > 0 && (

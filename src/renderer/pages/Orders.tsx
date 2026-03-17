@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useSchwab, useAccounts, usePreTradeCheck } from '../hooks/useApi';
-import type { SchwabOrderRequest, SchwabOrder } from '../../shared/types';
+import type { SchwabOrderRequest, SchwabOrder, DecisionMemory, EntryPlan } from '../../shared/types';
 
 type OrderFormData = {
   accountNumber: string;
@@ -64,6 +64,8 @@ export default function Orders() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const { checkResult, loading: checkLoading, evaluate, record, reset } = usePreTradeCheck();
   const [acknowledged, setAcknowledged] = useState<Set<string>>(new Set());
+  const [decisionMemory, setDecisionMemory] = useState<DecisionMemory | null>(null);
+  const [entryPlan, setEntryPlan] = useState<EntryPlan | null>(null);
 
   const schwabAccounts = accounts.filter(a => a.broker === 'Schwab');
 
@@ -95,13 +97,21 @@ export default function Orders() {
   const handleReview = async () => {
     if (!isFormValid()) return;
     setAcknowledged(new Set());
-    await evaluate({
-      symbol: form.symbol.toUpperCase().trim(),
-      instruction: form.instruction,
-      quantity: Number(form.quantity),
-      accountNumber: form.accountNumber,
-      price: showsPrice ? Number(form.price) : showsStopPrice ? Number(form.stopPrice) : undefined,
-    });
+    const sym = form.symbol.toUpperCase().trim();
+    // Fetch pre-trade checks, decision memory, and entry plan in parallel
+    const [, dm, ep] = await Promise.all([
+      evaluate({
+        symbol: sym,
+        instruction: form.instruction,
+        quantity: Number(form.quantity),
+        accountNumber: form.accountNumber,
+        price: showsPrice ? Number(form.price) : showsStopPrice ? Number(form.stopPrice) : undefined,
+      }),
+      window.electronAPI.getDecisionMemory(sym).catch(() => null),
+      window.electronAPI.getEntryPlanBySymbol(sym).catch(() => null),
+    ]);
+    setDecisionMemory(dm);
+    setEntryPlan(ep);
   };
 
   const handleChecklistProceed = async () => {
@@ -367,52 +377,124 @@ export default function Orders() {
       {/* Pre-Trade Checklist */}
       {checkResult && !showConfirm && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg p-6 mx-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl p-6 mx-4 max-h-[90vh] flex flex-col">
             <h2 className="text-lg font-semibold text-gray-900 mb-1">Pre-Trade Checklist</h2>
             <p className="text-sm text-gray-500 mb-4">
               {checkResult.book} book — {form.instruction} {form.quantity} {form.symbol.toUpperCase()}
             </p>
 
-            <div className="space-y-2 mb-6">
-              {checkResult.items.map(item => (
-                <div
-                  key={item.id}
-                  className={`flex items-start gap-3 p-3 rounded-lg border ${
-                    item.status === 'pass' ? 'bg-green-50 border-green-200' :
-                    item.status === 'warn' ? 'bg-amber-50 border-amber-200' :
-                    'bg-red-50 border-red-200'
-                  }`}
-                >
-                  {item.status === 'pass' ? (
-                    <span className="text-green-600 mt-0.5 flex-shrink-0">&#10003;</span>
-                  ) : (
-                    <input
-                      type="checkbox"
-                      checked={acknowledged.has(item.id)}
-                      onChange={() => toggleAck(item.id)}
-                      className="mt-1 flex-shrink-0 rounded border-gray-300"
-                    />
+            <div className="overflow-y-auto flex-1 space-y-4 mb-4">
+              {/* Decision Memory Context */}
+              {decisionMemory && (decisionMemory.postMortems.length > 0 || decisionMemory.decisionLogs.length > 0) && (
+                <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                  <h3 className="text-xs font-semibold text-purple-800 uppercase tracking-wide mb-2">Decision Memory</h3>
+                  {decisionMemory.postMortems.length > 0 && (
+                    <div className="mb-2">
+                      <p className="text-xs font-medium text-purple-700">Last Post-Mortem Lesson:</p>
+                      <p className="text-xs text-purple-600 mt-0.5">
+                        {decisionMemory.postMortems[0].lesson}
+                        <span className="text-purple-400 ml-1">
+                          ({decisionMemory.postMortems[0].closeDate} — {decisionMemory.postMortems[0].outcome})
+                        </span>
+                      </p>
+                    </div>
                   )}
-                  <div className="flex-1 min-w-0">
-                    <p className={`text-sm font-medium ${
-                      item.status === 'pass' ? 'text-green-800' :
-                      item.status === 'warn' ? 'text-amber-800' :
-                      'text-red-800'
-                    }`}>
-                      {item.label}
+                  {decisionMemory.decisionLogs.length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-purple-700">Last Decision:</p>
+                      <p className="text-xs text-purple-600 mt-0.5">
+                        {decisionMemory.decisionLogs[0].decision}
+                        <span className="text-purple-400 ml-1">
+                          ({decisionMemory.decisionLogs[0].date} — {decisionMemory.decisionLogs[0].type})
+                        </span>
+                      </p>
+                    </div>
+                  )}
+                  {decisionMemory.pastTrades.length > 0 && (
+                    <p className="text-xs text-purple-400 mt-2">
+                      {decisionMemory.pastTrades.length} past trade{decisionMemory.pastTrades.length !== 1 ? 's' : ''} —
+                      {' '}{decisionMemory.pastTrades.filter(t => t.isWin).length}W / {decisionMemory.pastTrades.filter(t => !t.isWin).length}L
                     </p>
-                    {item.detail && (
-                      <p className="text-xs text-gray-500 mt-0.5">{item.detail}</p>
+                  )}
+                </div>
+              )}
+
+              {/* Entry Plan Context */}
+              {entryPlan && entryPlan.status === 'active' && entryPlan.tranches && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                  <h3 className="text-xs font-semibold text-blue-800 uppercase tracking-wide mb-2">
+                    Active Entry Plan
+                    {entryPlan.targetAllocationPct != null && (
+                      <span className="font-normal ml-1">— target {entryPlan.targetAllocationPct}%</span>
                     )}
-                    {item.type === 'manual' && item.status !== 'pass' && (
-                      <p className="text-xs text-gray-400 mt-0.5 italic">Acknowledge to proceed</p>
-                    )}
+                  </h3>
+                  <div className="space-y-1">
+                    {entryPlan.tranches.map(t => (
+                      <div key={t.id} className="flex items-center gap-2 text-xs">
+                        <span className={`w-2 h-2 rounded-full ${
+                          t.status === 'filled' ? 'bg-green-500' :
+                          t.status === 'pending' ? 'bg-blue-500' : 'bg-gray-400'
+                        }`} />
+                        <span className={`${t.status === 'filled' ? 'text-green-700' : 'text-blue-700'}`}>
+                          T{t.trancheNumber}: {t.shares} shares @ ${t.triggerPrice.toFixed(2)}
+                        </span>
+                        {t.status === 'filled' && t.filledPrice && (
+                          <span className="text-green-500">filled @ ${t.filledPrice.toFixed(2)}</span>
+                        )}
+                        {t.notes && <span className="text-blue-400">— {t.notes}</span>}
+                      </div>
+                    ))}
                   </div>
                 </div>
-              ))}
+              )}
+
+              {/* Check Items — sorted: fail first, then warn, then pass */}
+              <div className="space-y-2">
+                {[...checkResult.items]
+                  .sort((a, b) => {
+                    const order = { fail: 0, warn: 1, pass: 2 };
+                    return order[a.status] - order[b.status];
+                  })
+                  .map(item => (
+                  <div
+                    key={item.id}
+                    className={`flex items-start gap-3 p-3 rounded-lg border ${
+                      item.status === 'pass' ? 'bg-green-50 border-green-200' :
+                      item.status === 'warn' ? 'bg-amber-50 border-amber-200' :
+                      'bg-red-50 border-red-200'
+                    }`}
+                  >
+                    {item.status === 'pass' ? (
+                      <span className="text-green-600 mt-0.5 flex-shrink-0">&#10003;</span>
+                    ) : (
+                      <input
+                        type="checkbox"
+                        checked={acknowledged.has(item.id)}
+                        onChange={() => toggleAck(item.id)}
+                        className="mt-1 flex-shrink-0 rounded border-gray-300"
+                      />
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm font-medium ${
+                        item.status === 'pass' ? 'text-green-800' :
+                        item.status === 'warn' ? 'text-amber-800' :
+                        'text-red-800'
+                      }`}>
+                        {item.label}
+                      </p>
+                      {item.detail && (
+                        <p className="text-xs text-gray-500 mt-0.5">{item.detail}</p>
+                      )}
+                      {item.type === 'manual' && item.status !== 'pass' && (
+                        <p className="text-xs text-gray-400 mt-0.5 italic">Acknowledge to proceed</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
 
-            <div className="flex justify-end gap-3">
+            <div className="flex justify-end gap-3 pt-3 border-t border-gray-200">
               <button
                 onClick={handleChecklistCancel}
                 className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50"
