@@ -2528,8 +2528,27 @@ if days_arg.upper() == "YTD":
 else:
     days = int(days_arg)
 
-# Excluded symbols (non-core)
+# Excluded symbols (non-core / non-investing)
 EXCLUDED = {'SGOV', 'USO', 'AMD', 'FCNTX', 'SNOW'}
+
+# Starter tier symbols — shown separately, not benchmarked against QQQ
+# Core (A) + Growth (B) are the benchmarkable positions
+STARTER_SYMBOLS = set()
+for row in db.execute("""
+    SELECT DISTINCT s.symbol FROM position_intents pi
+    JOIN positions p ON pi.position_id = p.id
+    JOIN securities s ON p.security_id = s.id
+    WHERE pi.tier = 'Starter'
+""").fetchall():
+    STARTER_SYMBOLS.add(row[0])
+# Also treat Exit tier as excluded
+for row in db.execute("""
+    SELECT DISTINCT s.symbol FROM position_intents pi
+    JOIN positions p ON pi.position_id = p.id
+    JOIN securities s ON p.security_id = s.id
+    WHERE pi.tier = 'Exit'
+""").fetchall():
+    EXCLUDED.add(row[0])
 
 # Look up QQQ and SPY security IDs
 qqq_row = db.execute("SELECT id FROM securities WHERE symbol = 'QQQ'").fetchone()
@@ -2585,7 +2604,8 @@ positions = db.execute("""
 """).fetchall()
 
 # Filter excluded and compute market values using latest price
-pos_data = []
+pos_data = []       # Core + Growth (benchmarked vs QQQ)
+starter_data = []   # Starter tier (shown separately, not benchmarked)
 for sym, sec_id, sector, qty, cost in positions:
     if sym in EXCLUDED or qty <= 0:
         continue
@@ -2596,10 +2616,14 @@ for sym, sec_id, sector, qty, cost in positions:
     if not latest_price or latest_price[0] <= 0:
         continue
     mv = qty * latest_price[0]
-    pos_data.append({
+    entry = {
         'symbol': sym, 'sec_id': sec_id, 'sector': sector or 'Other',
         'qty': qty, 'mv': mv
-    })
+    }
+    if sym in STARTER_SYMBOLS:
+        starter_data.append(entry)
+    else:
+        pos_data.append(entry)
 
 total_mv = sum(p['mv'] for p in pos_data)
 if total_mv <= 0:
@@ -2762,7 +2786,7 @@ period_label = "YTD" if days_arg.upper() == "YTD" else f"{days}-day"
 W = 55
 print()
 print("=" * W)
-title = f"  FACTOR ATTRIBUTION vs QQQ — {period_label}"
+title = f"  FACTOR ATTRIBUTION vs QQQ — {period_label} (Core + Growth only)"
 print(title)
 print("=" * W)
 print()
@@ -2821,6 +2845,35 @@ if high_beta:
     high_beta.sort(key=lambda x: -x['beta_qqq'])
     parts = [f"  {p['symbol']} β={p['beta_qqq']:.2f}" for p in high_beta]
     print("  ".join(parts))
+    print()
+
+# Starter positions (not benchmarked — conviction experiments)
+if starter_data:
+    # Compute returns for starters
+    for p in starter_data:
+        prices = get_prices(p['sec_id'], days)
+        if len(prices) < 3:
+            p['period_return'] = 0
+            continue
+        p['period_return'] = (prices[-1][1] - prices[0][1]) / prices[0][1] if prices[0][1] > 0 else 0
+
+    starter_mv = sum(p['mv'] for p in starter_data)
+    starter_ret = sum(p['mv'] * p['period_return'] for p in starter_data) / starter_mv if starter_mv > 0 else 0
+
+    print("=" * W)
+    print("  STARTER POSITIONS (not benchmarked)")
+    print("=" * W)
+    print()
+    all_eq_mv = total_mv + starter_mv
+    ds = chr(36)  # dollar sign (avoid bash interpolation)
+    print(f"  Starter MV: {ds}{starter_mv:>10,.0f}  ({starter_mv/all_eq_mv*100:.0f}% of equity)")
+    print(f"  Core+Growth MV: {ds}{total_mv:>7,.0f}  ({total_mv/all_eq_mv*100:.0f}% of equity)")
+    print(f"  Starter return: {starter_ret*100:>+.2f}%")
+    print()
+    print(f"  {'Symbol':<7} {'MV':>10}  {'Return':>7}")
+    starter_data.sort(key=lambda x: x['period_return'])
+    for p in starter_data:
+        print(f"  {p['symbol']:<7} {ds}{p['mv']:>9,.0f}  {p['period_return']*100:>+.1f}%")
     print()
 
 db.close()
@@ -6249,6 +6302,125 @@ PYEOF
     fi
     ;;
 
+  scorecard)
+    SYMBOL=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    if [ -z "$SYMBOL" ]; then
+      echo "Usage: pm-cli.sh scorecard <symbol>"
+      exit 1
+    fi
+    PROJ_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+    THESIS_PATH="$PROJ_ROOT/docs/positions/$SYMBOL/thesis.md"
+    if [ ! -f "$THESIS_PATH" ]; then
+      echo "ERROR: No thesis doc found at $THESIS_PATH"
+      exit 1
+    fi
+
+    python3 <<PYEOF
+import re, sys
+
+thesis_path = "$THESIS_PATH"
+symbol = "$SYMBOL"
+
+with open(thesis_path, "r") as f:
+    content = f.read()
+
+# Extract header fields
+tier_match = re.search(r'\*\*Tier:\*\*\s*(.+)', content)
+tier = tier_match.group(1).strip() if tier_match else "Unknown"
+
+last_updated_match = re.search(r'\*\*Last Updated:\*\*\s*(.+)', content)
+last_updated = last_updated_match.group(1).strip() if last_updated_match else "—"
+
+# Parse a criteria table section
+def parse_table(section_header, text):
+    """Parse a markdown table under a ## header. Returns list of dicts."""
+    pattern = r'## ' + re.escape(section_header) + r'\s*\n\s*\n?\s*\|[^\n]+\|\s*\n\s*\|[-| ]+\|\s*\n((?:\s*\|[^\n]+\|\s*\n?)*)'
+    match = re.search(pattern, text)
+    if not match:
+        return []
+    rows = []
+    for line in match.group(1).strip().split('\n'):
+        cells = [c.strip() for c in line.strip().strip('|').split('|')]
+        if len(cells) >= 6:
+            rows.append({
+                'id': cells[0],
+                'criterion': cells[1],
+                'metric': cells[2],
+                'threshold': cells[3],
+                'status': cells[4].lower().strip(),
+                'last_checked': cells[5],
+            })
+    return rows
+
+bulls = parse_table("Bull Criteria", content)
+bears = parse_table("Bear Criteria", content)
+
+if not bulls and not bears:
+    print(f"=== {symbol} Scorecard ===")
+    print(f"  Tier: {tier}")
+    print(f"  Status: UNSCORED — no Bull/Bear criteria tables found")
+    print(f"  Add ## Bull Criteria and ## Bear Criteria tables to thesis.md")
+    sys.exit(0)
+
+# Count statuses
+bull_confirmed = sum(1 for b in bulls if b['status'] == 'confirmed')
+bull_pending = sum(1 for b in bulls if b['status'] == 'pending')
+bull_challenged = sum(1 for b in bulls if b['status'] == 'challenged')
+bear_triggered = sum(1 for b in bears if b['status'] == 'triggered')
+bear_watching = sum(1 for b in bears if b['status'] == 'watching')
+bear_not_triggered = sum(1 for b in bears if b['status'] == 'not_triggered')
+
+total_bulls = len(bulls)
+total_bears = len(bears)
+bull_pct = (bull_confirmed / total_bulls * 100) if total_bulls > 0 else 0
+
+# Suggested conviction
+if bull_pct > 75 and bear_triggered == 0:
+    suggested = "A"
+elif bull_pct > 50 and bear_triggered <= 1:
+    suggested = "B"
+elif bull_pct >= 25 and bear_triggered <= 1:
+    suggested = "C"
+else:
+    suggested = "D"
+
+# Display
+print(f"=== {symbol} Scorecard ===")
+print(f"  Tier: {tier}")
+print(f"  Last Updated: {last_updated}")
+print()
+
+# Bull criteria
+print(f"  Bull Criteria ({bull_confirmed}/{total_bulls} confirmed)")
+print(f"  {'─' * 70}")
+for b in bulls:
+    status_icon = {'confirmed': '✓', 'pending': '?', 'challenged': '✗'}.get(b['status'], ' ')
+    status_color = {'confirmed': 'confirmed', 'pending': 'pending', 'challenged': 'CHALLENGED'}.get(b['status'], b['status'])
+    print(f"  {status_icon} {b['id']}  {b['criterion']:<30s} {b['metric']:<25s} {status_color:<12s} {b['last_checked']}")
+print()
+
+# Bear criteria
+bear_label = f"{bear_triggered}/{total_bears} triggered"
+if bear_triggered > 0:
+    bear_label += " ⚠" * bear_triggered
+print(f"  Bear Criteria ({bear_label})")
+print(f"  {'─' * 70}")
+for b in bears:
+    status_icon = {'triggered': '⚠', 'watching': '◉', 'not_triggered': '·'}.get(b['status'], ' ')
+    status_display = {'triggered': 'TRIGGERED', 'watching': 'watching', 'not_triggered': 'clear'}.get(b['status'], b['status'])
+    print(f"  {status_icon} {b['id']}  {b['criterion']:<30s} {b['metric']:<25s} {status_display:<12s} {b['last_checked']}")
+print()
+
+# Score summary
+print(f"  Score Summary")
+print(f"  {'─' * 40}")
+print(f"  Bull: {bull_confirmed} confirmed, {bull_pending} pending, {bull_challenged} challenged")
+print(f"  Bear: {bear_triggered} triggered, {bear_watching} watching, {bear_not_triggered} clear")
+print(f"  Bull %: {bull_pct:.0f}%")
+print(f"  Suggested conviction: {suggested}")
+PYEOF
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -6325,5 +6497,6 @@ PYEOF
     echo "  basket-status      - EMS summary: active baskets, triggered/submitted/pending counts"
     echo "  reconcile <csv>    - Import Schwab realized P&L CSV"
     echo "  broker-pl [symbol] - Broker P&L summary (or per-lot detail for symbol)"
+    echo "  scorecard <symbol> - Thesis scorecard: bull/bear criteria status and suggested conviction"
     ;;
 esac
