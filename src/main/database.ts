@@ -33,6 +33,7 @@ import {
   EntryPlanTranche,
   RebalanceBasket,
   Observation,
+  ThesisScoreChange,
 } from '../shared/types';
 
 export class Database {
@@ -741,6 +742,23 @@ export class Database {
     `);
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_observations_security ON observations(security_id)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_observations_date ON observations(observation_date)');
+
+    // Thesis score changes table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS thesis_score_changes (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        criteria_number TEXT NOT NULL,
+        old_status TEXT NOT NULL,
+        new_status TEXT NOT NULL,
+        reason TEXT,
+        changed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      )
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_score_security ON thesis_score_changes(security_id)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_score_date ON thesis_score_changes(changed_at)');
 
     // Sync watchlist monitors on startup
     this.syncWatchlistMonitors();
@@ -3967,6 +3985,74 @@ export class Database {
       note: r.note as string,
       source: (r.source as string | null) ?? null,
       thesisImpact: r.thesis_impact as string,
+      createdAt: r.created_at as string,
+    };
+  };
+
+  createThesisScoreChange(data: {
+    securityId: string;
+    criteriaNumber: string;
+    oldStatus: string;
+    newStatus: string;
+    reason?: string;
+    date?: string;
+  }): ThesisScoreChange {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const changedAt = data.date || new Date().toISOString().split('T')[0];
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO thesis_score_changes (id, security_id, criteria_number, old_status, new_status, reason, changed_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, data.securityId, data.criteriaNumber, data.oldStatus, data.newStatus, data.reason || null, changedAt, now);
+    return this.getThesisScoreChangeById(id)!;
+  }
+
+  getThesisScoreChangeById(id: string): ThesisScoreChange | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare(`
+      SELECT tsc.*, s.symbol FROM thesis_score_changes tsc
+      JOIN securities s ON tsc.security_id = s.id
+      WHERE tsc.id = ?
+    `).get(id);
+    if (!row) return null;
+    return this.mapRowToThesisScoreChange(row);
+  }
+
+  listThesisScoreChanges(opts?: { symbol?: string; limit?: number; days?: number }): ThesisScoreChange[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (opts?.symbol) {
+      conditions.push('s.symbol = ?');
+      params.push(opts.symbol.toUpperCase());
+    }
+    if (opts?.days) {
+      conditions.push("tsc.changed_at >= date('now', '-' || ? || ' days')");
+      params.push(opts.days);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const limit = opts?.limit || 20;
+    return this.db.prepare(`
+      SELECT tsc.*, s.symbol FROM thesis_score_changes tsc
+      JOIN securities s ON tsc.security_id = s.id
+      ${where}
+      ORDER BY tsc.changed_at DESC
+      LIMIT ?
+    `).all(...params, limit).map(this.mapRowToThesisScoreChange);
+  }
+
+  private mapRowToThesisScoreChange = (row: unknown): ThesisScoreChange => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      securityId: r.security_id as string,
+      symbol: r.symbol as string | undefined,
+      criteriaNumber: r.criteria_number as string,
+      oldStatus: r.old_status as string,
+      newStatus: r.new_status as string,
+      reason: r.reason as string | null,
+      changedAt: r.changed_at as string,
       createdAt: r.created_at as string,
     };
   };

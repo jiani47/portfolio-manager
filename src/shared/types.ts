@@ -1010,6 +1010,18 @@ export interface Observation {
   createdAt: string;
 }
 
+export interface ThesisScoreChange {
+  id: string;
+  securityId: string;
+  symbol?: string;
+  criteriaNumber: string;
+  oldStatus: string;
+  newStatus: string;
+  reason: string | null;
+  changedAt: string;
+  createdAt: string;
+}
+
 export interface TradeJournalEntry {
   symbol: string;
   sellDate: string;
