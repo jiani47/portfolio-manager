@@ -36,6 +36,7 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh intents                # List all position intents
 ./scripts/pm-cli.sh accounts               # List accounts with book designation
 ./scripts/pm-cli.sh summary                # Portfolio summary with tier coverage
+./scripts/pm-cli.sh drift                  # Allocation drift: current vs target per position
 ./scripts/pm-cli.sh set-intent <position_id> <tier> <thesis> <invalidation> [entry_style] [hold_period] [target_alloc_pct]
 ./scripts/pm-cli.sh set-book <account_id> <investing|trading>
 ./scripts/pm-cli.sh ritual-today           # Show today's ritual (or "not started")
@@ -58,6 +59,7 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh monitor-add-note <sym> <label> [date]  # Fundamental monitor (no price trigger)
 ./scripts/pm-cli.sh earnings [days]          # Upcoming earnings for portfolio (default 14 days)
 ./scripts/pm-cli.sh analytics [days]         # Portfolio analytics: beta, sharpe, drawdown (default 90)
+./scripts/pm-cli.sh correlations [days]      # Correlation matrix & concentration analysis (default 365)
 ./scripts/pm-cli.sh backfill [symbol]        # Backfill 3yr price history from Schwab (all if no arg)
 ./scripts/pm-cli.sh snapshot              # Take EOD portfolio snapshot (one per day)
 ./scripts/pm-cli.sh snapshot-history [n]  # Portfolio totals for last n days (default 30)
@@ -85,6 +87,12 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh plan-cancel <symbol>  # Cancel active entry plan for symbol
 ./scripts/pm-cli.sh reconcile <csv_path>  # Import Schwab realized P&L CSV
 ./scripts/pm-cli.sh broker-pl [symbol]    # Broker P&L summary (or per-lot detail)
+./scripts/pm-cli.sh scorecard <symbol>   # Thesis scorecard: bull/bear criteria + conviction
+./scripts/pm-cli.sh scorecards           # Portfolio thesis health summary table
+./scripts/pm-cli.sh scorecard-update <sym> <criteria#> <status> "<reason>"  # Record score change
+./scripts/pm-cli.sh scorecard-history [symbol]  # Score change log
+./scripts/pm-cli.sh scorecard-add <sym> <bull|bear> "<label>" "<metric>" "<threshold>"  # Add criterion
+./scripts/pm-cli.sh scorecard-rm <sym> <criteria#>  # Remove criterion
 ```
 
 ## Daily PM Ritual
