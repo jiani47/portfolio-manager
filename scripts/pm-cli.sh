@@ -607,6 +607,30 @@ recall_symbol() {
     done
   fi
   echo ""
+
+  # Score changes
+  echo "── Score Changes ──"
+  sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS thesis_score_changes (id TEXT PRIMARY KEY, security_id TEXT NOT NULL, criteria_number TEXT NOT NULL, old_status TEXT NOT NULL, new_status TEXT NOT NULL, reason TEXT, changed_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), FOREIGN KEY (security_id) REFERENCES securities(id));" 2>/dev/null
+  local score_changes
+  score_changes=$(sqlite3 -separator '|' "$DB" "
+    SELECT tsc.changed_at, tsc.criteria_number,
+      tsc.old_status || ' -> ' || tsc.new_status as change,
+      COALESCE(tsc.reason, '') as reason
+    FROM thesis_score_changes tsc
+    JOIN securities s ON tsc.security_id = s.id
+    WHERE s.symbol = '$symbol'
+    ORDER BY tsc.changed_at DESC
+    LIMIT 10;
+  " 2>/dev/null)
+
+  if [ -z "$score_changes" ]; then
+    echo "  (no score changes)"
+  else
+    echo "$score_changes" | while IFS='|' read -r SCDATE SCCRIT SCCHANGE SCREASON; do
+      echo "  $SCDATE  $SCCRIT: $SCCHANGE" $([ -n "$SCREASON" ] && echo "— $SCREASON")
+    done
+  fi
+  echo ""
 }
 
 check_boundary() {
@@ -1394,6 +1418,23 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
     EMS_PENDING=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches ept JOIN entry_plans ep ON ept.plan_id = ep.id WHERE ept.status = 'pending' AND ep.status = 'active';" 2>/dev/null)
     if [ "$EMS_PENDING" -gt 0 ]; then
       echo "=== EMS: $EMS_PENDING orders pending trigger ==="
+      echo ""
+    fi
+
+    # === Thesis Score Changes (last 7 days) ===
+    sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS thesis_score_changes (id TEXT PRIMARY KEY, security_id TEXT NOT NULL, criteria_number TEXT NOT NULL, old_status TEXT NOT NULL, new_status TEXT NOT NULL, reason TEXT, changed_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), FOREIGN KEY (security_id) REFERENCES securities(id));" 2>/dev/null
+    SCORE_RECENT=$(sqlite3 "$DB" "
+      SELECT s.symbol, tsc.criteria_number, tsc.old_status, tsc.new_status, COALESCE(tsc.reason, '')
+      FROM thesis_score_changes tsc
+      JOIN securities s ON tsc.security_id = s.id
+      WHERE tsc.changed_at >= date('now', '-7 days')
+      ORDER BY tsc.changed_at DESC;
+    " 2>/dev/null)
+    if [ -n "$SCORE_RECENT" ]; then
+      echo "=== Thesis Score Changes (last 7 days) ==="
+      echo "$SCORE_RECENT" | while IFS='|' read -r SYM CRIT OLD NEW REASON; do
+        echo "  $SYM $CRIT: $OLD -> $NEW" $([ -n "$REASON" ] && echo "— $REASON")
+      done
       echo ""
     fi
 
