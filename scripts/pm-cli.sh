@@ -6290,6 +6290,114 @@ PYEOF
     echo "Tranche cancelled: $SYMBOL $SHARES shares"
     ;;
 
+  basket-fill)
+    TRANCHE_PREFIX="$2"
+    FILL_QTY="$3"
+    FILL_PRICE="$4"
+    if [ -z "$TRANCHE_PREFIX" ] || [ -z "$FILL_QTY" ] || [ -z "$FILL_PRICE" ]; then
+      echo "Usage: pm-cli.sh basket-fill <tranche_id_prefix> <qty> <price>"
+      echo "  Record a fill (partial or full) for a tranche."
+      echo "  Use 'basket-orders' or 'basket <name>' to find tranche IDs."
+      exit 1
+    fi
+
+    # Look up tranche by ID prefix
+    TRANCHE_ROW=$(sqlite3 -separator '|' "$DB" "
+      SELECT ept.id, s.symbol, ept.shares, COALESCE(ept.filled_qty, 0),
+        COALESCE(ept.filled_price, 0), ept.status, ept.brokerage_order_status
+      FROM entry_plan_tranches ept
+      JOIN entry_plans ep ON ept.plan_id = ep.id
+      JOIN securities s ON ep.security_id = s.id
+      WHERE ept.id LIKE '${TRANCHE_PREFIX}%';
+    ")
+
+    if [ -z "$TRANCHE_ROW" ]; then
+      echo "ERROR: No tranche found matching prefix '$TRANCHE_PREFIX'"
+      exit 1
+    fi
+
+    # Check for ambiguous match
+    MATCH_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches WHERE id LIKE '${TRANCHE_PREFIX}%';")
+    if [ "$MATCH_COUNT" -gt 1 ]; then
+      echo "ERROR: Prefix '$TRANCHE_PREFIX' matches $MATCH_COUNT tranches. Use a longer prefix."
+      exit 1
+    fi
+
+    # Parse fields
+    TRANCHE_ID=$(echo "$TRANCHE_ROW" | cut -d'|' -f1)
+    SYMBOL=$(echo "$TRANCHE_ROW" | cut -d'|' -f2)
+    TOTAL_SHARES=$(echo "$TRANCHE_ROW" | cut -d'|' -f3)
+    OLD_FILLED_QTY=$(echo "$TRANCHE_ROW" | cut -d'|' -f4)
+    OLD_FILLED_PRICE=$(echo "$TRANCHE_ROW" | cut -d'|' -f5)
+    TRANCHE_STATUS=$(echo "$TRANCHE_ROW" | cut -d'|' -f6)
+    BROKER_STATUS=$(echo "$TRANCHE_ROW" | cut -d'|' -f7)
+
+    # Validate fillable status
+    case "$TRANCHE_STATUS" in
+      triggered|confirmed|submitted) ;; # always fillable
+      pending)
+        if [ "$BROKER_STATUS" = "PARTIAL" ]; then
+          : # partial pending is fillable
+        else
+          echo "ERROR: Tranche status is 'pending' — must be triggered, confirmed, submitted, or partially filled."
+          exit 1
+        fi
+        ;;
+      filled)
+        echo "ERROR: Tranche is already fully filled."
+        exit 1
+        ;;
+      cancelled)
+        echo "ERROR: Tranche is cancelled."
+        exit 1
+        ;;
+      *)
+        echo "ERROR: Tranche status '$TRANCHE_STATUS' is not fillable."
+        exit 1
+        ;;
+    esac
+
+    # Calculate new filled qty and weighted average price
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    NEW_FILLED_QTY=$(echo "$OLD_FILLED_QTY + $FILL_QTY" | bc)
+
+    if [ "$(echo "$OLD_FILLED_QTY == 0" | bc)" -eq 1 ]; then
+      # First fill — price is just the fill price
+      NEW_FILLED_PRICE="$FILL_PRICE"
+    else
+      # Weighted average
+      NEW_FILLED_PRICE=$(echo "scale=4; ($OLD_FILLED_QTY * $OLD_FILLED_PRICE + $FILL_QTY * $FILL_PRICE) / $NEW_FILLED_QTY" | bc)
+    fi
+
+    # Determine new status
+    if [ "$(echo "$NEW_FILLED_QTY >= $TOTAL_SHARES" | bc)" -eq 1 ]; then
+      # Fully filled — cap at total shares
+      NEW_FILLED_QTY="$TOTAL_SHARES"
+      NEW_STATUS="filled"
+      NEW_BROKER_STATUS="FILLED"
+    else
+      # Partial fill
+      NEW_STATUS="$TRANCHE_STATUS"
+      if [ "$TRANCHE_STATUS" = "pending" ]; then
+        NEW_STATUS="triggered"
+      fi
+      NEW_BROKER_STATUS="PARTIAL"
+    fi
+
+    # Update tranche
+    sqlite3 "$DB" "
+      UPDATE entry_plan_tranches
+      SET filled_qty = $NEW_FILLED_QTY,
+          filled_price = $NEW_FILLED_PRICE,
+          filled_at = '$NOW',
+          status = '$NEW_STATUS',
+          brokerage_order_status = '$NEW_BROKER_STATUS'
+      WHERE id = '$TRANCHE_ID';
+    "
+
+    echo "$SYMBOL: filled $FILL_QTY @ \$$FILL_PRICE ($NEW_FILLED_QTY/$TOTAL_SHARES, $NEW_STATUS)"
+    ;;
+
   basket-fills)
     BASKET_NAME="$2"
     BASKET_FILTER=""
@@ -6931,6 +7039,7 @@ PYEOF
     echo "  basket-orders [name]- List triggered tranches awaiting confirmation"
     echo "  basket-confirm <id> [price] - Confirm triggered tranche and place Schwab order"
     echo "  basket-cancel <id> - Cancel a tranche (and its brokerage order if submitted)"
+    echo "  basket-fill <id> <qty> <price> - Record fill (partial or full) for a tranche"
     echo "  basket-fills [name]- Fill history (optionally filtered by basket)"
     echo "  basket-status      - EMS summary: active baskets, triggered/submitted/pending counts"
     echo "  reconcile <csv>    - Import Schwab realized P&L CSV"
