@@ -188,7 +188,13 @@ export default function EmsBaskets() {
                     </td>
                     <td className="px-4 py-3 text-right text-gray-600">{t.limitPrice ? `$${t.limitPrice.toFixed(2)}` : ''}</td>
                     <td className="px-4 py-3 text-right text-gray-600">{t.filledPrice ? `$${t.filledPrice.toFixed(2)}` : ''}</td>
-                    <td className="px-4 py-3 text-right">{t.filledQty || ''}</td>
+                    <td className="px-4 py-3 text-right">
+                      {t.filledQty ? (
+                        <span className={t.filledQty >= t.shares ? 'text-green-600 font-medium' : 'text-yellow-600'}>
+                          {t.filledQty}/{t.shares}
+                        </span>
+                      ) : ''}
+                    </td>
                     <td className="px-4 py-3 text-gray-500 text-xs">{t.brokerageOrderStatus || ''}</td>
                   </tr>
                 ))}
