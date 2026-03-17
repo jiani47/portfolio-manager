@@ -6538,11 +6538,14 @@ total_bears = len(bears)
 bull_pct = (bull_confirmed / total_bulls * 100) if total_bulls > 0 else 0
 
 # Suggested conviction
-if bull_pct > 75 and bear_triggered == 0:
+# Watching bears and challenged bulls count as half-signals
+effective_bear = bear_triggered + bear_watching * 0.5
+effective_bull_pct = ((bull_confirmed - bull_challenged * 0.5) / total_bulls * 100) if total_bulls > 0 else 0
+if effective_bull_pct > 75 and effective_bear == 0:
     suggested = "A"
-elif bull_pct > 50 and bear_triggered <= 1:
+elif effective_bull_pct > 50 and effective_bear <= 1:
     suggested = "B"
-elif bull_pct >= 25 and bear_triggered <= 1:
+elif effective_bull_pct >= 25 and effective_bear <= 1.5:
     suggested = "C"
 else:
     suggested = "D"
@@ -6650,16 +6653,19 @@ for symbol_dir in sorted(os.listdir(positions_dir)):
         continue
 
     bull_confirmed = sum(1 for b in bulls if b['status'] == 'confirmed')
+    bull_challenged = sum(1 for b in bulls if b['status'] == 'challenged')
     bear_triggered = sum(1 for b in bears if b['status'] == 'triggered')
+    bear_watching = sum(1 for b in bears if b['status'] == 'watching')
     total_bulls = len(bulls)
     total_bears = len(bears)
-    bull_pct = (bull_confirmed / total_bulls * 100) if total_bulls > 0 else 0
+    effective_bear = bear_triggered + bear_watching * 0.5
+    effective_bull_pct = ((bull_confirmed - bull_challenged * 0.5) / total_bulls * 100) if total_bulls > 0 else 0
 
-    if bull_pct > 75 and bear_triggered == 0:
+    if effective_bull_pct > 75 and effective_bear == 0:
         conv = "A"
-    elif bull_pct > 50 and bear_triggered <= 1:
+    elif effective_bull_pct > 50 and effective_bear <= 1:
         conv = "B"
-    elif bull_pct >= 25 and bear_triggered <= 1:
+    elif effective_bull_pct >= 25 and effective_bear <= 1.5:
         conv = "C"
     else:
         conv = "D"
