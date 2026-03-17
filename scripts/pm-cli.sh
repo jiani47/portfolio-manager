@@ -6539,6 +6539,285 @@ if unscored:
 PYEOF
     ;;
 
+  scorecard-update)
+    SYMBOL=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    CRITERIA_NUM="${3:-}"
+    NEW_STATUS="${4:-}"
+    REASON="${5:-}"
+    if [ -z "$SYMBOL" ] || [ -z "$CRITERIA_NUM" ] || [ -z "$NEW_STATUS" ]; then
+      echo "Usage: pm-cli.sh scorecard-update <symbol> <criteria#> <status> \"<reason>\""
+      echo "  status: confirmed, pending, challenged (bull) or triggered, watching, not_triggered (bear)"
+      exit 1
+    fi
+    PROJ_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+    THESIS_PATH="$PROJ_ROOT/docs/positions/$SYMBOL/thesis.md"
+    if [ ! -f "$THESIS_PATH" ]; then
+      echo "ERROR: No thesis doc found at $THESIS_PATH"
+      exit 1
+    fi
+
+    # Parse current status from thesis doc
+    OLD_STATUS=$(python3 -c "
+import sys
+criteria_num = '$CRITERIA_NUM'
+with open('$THESIS_PATH', 'r') as f:
+    for line in f:
+        if '|' in line:
+            cols = [c.strip() for c in line.split('|')[1:-1]]
+            if len(cols) >= 5 and cols[0].strip() == criteria_num:
+                print(cols[4].strip().lower())
+                sys.exit(0)
+print('NOT_FOUND')
+")
+
+    if [ "$OLD_STATUS" = "NOT_FOUND" ]; then
+      echo "ERROR: Criterion $CRITERIA_NUM not found in $THESIS_PATH"
+      exit 1
+    fi
+
+    NEW_STATUS_LOWER=$(echo "$NEW_STATUS" | tr '[:upper:]' '[:lower:]')
+    if [ "$OLD_STATUS" = "$NEW_STATUS_LOWER" ]; then
+      echo "$SYMBOL $CRITERIA_NUM: already $OLD_STATUS — no change"
+      exit 0
+    fi
+
+    # Look up security_id
+    SEC_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$SYMBOL' LIMIT 1;")
+    if [ -z "$SEC_ID" ]; then
+      echo "ERROR: Symbol $SYMBOL not found in securities table"
+      exit 1
+    fi
+
+    # Ensure thesis_score_changes table exists
+    sqlite3 "$DB" "
+      CREATE TABLE IF NOT EXISTS thesis_score_changes (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        criteria_number TEXT NOT NULL,
+        old_status TEXT NOT NULL,
+        new_status TEXT NOT NULL,
+        reason TEXT,
+        changed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_thesis_score_security ON thesis_score_changes(security_id);
+      CREATE INDEX IF NOT EXISTS idx_thesis_score_date ON thesis_score_changes(changed_at);
+    "
+
+    # Insert change record
+    CHANGE_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+    TODAY=$(date +%Y-%m-%d)
+    sqlite3 "$DB" "INSERT INTO thesis_score_changes (id, security_id, criteria_number, old_status, new_status, reason, changed_at) VALUES ('$CHANGE_ID', '$SEC_ID', '$CRITERIA_NUM', '$OLD_STATUS', '$NEW_STATUS_LOWER', '$(echo "$REASON" | sed "s/'/''/g")', '$TODAY');"
+
+    echo "$SYMBOL $CRITERIA_NUM: $OLD_STATUS → $NEW_STATUS_LOWER ($REASON)"
+    echo "Remember to update the thesis doc: docs/positions/$SYMBOL/thesis.md"
+    ;;
+
+  scorecard-history)
+    SYMBOL=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+
+    # Ensure thesis_score_changes table exists
+    sqlite3 "$DB" "
+      CREATE TABLE IF NOT EXISTS thesis_score_changes (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        criteria_number TEXT NOT NULL,
+        old_status TEXT NOT NULL,
+        new_status TEXT NOT NULL,
+        reason TEXT,
+        changed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_thesis_score_security ON thesis_score_changes(security_id);
+      CREATE INDEX IF NOT EXISTS idx_thesis_score_date ON thesis_score_changes(changed_at);
+    "
+
+    if [ -n "$SYMBOL" ]; then
+      echo "=== $SYMBOL Scorecard History ==="
+      echo ""
+      sqlite3 -separator '|' "$DB" "
+        SELECT tsc.changed_at, tsc.criteria_number, tsc.old_status, tsc.new_status, COALESCE(tsc.reason, '')
+        FROM thesis_score_changes tsc
+        JOIN securities s ON tsc.security_id = s.id
+        WHERE s.symbol = '$SYMBOL'
+        ORDER BY tsc.changed_at DESC
+        LIMIT 20;
+      " | while IFS='|' read -r dt crit old_s new_s reason; do
+        if [ -n "$reason" ]; then
+          printf "  %s  %-5s  %s → %s  (%s)\n" "$dt" "$crit" "$old_s" "$new_s" "$reason"
+        else
+          printf "  %s  %-5s  %s → %s\n" "$dt" "$crit" "$old_s" "$new_s"
+        fi
+      done
+    else
+      echo "=== All Scorecard Changes ==="
+      echo ""
+      sqlite3 -separator '|' "$DB" "
+        SELECT tsc.changed_at, s.symbol, tsc.criteria_number, tsc.old_status, tsc.new_status, COALESCE(tsc.reason, '')
+        FROM thesis_score_changes tsc
+        JOIN securities s ON tsc.security_id = s.id
+        ORDER BY tsc.changed_at DESC
+        LIMIT 30;
+      " | while IFS='|' read -r dt sym crit old_s new_s reason; do
+        if [ -n "$reason" ]; then
+          printf "  %s  %-6s %-5s  %s → %s  (%s)\n" "$dt" "$sym" "$crit" "$old_s" "$new_s" "$reason"
+        else
+          printf "  %s  %-6s %-5s  %s → %s\n" "$dt" "$sym" "$crit" "$old_s" "$new_s"
+        fi
+      done
+    fi
+
+    COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM thesis_score_changes tsc JOIN securities s ON tsc.security_id = s.id $([ -n "$SYMBOL" ] && echo "WHERE s.symbol = '$SYMBOL'");")
+    if [ "$COUNT" -eq 0 ]; then
+      echo "  (no changes recorded)"
+    fi
+    ;;
+
+  scorecard-add)
+    SYMBOL=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    TYPE="${3:-}"
+    LABEL="${4:-}"
+    METRIC="${5:-}"
+    THRESHOLD="${6:-}"
+    if [ -z "$SYMBOL" ] || [ -z "$TYPE" ] || [ -z "$LABEL" ] || [ -z "$METRIC" ] || [ -z "$THRESHOLD" ]; then
+      echo "Usage: pm-cli.sh scorecard-add <symbol> <bull|bear> \"<label>\" \"<metric>\" \"<threshold>\""
+      exit 1
+    fi
+    if [ "$TYPE" != "bull" ] && [ "$TYPE" != "bear" ]; then
+      echo "ERROR: type must be 'bull' or 'bear'"
+      exit 1
+    fi
+    PROJ_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+    THESIS_PATH="$PROJ_ROOT/docs/positions/$SYMBOL/thesis.md"
+    if [ ! -f "$THESIS_PATH" ]; then
+      echo "ERROR: No thesis doc found at $THESIS_PATH"
+      exit 1
+    fi
+
+    python3 <<PYEOF
+import re, sys
+from datetime import date
+
+thesis_path = "$THESIS_PATH"
+criteria_type = "$TYPE"
+label = """$LABEL"""
+metric = """$METRIC"""
+threshold = """$THRESHOLD"""
+today = date.today().isoformat()
+
+with open(thesis_path, "r") as f:
+    content = f.read()
+
+if criteria_type == "bull":
+    section_header = "Bull Criteria"
+    prefix = "B"
+    default_status = "pending"
+else:
+    section_header = "Bear Criteria"
+    prefix = None  # auto-detect from existing rows
+    default_status = "not_triggered"
+
+# Find the section
+pattern = r'(## ' + re.escape(section_header) + r'\s*\n\s*\n?\s*\|[^\n]+\|\s*\n\s*\|[-| ]+\|\s*\n)((?:\s*\|[^\n]+\|\s*\n?)*)'
+match = re.search(pattern, content)
+
+if not match:
+    print(f"ERROR: ## {section_header} table not found in thesis doc")
+    sys.exit(1)
+
+header_part = match.group(1)
+rows_part = match.group(2)
+
+# Find existing row IDs to determine next number and prefix
+existing_ids = []
+for line in rows_part.strip().split('\n'):
+    if '|' in line:
+        cells = [c.strip() for c in line.strip().strip('|').split('|')]
+        if cells:
+            existing_ids.append(cells[0])
+
+if existing_ids:
+    last_id = existing_ids[-1]
+    # Extract prefix letters and number
+    id_match = re.match(r'([A-Za-z]+)(\d+)', last_id)
+    if id_match:
+        prefix = id_match.group(1)
+        next_num = int(id_match.group(2)) + 1
+    else:
+        prefix = prefix or "X"
+        next_num = 1
+else:
+    if criteria_type == "bull":
+        prefix = "B"
+    else:
+        prefix = "X"
+    next_num = 1
+
+new_id = f"{prefix}{next_num}"
+new_row = f"| {new_id} | {label} | {metric} | {threshold} | {default_status} | {today} |\n"
+
+# Insert the new row at the end of the table rows
+insert_pos = match.start(2) + len(rows_part.rstrip('\n'))
+# If rows_part doesn't end with newline, add one
+if rows_part and not rows_part.rstrip('\n').endswith('\n'):
+    new_row = '\n' + new_row
+
+new_content = content[:insert_pos] + new_row + content[insert_pos + len(rows_part) - len(rows_part.rstrip('\n')):]
+
+with open(thesis_path, "w") as f:
+    f.write(new_content)
+
+print(f"Added {new_id} to {section_header}: {label} ({default_status})")
+PYEOF
+    ;;
+
+  scorecard-rm)
+    SYMBOL=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    CRITERIA_NUM="${3:-}"
+    if [ -z "$SYMBOL" ] || [ -z "$CRITERIA_NUM" ]; then
+      echo "Usage: pm-cli.sh scorecard-rm <symbol> <criteria#>"
+      exit 1
+    fi
+    PROJ_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+    THESIS_PATH="$PROJ_ROOT/docs/positions/$SYMBOL/thesis.md"
+    if [ ! -f "$THESIS_PATH" ]; then
+      echo "ERROR: No thesis doc found at $THESIS_PATH"
+      exit 1
+    fi
+
+    python3 <<PYEOF
+import sys
+
+thesis_path = "$THESIS_PATH"
+criteria_num = "$CRITERIA_NUM"
+
+with open(thesis_path, "r") as f:
+    lines = f.readlines()
+
+found = False
+new_lines = []
+for line in lines:
+    if '|' in line:
+        cells = [c.strip() for c in line.strip().strip('|').split('|')]
+        if len(cells) >= 1 and cells[0] == criteria_num:
+            found = True
+            # Extract label for confirmation message
+            label = cells[1] if len(cells) >= 2 else ""
+            print(f"Removed {criteria_num} from thesis: {label}")
+            continue
+    new_lines.append(line)
+
+if not found:
+    print(f"ERROR: Criterion {criteria_num} not found in {thesis_path}")
+    sys.exit(1)
+
+with open(thesis_path, "w") as f:
+    f.writelines(new_lines)
+PYEOF
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -6617,5 +6896,9 @@ PYEOF
     echo "  broker-pl [symbol] - Broker P&L summary (or per-lot detail for symbol)"
     echo "  scorecard <symbol> - Thesis scorecard: bull/bear criteria status and suggested conviction"
     echo "  scorecards         - Portfolio thesis health: all scorecards summary table"
+    echo "  scorecard-update   - Record score change: <symbol> <criteria#> <status> \"<reason>\""
+    echo "  scorecard-history [sym] - Score change log (last 20 per symbol, or 30 all)"
+    echo "  scorecard-add      - Add criterion: <symbol> <bull|bear> \"<label>\" \"<metric>\" \"<threshold>\""
+    echo "  scorecard-rm       - Remove criterion: <symbol> <criteria#>"
     ;;
 esac
