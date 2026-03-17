@@ -87,12 +87,25 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh plan-cancel <symbol>  # Cancel active entry plan for symbol
 ./scripts/pm-cli.sh reconcile <csv_path>  # Import Schwab realized P&L CSV
 ./scripts/pm-cli.sh broker-pl [symbol]    # Broker P&L summary (or per-lot detail)
+./scripts/pm-cli.sh observe <sym> "<note>" [supports|challenges|neutral]  # Log thesis observation
+./scripts/pm-cli.sh observations [symbol]  # List recent observations
+./scripts/pm-cli.sh attribution [30|90|YTD]  # Factor attribution vs QQQ (beta, sector, selection)
 ./scripts/pm-cli.sh scorecard <symbol>   # Thesis scorecard: bull/bear criteria + conviction
 ./scripts/pm-cli.sh scorecards           # Portfolio thesis health summary table
 ./scripts/pm-cli.sh scorecard-update <sym> <criteria#> <status> "<reason>"  # Record score change
 ./scripts/pm-cli.sh scorecard-history [symbol]  # Score change log
 ./scripts/pm-cli.sh scorecard-add <sym> <bull|bear> "<label>" "<metric>" "<threshold>"  # Add criterion
 ./scripts/pm-cli.sh scorecard-rm <sym> <criteria#>  # Remove criterion
+./scripts/pm-cli.sh basket-create <name>              # Create a rebalance basket
+./scripts/pm-cli.sh baskets                           # List all baskets
+./scripts/pm-cli.sh basket <name>                     # Show basket status + all tranches
+./scripts/pm-cli.sh basket-add <basket> <side> <sym> <shares> <tranches> <date|price> <values> [flags]  # Add to basket
+./scripts/pm-cli.sh basket-orders [basket]            # List triggered orders awaiting confirmation
+./scripts/pm-cli.sh basket-confirm <tranche_id> [limit]  # Confirm + submit order to Schwab
+./scripts/pm-cli.sh basket-cancel <tranche_id>        # Cancel tranche (+ brokerage order)
+./scripts/pm-cli.sh basket-fill <tranche_id> <qty> <price>  # Record fill (partial or full)
+./scripts/pm-cli.sh basket-fills [basket]             # Show fill history
+./scripts/pm-cli.sh basket-status                     # EMS summary: triggered/submitted/pending/filled counts
 ```
 
 ## Daily PM Ritual

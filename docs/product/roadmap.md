@@ -129,9 +129,12 @@ One-sentence journal stored in ritual record.
 - [x] Show nearest resistance level and distance
 - [x] CLI + TypeScript integration in pre-trade flow
 
-### 4.6 External Push (planned)
-- [ ] Slack, SMS, or webhook for remote alerting
-- [ ] Remote control capability
+### 4.6 External Push ✅
+- [x] ntfy.sh push notifications to iOS/Mac (topic: pm-alerts-061bd711, config in ~/.pm-cli.conf)
+- [x] Monitor triggers (urgent for action_required, high for informational)
+- [x] EMS date triggers + EOD reconcile results
+- [x] CLI refresh + Electron streaming + scheduler all wired
+- [ ] Remote control capability (future)
 
 ---
 
@@ -350,12 +353,14 @@ Automated trade journal from transaction + ritual + decision data:
 
 **Goal:** Quantitative analysis of portfolio construction. Identify concentration risks, factor exposures, and diversification opportunities.
 
-### 10.1 Correlation & Factor Analysis
+### 10.1 Correlation & Factor Analysis — ✅ Done
 
-- Correlation matrix across all holdings (from price_history)
-- Sector/industry concentration heatmap
-- Factor exposure decomposition (growth vs value, large vs small, US vs international)
-- Overlap detection: "GOOG and MSFT are 0.85 correlated — you're doubling up on big tech"
+- ✅ Correlation matrix across all holdings (from price_history)
+- ✅ Sector/industry concentration heatmap
+- ✅ Concentration metrics: HHI, effective positions, top 5 weight, tier breakdown
+- ✅ Overlap detection: high-correlation pairs flagged (|r| >= 0.7)
+- ✅ CLI parity: `pm-cli.sh correlations [days]`
+- Factor exposure decomposition (growth vs value, large vs small) — deferred to 10.2
 
 ### 10.2 Portfolio Optimization
 
@@ -440,12 +445,13 @@ Automated trade journal from transaction + ritual + decision data:
 
 **Goal:** Continuous portfolio risk monitoring with proactive alerts when risk parameters change.
 
-### 12.1 Risk Dashboard
+### 12.1 Risk Dashboard — ✅ Done
 
-- Real-time portfolio beta, volatility, Sharpe (partially done in analytics)
-- Sector concentration with limits and alerts
-- Geographic exposure breakdown
-- Single-name concentration risk (already partially in pre-trade checklist)
+- ✅ Real-time portfolio beta, volatility, Sharpe (in Analytics page)
+- ✅ Sector concentration with visual bars (in Analytics 10.1 section)
+- ✅ Tier concentration breakdown
+- ✅ Single-name concentration risk (HHI, effective positions, top 5 weight)
+- Geographic exposure breakdown — deferred (all positions are US-listed)
 
 ### 12.2 Risk Budgeting
 
@@ -466,7 +472,7 @@ Automated trade journal from transaction + ritual + decision data:
 
 **Goal:** Persist sizing decisions and entry plans so they survive across sessions and integrate into the trading workflow.
 
-### 13.1 Entry Plan System (planned)
+### 13.1 Entry Plan System ✅
 
 **Motivation:** ROKU analysis showed we can compute sizing + tranches but can't persist or track them. Decisions made in conversation are lost.
 
@@ -478,11 +484,63 @@ Automated trade journal from transaction + ritual + decision data:
 - Pre-trade check: if buying a symbol with an active plan, show the plan and warn if deviating
 - **App:** Entry plan modal in Holdings, plan status in pre-trade checklist modal
 
-### 13.2 Target Allocation Tracking (planned)
+### 13.2 Target Allocation Tracking ✅
 
-- Dashboard widget: current allocation vs target per position
-- Drift detection: "NVDA is 2.9% but target is 15%. Underweight by $85K."
-- Combine with `pm-cli.sh size` output in the app
+- [x] Dashboard widget: current allocation vs target per position with drift severity coloring
+- [x] Holdings weight column: shows current/target with drift indicator
+- [x] Holdings intent modal: target allocation % field
+- [x] `pm-cli.sh drift` — CLI allocation drift report with color-coded severity
+- [x] Drift detection: positions without targets flagged for awareness
+
+### 13.3 EMS — Execution Management System ✅
+
+**Motivation:** Rebalance plans were text documents with no execution tracking. Needed: baskets of orders with triggers, user confirmation, brokerage submission, fill tracking.
+
+- [x] `rebalance_baskets` table + extended `entry_plans`/`entry_plan_tranches` with EMS columns
+- [x] Date-triggered tranches (scheduled weekly buys) + price-triggered tranches (opportunistic)
+- [x] Tranche lifecycle: pending → triggered → confirmed → submitted → filled/expired/cancelled
+- [x] Scheduler: `ems-date-check` (10am ET) + `ems-eod-reconcile` (after close)
+- [x] CLI: basket-create, baskets, basket, basket-add, basket-orders, basket-confirm, basket-cancel, basket-fill, basket-fills, basket-status
+- [x] Briefing integration: triggered/submitted/filled orders shown in morning briefing
+- [x] Push notifications via ntfy.sh when triggers fire
+- [x] Read-only app page: EMS Baskets with progress bar + tranche table
+- [x] CLI-only execution by design (confirmation friction = feature)
+- [x] Design doc: `docs/plans/2026-03-16-ems-design.md`
+
+---
+
+## Phase 15: Research & Thesis Intelligence
+
+**Goal:** Structured research that builds conviction systematically, not by vibes.
+
+### 15.1 Observations Table ✅
+
+- [x] `observations` table: security_id, date, note, source, thesis_impact (supports/challenges/neutral)
+- [x] CLI: `pm-cli.sh observe <sym> "<note>" [impact]` + `observations [sym]`
+- [x] Integrated into `recall` output
+- [x] Logged during daily ritual when reading news
+
+### 15.2 Thesis Scoring ✅
+
+**Motivation:** Thesis docs had prose criteria that couldn't be tracked. Scoring needed to be mechanical, not vibes.
+
+- [x] Standardized template: Bull Criteria + Bear Criteria tables with measurable thresholds and status fields
+- [x] Scoring algorithm: confirmed bulls + triggered/watching bears → suggested conviction (A/B/C/D)
+- [x] `thesis_score_changes` table for audit trail
+- [x] CLI: scorecard, scorecards, scorecard-update, scorecard-history, scorecard-add, scorecard-rm
+- [x] Integrated into recall + morning briefing (score changes last 7 days)
+- [x] 19 positions scored (all active + exits)
+- [x] Thesis doc = source of truth, DB = change log only
+- [x] Post-earnings cadence: score reviewed when data changes, observations accumulate between
+- [x] Design doc: `docs/plans/2026-03-16-thesis-scoring-design.md`
+
+### 15.3 Factor Attribution ✅
+
+- [x] `pm-cli.sh attribution [30|90|YTD]` — Brinson-style decomposition vs QQQ
+- [x] Beta effect + sector allocation + stock selection breakdown
+- [x] Per-position return contribution table
+- [x] Core+Growth benchmarked vs QQQ, Starters shown separately (not benchmarked)
+- [x] High-beta names flagged
 
 ---
 
@@ -490,7 +548,7 @@ Automated trade journal from transaction + ritual + decision data:
 
 **Goal:** Every process discipline feature must be accessible in the Electron app. CLI-only governance = governance leak.
 
-### 14.1 Pre-Trade Modal Parity (planned)
+### 14.1 Pre-Trade Modal Parity ✅
 
 **The app's pre-trade checklist modal is missing checks that CLI has:**
 - [ ] Decision memory (last post-mortem lesson, last decision log entry)
@@ -503,7 +561,7 @@ Automated trade journal from transaction + ritual + decision data:
 - [ ] Trading/investing boundary violation
 - [ ] Thesis file hard gate
 
-### 14.2 Missing App Pages (planned)
+### 14.2 Missing App Pages ✅
 
 **CLI-only workflows that need app UI:**
 - [ ] **Post-Mortems page** — list, create, view post-mortems (DB: `post_mortems` table exists)
@@ -545,9 +603,10 @@ The following features are intentionally CLI-only with rationale:
 | **9.5** | ✅ Done | P&L reconciliation | Broker-authoritative P&L import |
 | **10.5** | Partial | Position sizing & lifecycle | Hold enforcement + churn detection done, target sizing planned |
 | **11.3** | ✅ Done | Mandatory earnings review | Catches thesis invalidation early |
-| **13.1** | **Next** | Entry plan system | Persist sizing + tranches, auto-create monitors |
-| **14.1** | **Next** | Pre-trade modal parity | Close governance gap — app must match CLI |
-| **14.2** | **Next** | Missing app pages | Post-mortems, earnings reviews, portfolio history, sizing |
+| **13.1** | ✅ Done | Entry plan system | Persist sizing + tranches, auto-create monitors |
+| **13.2** | ✅ Done | Target allocation tracking | Dashboard drift widget, Holdings weight indicator, CLI drift command |
+| **14.1** | ✅ Done | Pre-trade modal parity | Decision memory, entry plan, S/R context in app modal |
+| **14.2** | ✅ Done | Missing app pages | Post-mortems, earnings reviews, portfolio history, broker P&L |
 | **10** | Planned | Portfolio optimization & exposure | Quantitative portfolio construction |
 | **11** | Planned | Equity research engine | Structured thesis building and tracking |
 | **12** | Planned | Risk analysis & monitoring | Continuous risk awareness |
