@@ -6421,6 +6421,124 @@ print(f"  Suggested conviction: {suggested}")
 PYEOF
     ;;
 
+  scorecards)
+    PROJ_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+    POSITIONS_DIR="$PROJ_ROOT/docs/positions"
+
+    python3 <<PYEOF
+import re, os, sys
+
+positions_dir = "$POSITIONS_DIR"
+
+# Parse a criteria table section
+def parse_table(section_header, text):
+    pattern = r'## ' + re.escape(section_header) + r'\s*\n\s*\n?\s*\|[^\n]+\|\s*\n\s*\|[-| ]+\|\s*\n((?:\s*\|[^\n]+\|\s*\n?)*)'
+    match = re.search(pattern, text)
+    if not match:
+        return []
+    rows = []
+    for line in match.group(1).strip().split('\n'):
+        cells = [c.strip() for c in line.strip().strip('|').split('|')]
+        if len(cells) >= 6:
+            rows.append({
+                'id': cells[0],
+                'criterion': cells[1],
+                'status': cells[4].lower().strip(),
+            })
+    return rows
+
+tier_priority = {'Core': 0, 'Growth': 1, 'Starter': 2, 'Watchlist': 3, 'Exit': 4}
+
+def extract_tier_base(tier_str):
+    """Extract base tier name from string like 'Growth (B- conviction, lower end)'"""
+    for t in tier_priority:
+        if t.lower() in tier_str.lower():
+            return t
+    return tier_str.split('(')[0].strip() if '(' in tier_str else tier_str.strip()
+
+results = []
+unscored = []
+
+if not os.path.isdir(positions_dir):
+    print(f"ERROR: Positions directory not found at {positions_dir}")
+    sys.exit(1)
+
+for symbol_dir in sorted(os.listdir(positions_dir)):
+    thesis_path = os.path.join(positions_dir, symbol_dir, "thesis.md")
+    if not os.path.isfile(thesis_path):
+        continue
+
+    with open(thesis_path, "r") as f:
+        content = f.read()
+
+    # Extract fields
+    tier_match = re.search(r'\*\*Tier:\*\*\s*(.+)', content)
+    tier_raw = tier_match.group(1).strip() if tier_match else "Unknown"
+    tier_base = extract_tier_base(tier_raw)
+
+    last_updated_match = re.search(r'\*\*Last Updated:\*\*\s*(.+)', content)
+    last_updated = last_updated_match.group(1).strip() if last_updated_match else "—"
+
+    bulls = parse_table("Bull Criteria", content)
+    bears = parse_table("Bear Criteria", content)
+
+    if not bulls and not bears:
+        unscored.append((symbol_dir, tier_base))
+        continue
+
+    bull_confirmed = sum(1 for b in bulls if b['status'] == 'confirmed')
+    bear_triggered = sum(1 for b in bears if b['status'] == 'triggered')
+    total_bulls = len(bulls)
+    total_bears = len(bears)
+    bull_pct = (bull_confirmed / total_bulls * 100) if total_bulls > 0 else 0
+
+    if bull_pct > 75 and bear_triggered == 0:
+        conv = "A"
+    elif bull_pct > 50 and bear_triggered <= 1:
+        conv = "B"
+    elif bull_pct >= 25 and bear_triggered <= 1:
+        conv = "C"
+    else:
+        conv = "D"
+
+    bear_display = f"{bear_triggered}/{total_bears}"
+    if bear_triggered > 0:
+        bear_display += "  " + "⚠" * bear_triggered
+
+    results.append({
+        'symbol': symbol_dir,
+        'tier': tier_base,
+        'bull': f"{bull_confirmed}/{total_bulls}",
+        'bear': bear_display,
+        'conv': conv,
+        'last_scored': last_updated,
+        'bear_triggered': bear_triggered,
+        'tier_priority': tier_priority.get(tier_base, 99),
+    })
+
+# Sort by tier priority, then symbol
+results.sort(key=lambda r: (r['tier_priority'], r['symbol']))
+
+print("=== Thesis Scorecards ===")
+print()
+print(f"  {'Symbol':<8s} {'Tier':<10s} {'Bull':<10s} {'Bear':<13s} {'Conv':<7s} {'Last Scored'}")
+print(f"  {'───────':<8s} {'─────────':<10s} {'─────────':<10s} {'────────────':<13s} {'──────':<7s} {'───────────'}")
+
+for r in results:
+    print(f"  {r['symbol']:<8s} {r['tier']:<10s} {r['bull']:<10s} {r['bear']:<13s} {r['conv']:<7s} {r['last_scored']}")
+
+total_triggers = sum(r['bear_triggered'] for r in results)
+print()
+print(f"  Total bear triggers: {total_triggers}")
+
+if unscored:
+    print()
+    print(f"  Unscored ({len(unscored)} positions with thesis but no criteria tables):")
+    for sym, tier in sorted(unscored, key=lambda x: (tier_priority.get(x[1], 99), x[0])):
+        print(f"    {sym:<8s} ({tier})")
+PYEOF
+    ;;
+
   *)
     echo "Usage: pm-cli.sh <command>"
     echo "  morning            - Full morning: refresh + briefing + ritual status"
@@ -6498,5 +6616,6 @@ PYEOF
     echo "  reconcile <csv>    - Import Schwab realized P&L CSV"
     echo "  broker-pl [symbol] - Broker P&L summary (or per-lot detail for symbol)"
     echo "  scorecard <symbol> - Thesis scorecard: bull/bear criteria status and suggested conviction"
+    echo "  scorecards         - Portfolio thesis health: all scorecards summary table"
     ;;
 esac
