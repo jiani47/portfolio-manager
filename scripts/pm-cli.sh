@@ -86,6 +86,10 @@ case "$CMD" in
   analytics|correlations|attribution)
     source "$SCRIPT_DIR/commands/analytics.sh" ;;
 
+  # Simulation
+  whatif|stress|construct)
+    source "$SCRIPT_DIR/commands/simulation.sh" ;;
+
   # Monitors
   monitors|monitor-add|monitor-dismiss|monitor-rm|monitor-reset|monitor-add-note|earnings)
     source "$SCRIPT_DIR/commands/monitors.sh" ;;
