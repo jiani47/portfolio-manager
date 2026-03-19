@@ -123,6 +123,15 @@ case "$1" in
   drift)
     echo "=== Allocation Drift ==="
     echo ""
+    # Compute portfolio total first
+    PORTFOLIO_TOTAL=$(sqlite3 "$DB" "
+      SELECT SUM(p.quantity * COALESCE(
+        (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
+        0
+      )) FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type NOT IN ('cash','option') AND p.quantity > 0;
+    ")
+    printf "  %-6s  %7s  %7s  %10s  %10s  %7s  %s\n" "Symbol" "Current" "Target" "Current MV" "Target MV" "Drift" "Tier"
+    printf "  %-6s  %7s  %7s  %10s  %10s  %7s  %s\n" "──────" "───────" "──────" "──────────" "─────────" "──────" "────────"
     sqlite3 "$DB" "
       SELECT s.symbol,
         printf('%.1f', pi.target_allocation_pct) as target_pct,
@@ -130,21 +139,20 @@ case "$1" in
           SUM(p.quantity * COALESCE(
             (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
             0
-          )) * 100.0 /
-          NULLIF((SELECT SUM(p2.quantity * COALESCE(
-            (SELECT ph2.close_price FROM price_history ph2 WHERE ph2.security_id = p2.security_id ORDER BY ph2.date DESC LIMIT 1),
-            0
-          )) FROM positions p2 JOIN securities s2 ON p2.security_id = s2.id WHERE s2.type NOT IN ('cash','option') AND p2.quantity > 0), 0)
+          )) * 100.0 / NULLIF($PORTFOLIO_TOTAL, 0)
         ) as current_pct,
+        printf('%.0f',
+          SUM(p.quantity * COALESCE(
+            (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
+            0
+          ))
+        ) as current_mv,
+        printf('%.0f', pi.target_allocation_pct * $PORTFOLIO_TOTAL / 100.0) as target_mv,
         printf('%.1f',
           SUM(p.quantity * COALESCE(
             (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
             0
-          )) * 100.0 /
-          NULLIF((SELECT SUM(p2.quantity * COALESCE(
-            (SELECT ph2.close_price FROM price_history ph2 WHERE ph2.security_id = p2.security_id ORDER BY ph2.date DESC LIMIT 1),
-            0
-          )) FROM positions p2 JOIN securities s2 ON p2.security_id = s2.id WHERE s2.type NOT IN ('cash','option') AND p2.quantity > 0), 0)
+          )) * 100.0 / NULLIF($PORTFOLIO_TOTAL, 0)
           - pi.target_allocation_pct
         ) as drift_pct,
         pi.tier
@@ -157,28 +165,23 @@ case "$1" in
         SUM(p.quantity * COALESCE(
           (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
           0
-        )) * 100.0 /
-        NULLIF((SELECT SUM(p2.quantity * COALESCE(
-          (SELECT ph2.close_price FROM price_history ph2 WHERE ph2.security_id = p2.security_id ORDER BY ph2.date DESC LIMIT 1),
-          0
-        )) FROM positions p2 JOIN securities s2 ON p2.security_id = s2.id WHERE s2.type NOT IN ('cash','option') AND p2.quantity > 0), 0)
+        )) * 100.0 / NULLIF($PORTFOLIO_TOTAL, 0)
         - pi.target_allocation_pct
       ) DESC;
-    " | while IFS='|' read -r SYMBOL TARGET CURRENT DRIFT TIER; do
+    " | while IFS='|' read -r SYMBOL TARGET CURRENT CURRENT_MV TARGET_MV DRIFT TIER; do
       if [ -z "$SYMBOL" ]; then continue; fi
-      # Color drift
       ABS_DRIFT=$(echo "$DRIFT" | tr -d '-')
       if (( $(echo "$ABS_DRIFT > 3" | bc -l 2>/dev/null || echo 0) )); then
-        COLOR="\033[31m"  # red
+        COLOR="\033[31m"
       elif (( $(echo "$ABS_DRIFT > 1" | bc -l 2>/dev/null || echo 0) )); then
-        COLOR="\033[33m"  # amber
+        COLOR="\033[33m"
       else
-        COLOR="\033[32m"  # green
+        COLOR="\033[32m"
       fi
       RESET="\033[0m"
       SIGN=""
       if (( $(echo "$DRIFT > 0" | bc -l 2>/dev/null || echo 0) )); then SIGN="+"; fi
-      printf "  %-6s  %5s%% / %5s%%  ${COLOR}%s%s%%${RESET}  (%s)\n" "$SYMBOL" "$CURRENT" "$TARGET" "$SIGN" "$DRIFT" "$TIER"
+      printf "  %-6s  %6s%%  %5s%%  \$%'9d  \$%'9d  ${COLOR}%s%s%%${RESET}  %s\n" "$SYMBOL" "$CURRENT" "$TARGET" "$CURRENT_MV" "$TARGET_MV" "$SIGN" "$DRIFT" "$TIER"
     done
 
     # Show positions WITHOUT a target (for awareness)

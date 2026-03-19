@@ -220,10 +220,15 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
           echo "  $SIDE_UP $SHARES $SYM | trigger: $TVAL ($TTYPE) | confirm: pm-cli.sh basket-confirm $TID"
         done
         TRIGGERED_COUNT=$(echo "$EMS_TRIGGERED" | wc -l | tr -d ' ')
-        EMS_NOTIFY=$(echo "$EMS_TRIGGERED" | while IFS='|' read -r _SYM _SIDE _SHARES _TTYPE _TVAL _TID _BNAME; do
-          echo "$(echo "$_SIDE" | tr '[:lower:]' '[:upper:]') $_SHARES $_SYM @ $_TVAL"
-        done)
-        pm_notify "EMS: $TRIGGERED_COUNT orders triggered" "$EMS_NOTIFY" "high"
+        # Only push-notify once per day to avoid repeated alerts on every briefing run
+        NOTIFIED_FLAG="/tmp/pm-ems-notified-$(date +%Y%m%d)"
+        if [ ! -f "$NOTIFIED_FLAG" ]; then
+          EMS_NOTIFY=$(echo "$EMS_TRIGGERED" | while IFS='|' read -r _SYM _SIDE _SHARES _TTYPE _TVAL _TID _BNAME; do
+            echo "$(echo "$_SIDE" | tr '[:lower:]' '[:upper:]') $_SHARES $_SYM @ $_TVAL"
+          done)
+          pm_notify "EMS: $TRIGGERED_COUNT orders triggered" "$EMS_NOTIFY" "high"
+          touch "$NOTIFIED_FLAG"
+        fi
       fi
       if [ -n "$EMS_SUBMITTED" ]; then
         echo "  --- Working at Broker ---"
