@@ -87,6 +87,8 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh plan-cancel <symbol>  # Cancel active entry plan for symbol
 ./scripts/pm-cli.sh valuation <symbol>   # Valuation: PE, PEG, forward PE, EPS trajectory, fair price range
 ./scripts/pm-cli.sh valuations           # Portfolio-wide valuation table (PEG-based fair value rating)
+./scripts/pm-cli.sh screen               # Watchlist screening: rank by composite valuation+technical+growth score
+./scripts/pm-cli.sh confluence           # Entry confluence detection: symbols with 2+ aligned entry signals
 ./scripts/pm-cli.sh reconcile <csv_path>  # Import Schwab realized P&L CSV
 ./scripts/pm-cli.sh broker-pl [symbol]    # Broker P&L summary (or per-lot detail)
 ./scripts/pm-cli.sh observe <sym> "<note>" [supports|challenges|neutral]  # Log thesis observation

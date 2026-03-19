@@ -45,6 +45,7 @@ Watchlists:
 
 Planning:
   size, plan, plans, plan-fill, plan-cancel, valuation, valuations
+  screen, confluence
 
 Reviews:
   post-mortem, post-mortems, earnings-review, earnings-reviews
@@ -103,7 +104,7 @@ case "$CMD" in
     source "$SCRIPT_DIR/commands/watchlists.sh" ;;
 
   # Planning
-  size|plan|plans|plan-fill|plan-cancel|valuation|valuations)
+  size|plan|plans|plan-fill|plan-cancel|valuation|valuations|screen|confluence)
     source "$SCRIPT_DIR/commands/pretrade.sh"
     source "$SCRIPT_DIR/commands/planning.sh" ;;
 

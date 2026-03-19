@@ -622,6 +622,59 @@ check_pending_earnings_review() {
   return 0
 }
 
+check_valuation() {
+  local symbol="$1" side="$2"
+
+  local val_data=$(sqlite3 -separator '|' "$DB" "
+    SELECT vm.peg_rating, printf('%.2f', vm.forward_peg) as peg_val,
+           printf('%.1f', vm.forward_pe) as fwd_pe,
+           printf('%.2f', vm.fair_low) as fair_low,
+           printf('%.2f', vm.fair_mid) as fair_mid,
+           printf('%.2f', vm.fair_high) as fair_high
+    FROM valuation_metrics vm
+    WHERE vm.symbol = '$symbol'
+    ORDER BY vm.date DESC LIMIT 1
+  " 2>/dev/null)
+
+  if [ -z "$val_data" ]; then
+    echo "  ✓ PASS: Valuation check (no valuation data)"
+    return 0
+  fi
+
+  IFS='|' read -r peg_rating peg_val fwd_pe fair_low fair_mid fair_high <<< "$val_data"
+
+  # Get current price
+  local cur_price=$(sqlite3 "$DB" "
+    SELECT ph.close_price FROM price_history ph
+    JOIN securities s ON ph.security_id = s.id
+    WHERE s.symbol = '$symbol' ORDER BY ph.date DESC LIMIT 1
+  " 2>/dev/null)
+
+  local price_ctx=""
+  if [ -n "$cur_price" ] && [ -n "$fair_low" ] && [ "$fair_low" != "0.00" ]; then
+    price_ctx=" | Current \$$cur_price vs fair range \$$fair_low-\$$fair_high"
+  fi
+
+  if [ "$side" = "BUY" ] || [ "$side" = "buy" ]; then
+    if [ "$peg_rating" = "PRICEY" ]; then
+      echo "  ⚠ WARN: Valuation is PRICEY — PEG $peg_val, fwd PE ${fwd_pe}x${price_ctx}"
+      read -p "    Override? (y/n): " ov
+      [ "$ov" != "y" ] && return 1
+    else
+      echo "  ✓ PASS: Valuation ($peg_rating, PEG $peg_val)${price_ctx}"
+    fi
+  else
+    if [ "$peg_rating" = "CHEAP" ]; then
+      echo "  ⚠ WARN: Selling an undervalued name — valuation is CHEAP (PEG $peg_val, fwd PE ${fwd_pe}x)${price_ctx}"
+      read -p "    Override? (y/n): " ov
+      [ "$ov" != "y" ] && return 1
+    else
+      echo "  ✓ PASS: Valuation ($peg_rating, PEG $peg_val)${price_ctx}"
+    fi
+  fi
+  return 0
+}
+
 check_entry_plan() {
   local symbol="$1" qty="$2" price="${3:-0}"
   local plan_id target_pct
@@ -749,6 +802,7 @@ pre_trade_check() {
     check_sr_levels "$symbol" "SELL" "$price" || return 1
     check_panic_sell "$symbol" "$price" || return 1
     check_hold_duration "$symbol" || return 1
+    check_valuation "$symbol" "SELL" || return 1
     [ "$book" = "investing" ] && { check_boundary "$symbol" "sell" "$book" || return 1; }
     echo ""
     echo "  Manual acknowledgments:"
@@ -767,6 +821,7 @@ pre_trade_check() {
     check_rapid_flip "$symbol" "buy" || return 1
     check_sr_levels "$symbol" "BUY" "$price" || return 1
     check_gap_up "$symbol" || return 1
+    check_valuation "$symbol" "BUY" || return 1
     check_boundary "$symbol" "buy" "$book" "$qty" "$price" || return 1
     check_churn "$symbol" || return 1
     check_pending_earnings_review "$symbol" || return 1
@@ -793,6 +848,7 @@ pre_trade_check() {
     check_rapid_flip "$symbol" "buy" || return 1
     check_sr_levels "$symbol" "BUY" "$price" || return 1
     check_gap_up "$symbol" || return 1
+    check_valuation "$symbol" "BUY" || return 1
     check_boundary "$symbol" "buy" "$book" "$qty" "$price" || return 1
     check_churn "$symbol" || return 1
     check_pending_earnings_review "$symbol" || return 1

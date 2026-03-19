@@ -283,6 +283,69 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
       echo ""
     fi
 
+    # === Valuation Alerts ===
+    VAL_ALERTS=$(python3 - "$DB" <<'PYEOF'
+import sqlite3, sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.row_factory = sqlite3.Row
+
+# 1) PEG rating changes: compare latest vs previous day's peg_rating
+changes = conn.execute("""
+    SELECT v1.symbol, v1.peg_rating as new_rating, v2.peg_rating as old_rating,
+           printf('%.2f', v1.forward_peg) as peg_val
+    FROM valuation_metrics v1
+    JOIN valuation_metrics v2 ON v1.symbol = v2.symbol
+    WHERE v1.date = (SELECT MAX(date) FROM valuation_metrics WHERE symbol = v1.symbol)
+      AND v2.date = (SELECT MAX(date) FROM valuation_metrics WHERE symbol = v1.symbol AND date < v1.date)
+      AND v1.peg_rating IS NOT NULL AND v2.peg_rating IS NOT NULL
+      AND v1.peg_rating != v2.peg_rating
+""").fetchall()
+
+# 2) Valuation vs tier contradictions
+contradictions = conn.execute("""
+    SELECT vm.symbol, vm.peg_rating, printf('%.2f', vm.forward_peg) as peg_val,
+           pi.tier, printf('%.1f', vm.forward_pe) as fwd_pe
+    FROM valuation_metrics vm
+    JOIN securities s ON vm.symbol = s.symbol
+    JOIN positions p ON p.security_id = s.id
+    JOIN position_intents pi ON pi.position_id = p.id
+    WHERE vm.date = (SELECT MAX(date) FROM valuation_metrics WHERE symbol = vm.symbol)
+      AND vm.peg_rating IS NOT NULL AND pi.tier IS NOT NULL
+      AND (
+        (vm.peg_rating = 'PRICEY' AND pi.tier IN ('Core', 'Growth'))
+        OR (vm.peg_rating = 'CHEAP' AND pi.tier IN ('Starter', 'Exit'))
+      )
+""").fetchall()
+
+output = []
+if changes:
+    for c in changes:
+        output.append(f"  {c['symbol']:<6} PEG rating: {c['old_rating']} -> {c['new_rating']} (PEG {c['peg_val']})")
+
+if contradictions:
+    if changes:
+        output.append("")
+    output.append("  --- Tier/Valuation Mismatches ---")
+    for c in contradictions:
+        if c['peg_rating'] == 'CHEAP':
+            output.append(f"  {c['symbol']} is {c['peg_rating']} (PEG {c['peg_val']}) at {c['tier']} tier — conviction may be too low")
+        else:
+            output.append(f"  {c['symbol']} is {c['peg_rating']} (PEG {c['peg_val']}, fwd PE {c['fwd_pe']}x) at {c['tier']} tier — validate thesis still holds")
+
+if output:
+    for line in output:
+        print(line)
+
+conn.close()
+PYEOF
+)
+    if [ -n "$VAL_ALERTS" ]; then
+      echo "=== Valuation Alerts ==="
+      echo "$VAL_ALERTS"
+      echo ""
+    fi
+
     # Overnight news (last 24h) — portfolio + watchlist symbols
     NEWS_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM news WHERE published_at >= datetime('now', '-1 day');" 2>/dev/null)
     if [ "$NEWS_COUNT" -gt 0 ] 2>/dev/null; then
