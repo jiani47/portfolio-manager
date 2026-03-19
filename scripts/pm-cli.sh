@@ -18,7 +18,8 @@ Ritual:
   ritual-status, intent-history, intent-changes-today
 
 Trading:
-  buy, sell, orders, cancel-order, trade-setup, trade-open, trade-close, trades
+  buy, sell, orders, cancel-order, trade-enter, trade-setup, trade-open
+  trade-close, trades
 
 EMS (Execution Management):
   basket-create, baskets, basket, basket-add, basket-orders, basket-confirm
@@ -66,11 +67,11 @@ case "$CMD" in
     source "$SCRIPT_DIR/commands/portfolio.sh" ;;
 
   # Ritual
-  morning|portfolio|briefing|ritual-today|ritual-set|ritual-history|ritual-status|intent-history|intent-changes-today)
+  morning|portfolio|briefing|triage|ritual-today|ritual-set|ritual-history|ritual-status|intent-history|intent-changes-today)
     source "$SCRIPT_DIR/commands/ritual.sh" ;;
 
   # Trading
-  buy|sell|orders|cancel-order|trade-setup|trade-open|trade-close|trades)
+  buy|sell|orders|cancel-order|trade-enter|trade-setup|trade-open|trade-close|trades)
     source "$SCRIPT_DIR/commands/pretrade.sh"
     source "$SCRIPT_DIR/commands/trading.sh" ;;
 

@@ -96,6 +96,8 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh broker-pl [symbol]    # Broker P&L summary (or per-lot detail)
 ./scripts/pm-cli.sh observe <sym> "<note>" [supports|challenges|neutral]  # Log thesis observation
 ./scripts/pm-cli.sh observations [symbol]  # List recent observations
+./scripts/pm-cli.sh triage                # Prioritized action list (CRITICAL/HIGH/MEDIUM/INFO)
+./scripts/pm-cli.sh trade-enter <sym> <shares> <price> <stop> "<thesis>" [days] [acct]  # Full trade flow: check → buy → log → stop
 ./scripts/pm-cli.sh trade-setup <symbol>   # Guided trade analysis: valuation + S/R + sizing + commands
 ./scripts/pm-cli.sh research <symbol>     # Research brief: auto-populated financials, valuation, estimates
 ./scripts/pm-cli.sh note <sym> <section> "<content>" [source]  # Add research note (append-only)

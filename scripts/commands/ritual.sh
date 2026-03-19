@@ -3,12 +3,190 @@
 
 case "$1" in
   morning)
-    # Combined: refresh prices + briefing + ritual status
+    # Combined: refresh prices + briefing + triage + ritual status
     "$0" refresh
     echo ""
     "$0" briefing
     echo ""
+    "$0" triage
+    echo ""
     "$0" ritual-status
+    ;;
+
+  triage)
+    # Prioritized action list — reads DB state, no API calls
+    TODAY=$(date +%Y-%m-%d)
+
+    python3 - "$DB" "$TODAY" << 'PYEOF'
+import sqlite3, sys
+
+db_path = sys.argv[1]
+today = sys.argv[2]
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+items = []  # (priority, icon, message, command)
+
+# --- CRITICAL ---
+
+# 1. Triggered monitors with action_required
+for m in conn.execute("SELECT symbol, direction, price_level, label FROM monitors WHERE status = 'triggered' AND action_type = 'action_required'").fetchall():
+    icon = '⬇️' if m['direction'] == 'below' else '⬆️'
+    items.append((0, '🚨', f"{m['symbol']} {icon} ${m['price_level']:.2f} — {m['label']} [ACTION REQUIRED]", f"pm-cli.sh recall {m['symbol']}"))
+
+# 2. Expired trading positions
+for t in conn.execute("""
+    SELECT symbol, shares, entry_price, entry_date, time_limit_days,
+      julianday('now') - julianday(entry_date) as days_held
+    FROM trading_positions WHERE status = 'open'
+""").fetchall():
+    days_held = int(t['days_held'] or 0)
+    days_left = t['time_limit_days'] - days_held
+    if days_left <= 0:
+        items.append((0, '⛔', f"{t['symbol']} trade EXPIRED ({days_held}/{t['time_limit_days']} days) — close or extend", f"pm-cli.sh trade-close {t['symbol']} <price> \"<reason>\""))
+
+# 3. EMS orders awaiting confirmation
+for o in conn.execute("""
+    SELECT s.symbol, ep.side, ept.shares, COALESCE(ept.trigger_date, '$' || printf('%.2f', ept.trigger_price)) as trigger_val,
+      substr(ept.id, 1, 8) as tid
+    FROM entry_plan_tranches ept
+    JOIN entry_plans ep ON ept.plan_id = ep.id
+    JOIN securities s ON ep.security_id = s.id
+    WHERE ept.status = 'triggered' AND ep.status = 'active'
+""").fetchall():
+    side = o['side'].upper()
+    items.append((0, '🚨', f"EMS {side} {o['shares']} {o['symbol']} triggered — awaiting confirmation", f"pm-cli.sh basket-confirm {o['tid']}"))
+
+# --- HIGH ---
+
+# 4. Trading positions expiring in ≤5 days
+for t in conn.execute("""
+    SELECT symbol, shares, entry_price, entry_date, time_limit_days, stop_price,
+      julianday('now') - julianday(entry_date) as days_held
+    FROM trading_positions WHERE status = 'open'
+""").fetchall():
+    days_held = int(t['days_held'] or 0)
+    days_left = t['time_limit_days'] - days_held
+    if 0 < days_left <= 5:
+        items.append((1, '⚠', f"{t['symbol']} trade expiring in {days_left}d ({days_held}/{t['time_limit_days']})", f"pm-cli.sh trades"))
+    # Also flag no stop
+    if not t['stop_price'] or t['stop_price'] == 0:
+        items.append((1, '⚠', f"{t['symbol']} trade has NO STOP — place one now", f"pm-cli.sh sell {t['shares']} {t['symbol']} stop <price> GTC 4005"))
+
+# 5. Triggered monitors (informational)
+for m in conn.execute("SELECT symbol, direction, price_level, label FROM monitors WHERE status = 'triggered' AND action_type != 'action_required'").fetchall():
+    icon = '⬇️' if m['direction'] == 'below' else '⬆️'
+    items.append((1, '⚠', f"{m['symbol']} {icon} ${m['price_level']:.2f} — {m['label']}", f"pm-cli.sh levels {m['symbol']}"))
+
+# 6. Earnings today/tomorrow
+for m in conn.execute("""
+    SELECT symbol, label FROM monitors
+    WHERE monitor_type = 'earnings' AND status = 'active'
+    AND reminder_date <= date('now', '+1 day')
+""").fetchall():
+    items.append((1, '📅', f"{m['symbol']} earnings imminent — {m['label']}", f"pm-cli.sh research {m['symbol']}"))
+
+# --- MEDIUM ---
+
+# 7. Valuation tier mismatches
+for r in conn.execute("""
+    SELECT vm.symbol, vm.peg_rating, vm.forward_peg, pi.tier
+    FROM valuation_metrics vm
+    JOIN (SELECT symbol, MAX(date) as max_date FROM valuation_metrics GROUP BY symbol) latest
+      ON vm.symbol = latest.symbol AND vm.date = latest.max_date
+    JOIN positions p ON p.security_id = (SELECT id FROM securities WHERE symbol = vm.symbol LIMIT 1)
+    JOIN position_intents pi ON pi.position_id = p.id
+    WHERE p.quantity > 0
+      AND ((vm.peg_rating = 'PRICEY' AND pi.tier IN ('Core', 'Growth'))
+        OR (vm.peg_rating = 'CHEAP' AND pi.tier IN ('Starter', 'Exit')))
+    GROUP BY vm.symbol
+""").fetchall():
+    peg_val = f"PEG {r['forward_peg']:.2f}" if r['forward_peg'] else ""
+    if r['peg_rating'] == 'CHEAP':
+        items.append((2, '📊', f"{r['symbol']} is CHEAP ({peg_val}) at {r['tier']} tier — conviction too low?", f"pm-cli.sh scorecard {r['symbol']}"))
+    else:
+        items.append((2, '📊', f"{r['symbol']} is PRICEY ({peg_val}) at {r['tier']} tier — validate thesis", f"pm-cli.sh scorecard {r['symbol']}"))
+
+# 8. Confluence signals (top 5)
+confluence_count = 0
+for row in conn.execute("""
+    SELECT vm.symbol, vm.peg_rating, vm.forward_peg, vm.eps_growth_pct
+    FROM valuation_metrics vm
+    WHERE vm.date = (SELECT MAX(date) FROM valuation_metrics WHERE symbol = vm.symbol)
+      AND vm.peg_rating IN ('CHEAP', 'FAIR')
+      AND vm.forward_peg IS NOT NULL AND vm.forward_peg > 0 AND vm.forward_peg < 1.2
+""").fetchall():
+    sym = row['symbol']
+    signals = 1  # valuation
+    signal_parts = [f"{row['peg_rating']} PEG:{row['forward_peg']:.2f}"]
+    # Check near support
+    price_row = conn.execute("""
+        SELECT ph.close_price FROM price_history ph JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+    """, (sym,)).fetchone()
+    if price_row:
+        px = price_row['close_price']
+        sup = conn.execute("SELECT price FROM price_levels WHERE symbol = ? AND level_type = 'support' AND price < ? ORDER BY price DESC LIMIT 1", (sym, px)).fetchone()
+        if sup and (px - sup['price']) / px * 100 < 5:
+            signals += 1
+            signal_parts.append(f"near S${sup['price']:.0f}")
+    if row['eps_growth_pct'] and row['eps_growth_pct'] > 20:
+        signals += 1
+        signal_parts.append(f"EPS+{row['eps_growth_pct']:.0f}%")
+    if signals >= 2 and confluence_count < 5:
+        items.append((2, '📊', f"{sym} confluence ({signals} signals): {', '.join(signal_parts)}", f"pm-cli.sh trade-setup {sym}"))
+        confluence_count += 1
+
+# 9. Scorecard changes last 7 days
+for sc in conn.execute("""
+    SELECT s.symbol, tsc.criteria_number, tsc.old_status, tsc.new_status, tsc.reason
+    FROM thesis_score_changes tsc
+    JOIN securities s ON tsc.security_id = s.id
+    WHERE tsc.changed_at >= date('now', '-7 days')
+    ORDER BY tsc.changed_at DESC LIMIT 5
+""").fetchall():
+    reason_short = sc['reason'][:60] + '...' if sc['reason'] and len(sc['reason']) > 60 else (sc['reason'] or '')
+    items.append((2, '📋', f"{sc['symbol']} {sc['criteria_number']}: {sc['old_status']}→{sc['new_status']} — {reason_short}", ""))
+
+# --- INFO ---
+
+# 10. News volume (top 5 by article count)
+for n in conn.execute("""
+    SELECT symbol, COUNT(*) as cnt FROM news
+    WHERE published_at >= datetime('now', '-1 day')
+    GROUP BY symbol HAVING cnt >= 3
+    ORDER BY cnt DESC LIMIT 5
+""").fetchall():
+    items.append((3, '📰', f"{n['symbol']} — {n['cnt']} articles in 24h", f"pm-cli.sh news {n['symbol']}"))
+
+# 11. Fundamental reminders
+for m in conn.execute("""
+    SELECT symbol, label FROM monitors
+    WHERE monitor_type = 'fundamental' AND status = 'active'
+    AND (reminder_date IS NULL OR reminder_date <= date('now'))
+""").fetchall():
+    items.append((3, '📋', f"{m['symbol']} — {m['label']}", ""))
+
+# === Output ===
+if not items:
+    print("\n=== TRIAGE — Nothing actionable today ===\n")
+else:
+    print(f"\n=== TRIAGE — {today} ===\n")
+    priority_labels = {0: 'CRITICAL (act now)', 1: 'HIGH (act today)', 2: 'MEDIUM (review)', 3: 'INFO (awareness)'}
+    current_pri = -1
+    num = 0
+    for pri, icon, msg, cmd in sorted(items, key=lambda x: x[0]):
+        if pri != current_pri:
+            current_pri = pri
+            print(f"  {priority_labels[pri]}:")
+        num += 1
+        print(f"    {num:>2}. {icon} {msg}")
+        if cmd:
+            print(f"        → {cmd}")
+    print()
+
+conn.close()
+PYEOF
     ;;
   portfolio)
     # Combined: positions + summary + today's intent changes

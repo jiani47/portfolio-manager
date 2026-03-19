@@ -272,6 +272,119 @@ PYEOF
     fi
     ;;
 
+  trade-enter)
+    # Composite: pre-trade check → buy order → log trade → prompt for stop
+    # Usage: pm-cli.sh trade-enter <symbol> <shares> <price> <stop> "<thesis>" [days] [acct]
+    TE_SYM=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    TE_SHARES="${3:-}"
+    TE_PRICE="${4:-}"
+    TE_STOP="${5:-}"
+    TE_THESIS="${6:-}"
+    TE_DAYS="${7:-20}"
+    TE_ACCT="${8:-4005}"
+    if [ -z "$TE_SYM" ] || [ -z "$TE_SHARES" ] || [ -z "$TE_PRICE" ] || [ -z "$TE_STOP" ] || [ -z "$TE_THESIS" ]; then
+      echo "Usage: pm-cli.sh trade-enter <symbol> <shares> <price> <stop> \"<thesis>\" [days] [acct]"
+      echo "  Chains: pre-trade check → buy order → log trade → prompt for stop"
+      echo "  Default: 20 day time limit, account 4005"
+      exit 1
+    fi
+
+    echo ""
+    echo "╔═══════════════════════════════════════════════╗"
+    echo "║  TRADE ENTRY: $TE_SYM"
+    echo "╚═══════════════════════════════════════════════╝"
+    echo ""
+
+    # Show risk summary first
+    RISK_AMT=$(python3 -c "print(f'\${abs($TE_SHARES * ($TE_PRICE - $TE_STOP)):.0f}')")
+    RISK_PCT=$(python3 -c "print(f'{abs(($TE_PRICE - $TE_STOP) / $TE_PRICE * 100):.1f}%')")
+    EXPIRY=$(python3 -c "from datetime import datetime, timedelta; print((datetime.now() + timedelta(days=$TE_DAYS)).strftime('%Y-%m-%d'))")
+    echo "  Plan: BUY $TE_SHARES $TE_SYM @ \$$TE_PRICE LIMIT DAY"
+    echo "  Stop: \$$TE_STOP ($RISK_PCT risk, $RISK_AMT at stake)"
+    echo "  Thesis: $TE_THESIS"
+    echo "  Expires: $EXPIRY ($TE_DAYS days)"
+    echo ""
+
+    # Step 1: Pre-trade check
+    pre_trade_check "$TE_SYM" "BUY" "$TE_SHARES" "$TE_ACCT" "$TE_PRICE" || { echo "  Pre-trade check failed. Trade cancelled."; exit 1; }
+
+    echo ""
+    printf "  Proceed with order? (y/n): "
+    read -r CONFIRM
+    if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
+      echo "  Trade cancelled."
+      exit 0
+    fi
+
+    # Step 2: Place buy order
+    echo ""
+    echo "  Placing order..."
+    schwab_ensure_token
+
+    ACCT_HASH=$(schwab_get_account_hash "$TE_ACCT")
+    if [ -z "$ACCT_HASH" ]; then
+      echo "  ERROR: Could not resolve account $TE_ACCT"
+      exit 1
+    fi
+
+    ORDER_JSON=$(python3 -c "
+import json
+order = {
+    'orderType': 'LIMIT',
+    'session': 'NORMAL',
+    'price': str($TE_PRICE),
+    'duration': 'DAY',
+    'orderStrategyType': 'SINGLE',
+    'orderLegCollection': [{
+        'instruction': 'BUY',
+        'quantity': $TE_SHARES,
+        'instrument': {'symbol': '$TE_SYM', 'assetType': 'EQUITY'}
+    }]
+}
+print(json.dumps(order))
+")
+
+    ACCESS_TOKEN=$(sqlite3 "$DB" "SELECT json_extract(value, '$.schwabTokens.accessToken') FROM settings WHERE key = 'settings';" 2>/dev/null)
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+      -X POST "https://api.schwabapi.com/trader/v1/accounts/${ACCT_HASH}/orders" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "$ORDER_JSON")
+
+    if [ "$HTTP_CODE" = "201" ]; then
+      echo "  ✓ Order placed: BUY $TE_SHARES $TE_SYM @ \$$TE_PRICE LIMIT DAY ($TE_ACCT)"
+    else
+      echo "  ✗ Order FAILED (HTTP $HTTP_CODE). Trade not logged."
+      exit 1
+    fi
+
+    # Step 3: Log trade
+    echo ""
+    SEC_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$TE_SYM' LIMIT 1;")
+    TE_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    TODAY=$(date +%Y-%m-%d)
+    TE_THESIS_ESC=$(echo "$TE_THESIS" | sed "s/'/''/g")
+
+    sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS trading_positions (id TEXT PRIMARY KEY, security_id TEXT NOT NULL, symbol TEXT NOT NULL, entry_date TEXT NOT NULL, entry_price REAL NOT NULL, shares INTEGER NOT NULL, thesis TEXT NOT NULL, stop_price REAL, stop_order_id TEXT, time_limit_days INTEGER NOT NULL DEFAULT 20, status TEXT NOT NULL DEFAULT 'open', exit_date TEXT, exit_price REAL, exit_reason TEXT, pnl REAL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+
+    sqlite3 "$DB" "INSERT INTO trading_positions (id, security_id, symbol, entry_date, entry_price, shares, thesis, stop_price, time_limit_days, status, created_at, updated_at) VALUES ('$TE_ID', '$SEC_ID', '$TE_SYM', '$TODAY', $TE_PRICE, $TE_SHARES, '$TE_THESIS_ESC', $TE_STOP, $TE_DAYS, 'open', '$NOW', '$NOW');"
+    echo "  ✓ Trade logged: $TE_SYM $TE_SHARES shares, stop \$$TE_STOP, ${TE_DAYS}d limit"
+
+    # Step 4: Prompt for stop order
+    echo ""
+    echo "  ⚠ GTC stop order needed:"
+    echo "    pm-cli.sh sell $TE_SHARES $TE_SYM stop $TE_STOP GTC $TE_ACCT"
+    echo ""
+    printf "  Place stop order now? (y/n): "
+    read -r STOP_CONFIRM
+    if [ "$STOP_CONFIRM" = "y" ] || [ "$STOP_CONFIRM" = "Y" ]; then
+      "$0" sell "$TE_SHARES" "$TE_SYM" stop "$TE_STOP" GTC "$TE_ACCT"
+    else
+      echo "  ⚠ Remember to place the stop manually!"
+    fi
+    ;;
+
   trade-setup)
     # Guided trade setup: valuation + technicals + S/R + sizing + commands
     TS_SYM=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
