@@ -229,8 +229,10 @@ case "$1" in
 
   basket)
     BASKET_NAME="$2"
+    BASKET_SHOW_ALL="$3"  # pass "all" to show filled/cancelled tranches
     if [ -z "$BASKET_NAME" ]; then
-      echo "Usage: pm-cli.sh basket <name>"
+      echo "Usage: pm-cli.sh basket <name> [all]"
+      echo "  Default: shows only active tranches. Pass 'all' to include filled/cancelled."
       exit 1
     fi
     BASKET_ID=$(sqlite3 "$DB" "SELECT id FROM rebalance_baskets WHERE name = '$BASKET_NAME';")
@@ -248,12 +250,13 @@ case "$1" in
       )) FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type NOT IN ('cash','option') AND p.quantity > 0;
     ")
 
-    python3 - "$DB" "$BASKET_ID" "$PTOTAL" << 'PYEOF'
+    python3 - "$DB" "$BASKET_ID" "$PTOTAL" "$BASKET_SHOW_ALL" << 'PYEOF'
 import sqlite3, sys, math
 
 db_path = sys.argv[1]
 basket_id = sys.argv[2]
 ptotal = float(sys.argv[3]) if sys.argv[3] else 0
+show_all = sys.argv[4] == 'all' if len(sys.argv) > 4 and sys.argv[4] else False
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
@@ -358,12 +361,13 @@ for row in basket_symbols:
 
     print(f"  {sym:<6} {side:<5} {cur_pct:>5.1f}% {tgt_pct_str:>6} ${cur_mv:>9,.0f} {tgt_mv_str:>10} ${price:>7.2f} {need_str} {basket_qty:>7} {status:>10}")
 
-# Filled orders (for completeness)
-for row in filled_symbols:
-    sym = row['symbol']
-    side = row['side'].upper()
-    filled = int(row['filled_qty'] or 0)
-    print(f"  {sym:<6} {side:<5}                                                    {filled:>7} FILLED")
+# Filled orders (only if show_all)
+if show_all:
+    for row in filled_symbols:
+        sym = row['symbol']
+        side = row['side'].upper()
+        filled = int(row['filled_qty'] or 0)
+        print(f"  {sym:<6} {side:<5}                                                    {filled:>7} FILLED")
 
 # --- Portfolio Summary (Post-Rebalance) ---
 print()
@@ -431,7 +435,13 @@ print(f"  Net capital:  ${sign}{net:>9,.0f}  ({'needed from cash' if net > 0 els
 conn.close()
 PYEOF
     echo ""
-    echo "--- Tranche Detail ---"
+    if [ "$BASKET_SHOW_ALL" = "all" ]; then
+      TRANCHE_FILTER=""
+      echo "--- Tranche Detail (all) ---"
+    else
+      TRANCHE_FILTER="AND ept.status NOT IN ('filled', 'cancelled')"
+      echo "--- Tranche Detail (active only — pass 'all' to show filled/cancelled) ---"
+    fi
     sqlite3 -header -column "$DB" "
       SELECT s.symbol, ep.side, ept.tranche_number as '#',
         ept.trigger_type as trig_type,
@@ -446,7 +456,7 @@ PYEOF
       FROM entry_plan_tranches ept
       JOIN entry_plans ep ON ept.plan_id = ep.id
       JOIN securities s ON ep.security_id = s.id
-      WHERE ep.basket_id = '$BASKET_ID'
+      WHERE ep.basket_id = '$BASKET_ID' $TRANCHE_FILTER
       ORDER BY ep.side DESC, s.symbol, ept.tranche_number;
     "
     ;;
