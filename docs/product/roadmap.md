@@ -2,136 +2,157 @@
 
 The goal is to build a **state-aware judgment assistant** (PM co-pilot) that protects process, enforces discipline, and provides memory — without ever making buy/sell recommendations.
 
-Design principles (from daily-pm-checklist.md):
+Design principles:
 - Automation = **friction + memory**, not speed
 - The co-pilot **slows you down**, it doesn't push trades
 - Human retains all decisions on regime, tier, thesis, and action
-- **App/CLI parity rule:** Every feature must be available in both the Electron app and CLI. No exceptions unless explicitly documented with rationale in this roadmap. CLI-only features create governance leaks — if you can trade through the app without seeing a CLI-only check, the check doesn't exist.
+- Tools should be **connected into workflows**, not standalone commands
 
 **Completed phases archived in [`roadmap_archive.md`](roadmap_archive.md):** Phases 1–9, 13–15.
 
 ---
 
-## Phase 10: Portfolio Optimization & Exposure Analysis
+## Operating Model — 6 Workflow Modes
 
-**Goal:** Quantitative analysis of portfolio construction. Identify concentration risks, factor exposures, and diversification opportunities.
+All features are organized by which workflow mode they serve.
 
-### 10.1 Correlation & Factor Analysis — ✅ Done
+### Mode 1: Portfolio Maintenance (daily) — ✅ Well-covered
 
-### 10.2 Portfolio Optimization
+Morning routine → review → spot anomalies → research → update scorecards/thesis/monitors/basket
 
-- Efficient frontier analysis using historical returns
-- "What-if" scenarios: adding/removing a position and impact on Sharpe ratio
-- Suggest alternative tickers that improve risk-adjusted returns
-- Constraint-aware: respect tier limits, book designations, thesis requirements
-- CLI: `pm-cli.sh optimize` — propose Sharpe-improving changes
+**Built**: morning, briefing, triage, sectors, ritual-set, news, technicals, levels, valuation/valuations, observe, scorecard/scorecard-update (auto-syncs thesis doc + checks basket conflicts), note/notes, thesis-export, earnings-review, monitors, drift, basket/basket-resize (auto on refresh), confluence in briefing, valuation alerts in briefing, trading position alerts in briefing, push notifications
 
-### 10.3 Stress Testing & Scenario Analysis
+### Mode 2: Pure Trading (trading account) — ✅ Framework complete
 
-- Historical stress tests: "how would this portfolio have performed in 2020 COVID crash?"
-- Factor shock scenarios: "what if rates rise 100bps?" (using rate sensitivity betas)
-- Drawdown simulation based on current portfolio beta and vol
-- Tail risk / VaR estimates from historical return distribution
+Monitor trades → scan watchlist → size/time/risk → enter → track
 
-### 10.4 Rebalancing Suggestions
+**Built**: trade-setup (guided analysis), trade-enter (composite: check→buy→log→stop), trade-open/close, trades, trade-stats (P&L dashboard), screen (composite scoring), confluence (2+ signals), pre-trade checklist with mandatory stop, briefing expiry alerts
 
-- Drift analysis: current weights vs target tier allocations
-- Tax-efficient rebalancing suggestions (harvest losses, avoid wash sales)
-- "Your Core tier is 38% — target is 50%. Consider adding to GOOG/TSM/NVDA"
+### Mode 3: Idea Exploration (ad-hoc) — ✅ Adequate
 
-### 10.5 Position Sizing & Lifecycle Management — ✅ Done
+New idea → research → add to watchlist → wait for setup
 
-- [x] **Hold duration enforcement:** Pre-trade warning when selling before `target_hold_period` expires (`checkHoldDuration`)
-- [x] **Churn detection:** Flag 3+ round-trips in 90 days (`checkChurn`)
-- [x] **Add-size guardrails:** Flag oversized adds relative to remaining room in tier allocation (`checkAddSize`)
-- [x] **Target sizing:** Computes target shares/$ from tier limits + portfolio size. Supports custom target (shares or %)
-- [x] **Entry plan suggestions:** S/R-based tranches with ATR-adjusted weighting (high vol = more weight at lower supports)
-- [x] **New position support:** Works for watchlist symbols not yet held
-- [x] CLI: `pm-cli.sh size <symbol> [target]` — target as share count (e.g. 100) or allocation % (e.g. 3%)
+**Built**: research (auto-populated brief from FMP), valuation/technicals/levels/news for any symbol, watchlist system (9 themed lists), note (sectioned research log), size (works for watchlist names)
 
----
+### Mode 4: Execution Support — ✅ Strong
 
-## Phase 11: Equity Research Engine
+Pre-trade governance → dynamic sizing → order → tracking → thesis sync
 
-**Goal:** Structured research workflow that builds deep, living thesis documents. Not recommendations — evidence collection and thesis validation.
+**Built**: pre-trade checklist (12+ checks), basket/basket-add/basket-confirm/basket-fill, basket-resize (dynamic from target %), drift (with MV columns), post-rebalance projection, S/R in pre-trade, panic sell detection, valuation gate, decision memory, conflict surfacing, scorecard→basket sync
 
-### 11.1 Research Templates
+### Mode 5: Analytics & Governance (low frequency) — ✅ Well-covered
 
-- Standardized research framework: business model, moat analysis, financials, risks, valuation
-- Auto-populated data sections (financials from API, technicals from price_history)
-- Peer comparison tables (same sector/industry)
-- Research stored in `docs/positions/<SYMBOL>/`
+Post-trade analysis → post-mortems → attribution → reconciliation
 
-### 11.2 Thesis Scoring Visual Dashboard
+**Built**: post-mortem, trade-journal, attribution, analytics (beta/Sharpe/drawdown), correlations, broker-pl/reconcile, snapshots, trade-stats, app pages (Analytics, Post-Mortems, Earnings Reviews, Portfolio History, Broker P&L)
 
-- Visual thesis health dashboard per position in app (CLI scoring done in Phase 15)
-- Alert when thesis score changes materially
+### Mode 6: Pre-Trade Research & Idea Generation — ✅ Foundation done
 
-### 11.3 Earnings Workflow — ✅ Done
+Structured research → evidence collection → thesis building → conviction scoring
 
-### 11.4 Research Integration
-
-- Link research docs to position intents and monitors
-- Surface relevant research during pre-trade checklist
-- "Your thesis for KKR mentions credit cycle risk — here's the latest research from 2026-03-12"
-
-### 11.5 Valuation Framework (partially done ✅)
-
-- [x] Fetch from FMP: trailing PE, PEG, forward PEG, P/S from `ratios-ttm`
-- [x] Fetch analyst EPS estimates from `analyst-estimates` (handles fiscal year offsets)
-- [x] Compute forward PE from next fiscal year EPS estimate
-- [x] Fair price range: discount/consensus/premium based on forward PE, PEG=1 anchor
-- [x] EPS trajectory table with implied PE at each year
-- [x] `pm-cli.sh valuation <symbol>` — full valuation with fair range + EPS trajectory
-- [x] `pm-cli.sh valuations` — portfolio-wide table with PEG-based rating (CHEAP/FAIR/RICH/PRICEY)
-- [ ] Surface in pre-trade checklist: "ROKU at $85 is 15% above fair range mid ($74)"
-- [ ] Surface in morning briefing: positions trading significantly outside fair range
-- [ ] App: valuation column in Holdings table
+**Built**: research (auto-populated brief), note/notes (sectioned append-only), thesis-export (7-table assembly), scorecard system, observations, valuation framework
 
 ---
 
-## Phase 12: Risk Analysis & Monitoring
+## Remaining Roadmap
 
-**Goal:** Continuous portfolio risk monitoring with proactive alerts when risk parameters change.
+### Phase 10: Portfolio Optimization (deprioritized)
 
-### 12.1 Risk Dashboard — ✅ Done
+#### 10.1 Correlation & Factor Analysis — ✅ Done
+#### 10.5 Position Sizing & Lifecycle — ✅ Done
 
-### 12.2 Risk Budgeting
+#### 10.2 Portfolio Optimization — Planned
+- Efficient frontier, what-if scenarios, Sharpe-improving suggestions
 
-- Define risk budget per tier: "Core can use 60% of risk budget, Growth 30%, Starter 10%"
-- Track actual vs budgeted risk contribution per position
-- Alert when a position's risk contribution exceeds its tier allowance
+#### 10.3 Stress Testing — Planned
+- Historical replays, factor shocks, VaR
 
-### 12.3 Regime-Aware Risk
+#### 10.4 Rebalancing Suggestions — Partially done
+- [x] Drift analysis with MV columns
+- [x] Dynamic basket sizing from target %
+- [ ] Tax-efficient suggestions (wash sale detection)
 
-- Different risk parameters by regime type (trend vs sorting)
-- "Portfolio beta is 1.3 on a sorting day — consider reducing"
-- Historical drawdown by regime type
-- Regime persistence analysis: how long do sorting/trend regimes last
+### Phase 11: Equity Research Engine
 
----
+#### 11.1 Research Templates — ✅ Done
+- [x] `research <symbol>` — auto-populated from FMP (financials, key metrics, estimates)
+- [x] Research notes by section (business_model, moat, risks, catalyst, etc.)
+- [ ] Peer comparison tables (same sector/industry)
 
-## Backlog / Future Ideas
+#### 11.2 Thesis Scoring Visual Dashboard — Planned
+- Visual dashboard in app (CLI scoring done)
 
-- **4.6** Remote control capability (trigger actions via push notification reply)
-- **Factor exposure decomposition** (growth vs value, large vs small) — deferred from 10.1
+#### 11.3 Earnings Workflow — ✅ Done
+
+#### 11.4 Research Integration — Partially done
+- [x] Scorecard→thesis doc auto-sync
+- [x] Scorecard→basket conflict detection
+- [ ] Surface research notes in pre-trade checklist
+
+#### 11.5 Valuation Framework — ✅ Done
+- [x] CLI: valuation, valuations, screen, confluence
+- [x] Auto-fetched daily for 68 symbols (portfolio + watchlist)
+- [x] ADR handling (skip forward PE, use trailing PE)
+- [x] Valuation alerts in briefing (tier mismatches)
+- [x] Valuation gate in pre-trade checklist
+- [x] App: valuation column on Holdings + Valuation tab on Analytics
+- [x] Fair price range in intent modal
+
+### Phase 12: Risk Analysis (deprioritized)
+
+#### 12.1 Risk Dashboard — ✅ Done
+#### 12.2 Risk Budgeting — Planned
+#### 12.3 Regime-Aware Risk — Planned
+
+### Phase 16: Workflow Connections — ✅ Foundation done
+
+#### 16.1 Triage — ✅ Done
+- Prioritized action list (CRITICAL/HIGH/MEDIUM/INFO)
+- Integrated into `morning` composite
+- Each item has actionable command
+
+#### 16.2 Trade Entry Flow — ✅ Done
+- `trade-enter` chains: pre-trade check → buy → log trade → prompt stop
+- `trade-setup` provides analysis before entry
+
+#### 16.3 Thesis ↔ Basket Sync — ✅ Done
+- Scorecard-update auto-updates thesis doc
+- Scorecard-update checks for basket conflicts (bear triggered + active buy orders)
+- Earnings-review auto-exports thesis snapshot
+- Basket auto-resizes on refresh
+
+#### 16.4 Earnings Mode — Planned
+- Composite command: pull research + scorecard + observations for earnings review
+
+#### 16.5 Regime-Filtered Screening — Planned
+- `screen` and `confluence` respect today's regime (don't surface punished sectors)
+
+### Phase 17: Trading Account — ✅ Done
+
+- [x] `trading_positions` table (entry thesis, stop, time limit, P&L)
+- [x] `trade-open/close/trades` commands
+- [x] `trade-stats` P&L dashboard (win rate, avg R/R, hold period stats)
+- [x] `trade-setup` guided analysis (valuation + S/R + sizing + commands)
+- [x] `trade-enter` composite (pre-trade → buy → log → stop prompt)
+- [x] Mandatory stop in pre-trade checklist (hard gate)
+- [x] Expiry alerts in morning briefing
+- [x] Pre-trade boundary violation message distinguishes buy vs sell
 
 ---
 
 ## Implementation Priority
 
-| Phase | Status | What | Why |
-|-------|--------|------|-----|
-| **10.5** | ✅ Done | Position sizing & lifecycle | Target sizing, ATR tranches, new position support |
-| **11.5** | Partial | Valuation framework | CLI done, pre-trade/briefing/app integration remaining |
-| **11.1** | Planned | Research templates | Structured thesis building |
-| **11.2** | Planned | Thesis scoring in app | Visual dashboard (CLI done) |
-| **11.4** | Planned | Research integration | Surface research in pre-trade flow |
-| **10.2** | Planned | Portfolio optimization | Efficient frontier, what-if scenarios |
-| **10.3** | Planned | Stress testing | Historical replays, factor shocks, VaR |
-| **10.4** | Planned | Rebalancing suggestions | Tax-efficient drift correction |
-| **12.2** | Planned | Risk budgeting | Per-tier risk allocation |
-| **12.3** | Planned | Regime-aware risk | Different params by regime type |
+| Item | Status | Mode | Impact |
+|------|--------|------|--------|
+| **16.5** Regime-filtered screening | Planned | 2 | High — prevents fighting the tape |
+| **16.4** Earnings mode composite | Planned | 1 | Medium — convenience |
+| **11.4** Research in pre-trade | Partial | 4 | Medium — surface notes during trades |
+| **11.1** Peer comparison | Planned | 6 | Low — research quality |
+| **11.2** Thesis dashboard in app | Planned | 1 | Low — CLI works |
+| **10.2** Portfolio optimization | Planned | 5 | Deprioritized |
+| **10.3** Stress testing | Planned | 5 | Deprioritized |
+| **12.2** Risk budgeting | Planned | 5 | Deprioritized |
+| **12.3** Regime-aware risk | Planned | 5 | Deprioritized |
 
 ---
 
@@ -143,5 +164,6 @@ Per the design principles:
 - No "top ideas" ranking
 - No alerts that demand action (monitors surface info, human decides)
 - No predictions — scenarios show possibilities, not forecasts
+- No automated trading — manual execution with governance support
 
 The co-pilot exists to **protect process**, not ego.
