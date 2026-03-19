@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
-import { useEmsBaskets } from '../hooks/useApi';
+import { useEffect, useState, useMemo } from 'react';
+import { useEmsBaskets, useValuationMetrics } from '../hooks/useApi';
 import type { EntryPlanTranche } from '../../shared/types';
 
 export default function EmsBaskets() {
   const { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket } = useEmsBaskets();
+  const { valuations } = useValuationMetrics();
   const [selectedBasket, setSelectedBasket] = useState<string | null>(null);
+  const [showCompleted, setShowCompleted] = useState(false);
 
   useEffect(() => {
     fetchBaskets();
@@ -37,25 +39,74 @@ export default function EmsBaskets() {
   }, { total: 0, pending: 0, triggered: 0, submitted: 0, filled: 0, cancelled: 0 }) || { total: 0, pending: 0, triggered: 0, submitted: 0, filled: 0, cancelled: 0 };
 
   // Flatten all tranches with plan info for the detail table
-  const allTranches: Array<EntryPlanTranche & { symbol: string; side: string }> = [];
-  if (activeBasket?.plans) {
-    for (const plan of activeBasket.plans) {
-      for (const tranche of (plan.tranches || [])) {
-        allTranches.push({
-          ...tranche,
-          symbol: plan.symbol || '?',
-          side: plan.side || 'buy',
-        });
+  const allTranches: Array<EntryPlanTranche & { symbol: string; side: string }> = useMemo(() => {
+    const result: Array<EntryPlanTranche & { symbol: string; side: string }> = [];
+    if (activeBasket?.plans) {
+      for (const plan of activeBasket.plans) {
+        for (const tranche of (plan.tranches || [])) {
+          result.push({
+            ...tranche,
+            symbol: plan.symbol || '?',
+            side: plan.side || 'buy',
+          });
+        }
       }
     }
-  }
+    result.sort((a, b) => {
+      if (a.side !== b.side) return a.side === 'sell' ? -1 : 1;
+      if (a.symbol !== b.symbol) return a.symbol.localeCompare(b.symbol);
+      return (a.trancheNumber || 0) - (b.trancheNumber || 0);
+    });
+    return result;
+  }, [activeBasket]);
 
-  // Sort: sells first, then buys, then by symbol, then tranche number
-  allTranches.sort((a, b) => {
-    if (a.side !== b.side) return a.side === 'sell' ? -1 : 1;
-    if (a.symbol !== b.symbol) return a.symbol.localeCompare(b.symbol);
-    return (a.trancheNumber || 0) - (b.trancheNumber || 0);
-  });
+  const filteredTranches = useMemo(() => {
+    if (showCompleted) return allTranches;
+    return allTranches.filter(t => t.status !== 'filled' && t.status !== 'cancelled');
+  }, [allTranches, showCompleted]);
+
+  // Compute allocation context per symbol
+  const symbolAllocation = useMemo(() => {
+    if (!activeBasket?.plans) return new Map<string, {
+      side: string; curMv: number; tgtMv: number; curPct: number; tgtPct: number;
+      needQty: number; basketQty: number; status: string;
+    }>();
+
+    // Get portfolio total from valuation data or estimate from plans
+    // We'll use plan data to compute what we can
+    const map = new Map<string, {
+      side: string; curMv: number; tgtMv: number; curPct: number; tgtPct: number | null;
+      needQty: number | null; basketQty: number; status: string;
+    }>();
+
+    // Group by symbol+side
+    const bySymbol = new Map<string, { side: string; totalShares: number; activeShares: number }>();
+    for (const plan of activeBasket.plans) {
+      const sym = plan.symbol || '?';
+      const side = plan.side || 'buy';
+      const key = `${sym}_${side}`;
+      const existing = bySymbol.get(key) || { side, totalShares: 0, activeShares: 0 };
+      for (const t of (plan.tranches || [])) {
+        existing.totalShares += t.shares;
+        if (t.status === 'pending' || t.status === 'triggered' || t.status === 'submitted') {
+          existing.activeShares += t.shares;
+        }
+      }
+      bySymbol.set(key, existing);
+    }
+
+    for (const [key, data] of bySymbol) {
+      const sym = key.split('_')[0];
+      map.set(key, {
+        side: data.side,
+        curMv: 0, tgtMv: 0, curPct: 0, tgtPct: null,
+        needQty: null, basketQty: data.activeShares,
+        status: data.activeShares === 0 ? 'DONE' : 'ACTIVE',
+      });
+    }
+
+    return map;
+  }, [activeBasket]);
 
   return (
     <div className="space-y-6">
@@ -77,6 +128,15 @@ export default function EmsBaskets() {
               ))}
             </select>
           )}
+          <label className="flex items-center gap-2 text-sm text-gray-600">
+            <input
+              type="checkbox"
+              checked={showCompleted}
+              onChange={e => setShowCompleted(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            Show filled/cancelled
+          </label>
           <button
             onClick={() => { fetchBaskets(); if (selectedBasket) fetchBasket(selectedBasket); }}
             disabled={loading}
@@ -144,8 +204,11 @@ export default function EmsBaskets() {
       {/* Tranche detail table */}
       {activeBasket && (
         <div className="bg-white rounded-lg border border-gray-200">
-          <div className="px-6 py-4 border-b border-gray-200">
+          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
             <h2 className="text-lg font-semibold text-gray-900">Tranches</h2>
+            <span className="text-xs text-gray-400">
+              {filteredTranches.length} of {allTranches.length} shown
+            </span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -164,11 +227,11 @@ export default function EmsBaskets() {
                 </tr>
               </thead>
               <tbody>
-                {allTranches.length === 0 ? (
+                {filteredTranches.length === 0 ? (
                   <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-400">
-                    {loading ? 'Loading...' : 'No tranches'}
+                    {loading ? 'Loading...' : showCompleted ? 'No tranches' : 'No active tranches'}
                   </td></tr>
-                ) : allTranches.map((t, i) => (
+                ) : filteredTranches.map((t, i) => (
                   <tr key={t.id || i} className="border-b border-gray-100 hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium">{t.symbol}</td>
                     <td className="px-4 py-3">
@@ -203,6 +266,12 @@ export default function EmsBaskets() {
           </div>
         </div>
       )}
+
+      {/* CLI hint */}
+      <div className="text-xs text-gray-400 text-center">
+        Use <code className="bg-gray-100 px-1 rounded">pm-cli.sh basket {selectedBasket || '<name>'}</code> for full allocation view with target % and post-rebalance projection.
+        Use <code className="bg-gray-100 px-1 rounded">pm-cli.sh basket-resize {selectedBasket || '<name>'}</code> to auto-resize tranches to target allocations.
+      </div>
     </div>
   );
 }
