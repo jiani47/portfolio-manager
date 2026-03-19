@@ -1,6 +1,7 @@
 #!/bin/bash
 # Research commands: recall, observe, observations, scorecard, scorecards,
-# scorecard-update, scorecard-history, scorecard-add, scorecard-rm
+# scorecard-update, scorecard-history, scorecard-add, scorecard-rm,
+# note, notes, thesis-export
 
 case "$1" in
   recall)
@@ -605,4 +606,283 @@ with open(thesis_path, "w") as f:
     f.writelines(new_lines)
 PYEOF
     ;;
+
+  note)
+    # Add a research note: pm-cli.sh note <symbol> <section> "<content>" [source]
+    # Sections: business_model, moat, risks, valuation, catalyst, competitive, management, other
+    NOTE_SYM="$2"
+    NOTE_SECTION="$3"
+    NOTE_CONTENT="$4"
+    NOTE_SOURCE="${5:-}"
+    if [ -z "$NOTE_SYM" ] || [ -z "$NOTE_SECTION" ] || [ -z "$NOTE_CONTENT" ]; then
+      echo "Usage: pm-cli.sh note <symbol> <section> \"<content>\" [source]"
+      echo "  Sections: business_model, moat, risks, valuation, catalyst, competitive, management, other"
+      exit 1
+    fi
+    NOTE_SYM=$(echo "$NOTE_SYM" | tr '[:lower:]' '[:upper:]')
+    SEC_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$NOTE_SYM' LIMIT 1;")
+    if [ -z "$SEC_ID" ]; then
+      echo "Error: Security '$NOTE_SYM' not found"
+      exit 1
+    fi
+    NOTE_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+    # Create table if not exists (for CLI-only usage)
+    sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS research_notes (id TEXT PRIMARY KEY, security_id TEXT NOT NULL, symbol TEXT NOT NULL, section TEXT NOT NULL, content TEXT NOT NULL, source TEXT, created_at TEXT NOT NULL);"
+    sqlite3 "$DB" "CREATE INDEX IF NOT EXISTS idx_research_notes_symbol ON research_notes(symbol);"
+
+    NOTE_CONTENT_ESC=$(echo "$NOTE_CONTENT" | sed "s/'/''/g")
+    NOTE_SOURCE_ESC=$(echo "$NOTE_SOURCE" | sed "s/'/''/g")
+    SOURCE_SQL="NULL"
+    [ -n "$NOTE_SOURCE" ] && SOURCE_SQL="'$NOTE_SOURCE_ESC'"
+
+    sqlite3 "$DB" "INSERT INTO research_notes (id, security_id, symbol, section, content, source, created_at) VALUES ('$NOTE_ID', '$SEC_ID', '$NOTE_SYM', '$NOTE_SECTION', '$NOTE_CONTENT_ESC', $SOURCE_SQL, '$NOW');"
+    echo "Research note added: $NOTE_SYM [$NOTE_SECTION]"
+    ;;
+
+  notes)
+    # List research notes: pm-cli.sh notes [symbol]
+    NOTES_SYM="$2"
+    if [ -n "$NOTES_SYM" ]; then
+      NOTES_SYM=$(echo "$NOTES_SYM" | tr '[:lower:]' '[:upper:]')
+      NOTES_FILTER="WHERE symbol = '$NOTES_SYM'"
+    else
+      NOTES_FILTER=""
+    fi
+    echo "=== Research Notes ==="
+    sqlite3 "$DB" "
+      SELECT date(created_at) as date, symbol, section, substr(content, 1, 80) as content, source
+      FROM research_notes $NOTES_FILTER
+      ORDER BY created_at DESC LIMIT 30;
+    " | while IFS='|' read -r DATE SYM SEC CONTENT SRC; do
+      SRC_TAG=""
+      [ -n "$SRC" ] && SRC_TAG=" [${SRC}]"
+      echo "  $DATE  $SYM  ($SEC)  ${CONTENT}${SRC_TAG}"
+    done
+    ;;
+
+  thesis-export)
+    # Export thesis as markdown snapshot: pm-cli.sh thesis-export <symbol>
+    # Assembles all DB parts into a single document
+    EXPORT_SYM="$2"
+    if [ -z "$EXPORT_SYM" ]; then
+      echo "Usage: pm-cli.sh thesis-export <symbol>"
+      exit 1
+    fi
+    EXPORT_SYM=$(echo "$EXPORT_SYM" | tr '[:lower:]' '[:upper:]')
+
+    python3 - "$EXPORT_SYM" "$DB" << 'PYEOF'
+import sqlite3, sys, datetime
+
+symbol = sys.argv[1]
+db_path = sys.argv[2]
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+sec = conn.execute("SELECT id FROM securities WHERE symbol = ?", (symbol,)).fetchone()
+if not sec:
+    print(f"Error: {symbol} not found")
+    sys.exit(1)
+sec_id = sec['id']
+
+now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+
+# --- Gather all parts ---
+
+# Intent
+intent = conn.execute("""
+    SELECT pi.tier, pi.thesis, pi.invalidation, pi.entry_style,
+           pi.target_hold_period, pi.target_allocation_pct
+    FROM position_intents pi
+    JOIN positions p ON pi.position_id = p.id
+    WHERE p.security_id = ? LIMIT 1
+""", (sec_id,)).fetchone()
+
+# Position
+pos = conn.execute("""
+    SELECT SUM(p.quantity) as qty, SUM(p.cost_basis) as cost,
+        (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1) as price
+    FROM positions p WHERE p.security_id = ? AND p.quantity > 0
+""", (sec_id,)).fetchone()
+
+# Recent score changes
+score_changes = conn.execute("""
+    SELECT criteria_number, old_status, new_status, reason, changed_at
+    FROM thesis_score_changes WHERE security_id = ?
+    ORDER BY changed_at DESC LIMIT 10
+""", (sec_id,)).fetchall()
+
+# Observations
+observations = conn.execute("""
+    SELECT observation_date as date, note, thesis_impact FROM observations
+    WHERE security_id = ? ORDER BY observation_date DESC LIMIT 20
+""", (sec_id,)).fetchall()
+
+# Research notes
+notes = conn.execute("""
+    SELECT section, content, source, created_at FROM research_notes
+    WHERE symbol = ? ORDER BY section, created_at
+""", (symbol,)).fetchall()
+
+# Valuation
+val = conn.execute("""
+    SELECT * FROM valuation_metrics WHERE symbol = ? ORDER BY date DESC LIMIT 1
+""", (symbol,)).fetchone()
+
+# Earnings reviews
+reviews = conn.execute("""
+    SELECT quarter, earnings_date, revenue_expected, revenue_actual,
+           eps_expected, eps_actual, growth_trajectory, thesis_impact,
+           decision, decision_notes
+    FROM earnings_reviews WHERE security_id = ?
+    ORDER BY earnings_date DESC LIMIT 5
+""", (sec_id,)).fetchall()
+
+# S/R levels
+levels = conn.execute("""
+    SELECT level_type, price, strength FROM price_levels
+    WHERE symbol = ? ORDER BY price
+""", (symbol,)).fetchall()
+
+# --- Assemble ---
+lines = []
+lines.append(f"# {symbol} — Thesis Snapshot")
+lines.append(f"*Exported {now} from portfolio-manager DB*\n")
+
+# Position
+if intent:
+    lines.append("## Position")
+    lines.append(f"- **Tier**: {intent['tier'] or '—'}")
+    lines.append(f"- **Target Allocation**: {intent['target_allocation_pct'] or '—'}%")
+    if pos and pos['qty']:
+        qty = int(pos['qty'])
+        price = pos['price'] or 0
+        cost = pos['cost'] or 0
+        mv = qty * price
+        avg = cost / qty if qty > 0 else 0
+        pnl_pct = ((price - avg) / avg * 100) if avg > 0 else 0
+        lines.append(f"- **Shares**: {qty} @ ${avg:.2f} avg → ${price:.2f} ({pnl_pct:+.1f}%)")
+        lines.append(f"- **Market Value**: ${mv:,.0f}")
+    lines.append(f"- **Hold Period**: {intent['target_hold_period'] or '—'}")
+    lines.append("")
+
+# Thesis & Invalidation
+if intent:
+    lines.append("## Thesis")
+    lines.append(f"{intent['thesis'] or 'No thesis documented.'}\n")
+    lines.append("## Invalidation Conditions")
+    lines.append(f"{intent['invalidation'] or 'No invalidation documented.'}\n")
+
+# Scorecard — read from thesis doc on disk if exists
+import os
+thesis_disk = os.path.expanduser(f"~/workspace/portfolio-manager/docs/positions/{symbol}/thesis.md")
+if os.path.exists(thesis_disk):
+    with open(thesis_disk) as f:
+        content = f.read()
+    # Extract bull/bear tables if present
+    for section_name in ['Bull Criteria', 'Bear Criteria']:
+        idx = content.find(section_name)
+        if idx >= 0:
+            # Find the table after the header
+            table_start = content.find('|', idx)
+            if table_start >= 0:
+                table_end = content.find('\n\n', table_start)
+                if table_end < 0: table_end = len(content)
+                table_block = content[idx:table_end].strip()
+                if 'Scorecard' not in ''.join(lines):
+                    lines.append("## Scorecard")
+                lines.append(f"\n### {section_name}")
+                for line in table_block.split('\n')[1:]:  # skip the header "### Bull Criteria"
+                    lines.append(line)
+    if 'Scorecard' in ''.join(lines):
+        lines.append("")
+
+# Score changes (from DB — always available)
+if score_changes:
+    lines.append("### Recent Score Changes")
+    for sc in score_changes:
+        lines.append(f"- **{sc['changed_at'][:10]}** {sc['criteria_number']}: {sc['old_status']} → {sc['new_status']} — {sc['reason']}")
+    lines.append("")
+
+# Valuation
+if val:
+    lines.append("## Valuation")
+    lines.append(f"- T12 PE: {val['trailing_pe']:.1f}x" if val['trailing_pe'] else "- T12 PE: N/A")
+    lines.append(f"- Forward PE: {val['forward_pe']:.1f}x" if val['forward_pe'] else "- Forward PE: N/A (ADR)")
+    lines.append(f"- PEG (forward): {val['forward_peg']:.2f}" if val['forward_peg'] else "- PEG: N/A")
+    lines.append(f"- Rating: **{val['peg_rating']}**" if val['peg_rating'] else "- Rating: N/A")
+    if val['eps_growth_pct']:
+        lines.append(f"- EPS Growth: {val['eps_growth_pct']:+.1f}%")
+    if val['fair_low'] and val['fair_high']:
+        lines.append(f"- Fair Range: ${val['fair_low']:.0f} – ${val['fair_mid']:.0f} – ${val['fair_high']:.0f}")
+    lines.append(f"- *As of {val['date']}*")
+    lines.append("")
+
+# S/R Levels
+if levels:
+    supports = [l for l in levels if l['level_type'] == 'support']
+    resistances = [l for l in levels if l['level_type'] == 'resistance']
+    lines.append("## Support / Resistance")
+    for s in supports:
+        lines.append(f"- S ${s['price']:.2f} (strength {s['strength']}/10)")
+    for r in resistances:
+        lines.append(f"- R ${r['price']:.2f} (strength {r['strength']}/10)")
+    lines.append("")
+
+# Research Notes
+if notes:
+    lines.append("## Research Notes")
+    current_section = None
+    for n in notes:
+        if n['section'] != current_section:
+            current_section = n['section']
+            lines.append(f"\n### {current_section.replace('_', ' ').title()}")
+        src = f" [{n['source']}]" if n['source'] else ""
+        lines.append(f"- *{n['created_at'][:10]}*: {n['content']}{src}")
+    lines.append("")
+
+# Observations
+if observations:
+    lines.append("## Observations (recent)")
+    for o in observations:
+        impact = {'supports': '+', 'challenges': '-', 'neutral': '~'}.get(o['thesis_impact'] or '', '~')
+        lines.append(f"- **{o['date'][:10]}** [{impact}] {o['note']}")
+    lines.append("")
+
+# Earnings Reviews
+if reviews:
+    lines.append("## Earnings Reviews")
+    for r in reviews:
+        rev_str = f"Rev: {r['revenue_actual'] or '?'} vs {r['revenue_expected'] or '?'}" if r['revenue_expected'] else ""
+        eps_str = f"EPS: {r['eps_actual'] or '?'} vs {r['eps_expected'] or '?'}" if r['eps_expected'] else ""
+        lines.append(f"### {r['quarter']} ({r['earnings_date']})")
+        if rev_str: lines.append(f"- {rev_str}")
+        if eps_str: lines.append(f"- {eps_str}")
+        lines.append(f"- Trajectory: {r['growth_trajectory']} | Impact: **{r['thesis_impact']}**")
+        if r['decision']:
+            lines.append(f"- Decision: {r['decision']}")
+        if r['decision_notes']:
+            lines.append(f"- Notes: {r['decision_notes']}")
+    lines.append("")
+
+# Output
+output = "\n".join(lines)
+print(output)
+
+# Also write to docs/positions/<SYMBOL>/thesis.md
+import os
+thesis_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(db_path))), "workspace", "portfolio-manager", "docs", "positions", symbol)
+# Try the standard path
+thesis_dir = os.path.expanduser(f"~/workspace/portfolio-manager/docs/positions/{symbol}")
+os.makedirs(thesis_dir, exist_ok=True)
+thesis_path = os.path.join(thesis_dir, "thesis.md")
+with open(thesis_path, "w") as f:
+    f.write(output)
+print(f"\n--- Exported to {thesis_path} ---")
+
+conn.close()
+PYEOF
+    ;;
+
 esac

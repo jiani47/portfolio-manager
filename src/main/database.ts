@@ -761,6 +761,22 @@ export class Database {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_score_security ON thesis_score_changes(security_id)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_score_date ON thesis_score_changes(changed_at)');
 
+    // Research notes table (append-only log)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS research_notes (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        section TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      )
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_research_notes_symbol ON research_notes(symbol)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_research_notes_section ON research_notes(section)');
+
     // Valuation metrics table
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS valuation_metrics (

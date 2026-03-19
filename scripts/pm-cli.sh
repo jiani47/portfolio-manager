@@ -26,7 +26,7 @@ EMS (Execution Management):
 
 Research:
   scorecard, scorecards, scorecard-update, scorecard-history, scorecard-add
-  scorecard-rm, observe, observations, recall
+  scorecard-rm, observe, observations, recall, note, notes, thesis-export
 
 Analytics:
   analytics, correlations, attribution
@@ -79,7 +79,7 @@ case "$CMD" in
     source "$SCRIPT_DIR/commands/ems.sh" ;;
 
   # Research
-  scorecard|scorecards|scorecard-update|scorecard-history|scorecard-add|scorecard-rm|observe|observations|recall)
+  scorecard|scorecards|scorecard-update|scorecard-history|scorecard-add|scorecard-rm|observe|observations|recall|note|notes|thesis-export)
     source "$SCRIPT_DIR/commands/pretrade.sh"
     source "$SCRIPT_DIR/commands/research.sh" ;;
 
