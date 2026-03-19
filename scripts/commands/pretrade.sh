@@ -489,7 +489,11 @@ check_boundary() {
     " 2>/dev/null)
     if [ "$sell_count" -ge 3 ] 2>/dev/null; then
       echo "  ⚠ WARN: Boundary violation — $sell_count sells on $symbol in 90 days"
-      echo "          This is an investing position. If you believe the thesis, hold."
+      if [ "$side" = "sell" ]; then
+        echo "          This is an investing position. If you believe the thesis, hold."
+      else
+        echo "          High churn on investing position. Ensure this add is planned, not reactive."
+      fi
       read -p "    Override? (y/n): " ov
       [ "$ov" != "y" ] && return 1
     else
