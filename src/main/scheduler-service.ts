@@ -121,6 +121,13 @@ export class SchedulerService {
         enabled: true,
       },
       {
+        id: 'daily-valuations',
+        name: 'Valuation Metrics',
+        schedule: { type: 'daily', dailyHourET: 7 },
+        execute: () => this.executeValuations(),
+        enabled: true,
+      },
+      {
         id: 'daily-news',
         name: 'News Refresh',
         schedule: { type: 'interval', intervalMs: 10 * 60 * 1000, wakingHoursOnly: true },
@@ -515,6 +522,110 @@ export class SchedulerService {
         this.db.syncEarningsMonitors(earnings);
       }
       return { success: true, message: `Found ${earnings.length} upcoming earnings events` };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private async executeValuations(): Promise<TaskResult> {
+    try {
+      const fs = await import('fs');
+      const os = await import('os');
+      const path = await import('path');
+      const confPath = path.join(os.homedir(), '.pm-cli.conf');
+      const content = fs.readFileSync(confPath, 'utf-8');
+      const match = content.match(/^FMP_API_KEY=(.+)$/m);
+      const apiKey = match ? match[1].trim() : null;
+      if (!apiKey) return { success: false, message: 'No FMP API key configured' };
+
+      const symbols = this.getPortfolioAndWatchlistSymbols();
+      if (symbols.length === 0) return { success: true, message: 'No symbols for valuations' };
+
+      const today = new Date().toISOString().split('T')[0];
+      let count = 0;
+
+      for (const symbol of symbols) {
+        try {
+          const price = this.db.getLatestPriceBySymbol(symbol);
+          if (!price) continue;
+
+          // Fetch ratios TTM
+          const ratiosResp = await fetch(
+            `https://financialmodelingprep.com/stable/ratios-ttm?symbol=${symbol}&apikey=${apiKey}`
+          );
+          const ratios = ratiosResp.ok ? await ratiosResp.json() : [];
+          const r = Array.isArray(ratios) && ratios.length > 0 ? (ratios as any[])[0] : {} as any;
+
+          const t12Pe = r.priceToEarningsRatioTTM || 0;
+          const peg = r.priceToEarningsGrowthRatioTTM || 0;
+          const fwdPeg = r.forwardPriceToEarningsGrowthRatioTTM || 0;
+          const ps = r.priceToSalesRatioTTM || 0;
+          const t12Eps = t12Pe > 0 ? price / t12Pe : null;
+
+          // Fetch analyst estimates
+          const estResp = await fetch(
+            `https://financialmodelingprep.com/stable/analyst-estimates?symbol=${symbol}&period=annual&limit=8&apikey=${apiKey}`
+          );
+          const estimates = estResp.ok ? await estResp.json() : [];
+          const sorted = Array.isArray(estimates) ? (estimates as any[]).sort((a, b) => a.date.localeCompare(b.date)) : [];
+          const future = sorted.filter(e => e.date > today && e.epsAvg > 0);
+
+          let fwdEps: number | null = null, fwdPe: number | null = null, fwdFyEnd: string | null = null;
+          let nextEps: number | null = null, nextFyEnd: string | null = null;
+          let epsGrowth: number | null = null, numAnalysts: number | null = null;
+
+          if (future.length >= 1) {
+            fwdEps = future[0].epsAvg;
+            fwdFyEnd = future[0].date.substring(0, 10);
+            fwdPe = price / fwdEps!;
+            numAnalysts = future[0].numAnalystsEps || 0;
+          }
+          if (future.length >= 2 && fwdEps) {
+            nextEps = future[1].epsAvg;
+            nextFyEnd = future[1].date.substring(0, 10);
+            epsGrowth = (nextEps! - fwdEps) / fwdEps * 100;
+          }
+
+          // Fair price range
+          let fairLow: number | null = null, fairMid: number | null = null, fairHigh: number | null = null;
+          if (fwdEps && fwdPe) {
+            if (fwdPe > 30) {
+              fairLow = fwdEps * fwdPe * 0.75;
+              fairMid = fwdEps * fwdPe * 0.90;
+              fairHigh = fwdEps * fwdPe * 1.10;
+            } else {
+              fairLow = fwdEps * fwdPe * 0.85;
+              fairMid = fwdEps * fwdPe * 1.0;
+              fairHigh = fwdEps * fwdPe * 1.15;
+            }
+            if (epsGrowth && epsGrowth > 0) {
+              const peg1Price = fwdEps * epsGrowth;
+              if (peg1Price > fairHigh) fairHigh = peg1Price;
+            }
+          }
+
+          // PEG rating
+          let pegRating: string | null = null;
+          if (fwdPeg > 0) {
+            if (fwdPeg < 0.8) pegRating = 'CHEAP';
+            else if (fwdPeg < 1.2) pegRating = 'FAIR';
+            else if (fwdPeg < 2.0) pegRating = 'RICH';
+            else pegRating = 'PRICEY';
+          }
+
+          this.db.saveValuationMetric({
+            symbol, date: today, trailingPe: t12Pe, forwardPe: fwdPe, peg, forwardPeg: fwdPeg,
+            psRatio: ps, trailingEps: t12Eps, forwardEps: fwdEps, forwardEpsFyEnd: fwdFyEnd,
+            nextEps, nextEpsFyEnd: nextFyEnd, epsGrowthPct: epsGrowth, numAnalysts,
+            fairLow, fairMid, fairHigh, pegRating,
+          });
+          count++;
+        } catch {
+          // Skip failed symbols
+        }
+      }
+
+      return { success: true, message: `Updated ${count} valuations` };
     } catch (err) {
       return { success: false, message: err instanceof Error ? err.message : String(err) };
     }

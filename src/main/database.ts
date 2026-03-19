@@ -760,6 +760,34 @@ export class Database {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_score_security ON thesis_score_changes(security_id)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_score_date ON thesis_score_changes(changed_at)');
 
+    // Valuation metrics table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS valuation_metrics (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        date TEXT NOT NULL,
+        trailing_pe REAL,
+        forward_pe REAL,
+        peg REAL,
+        forward_peg REAL,
+        ps_ratio REAL,
+        trailing_eps REAL,
+        forward_eps REAL,
+        forward_eps_fy_end TEXT,
+        next_eps REAL,
+        next_eps_fy_end TEXT,
+        eps_growth_pct REAL,
+        num_analysts INTEGER,
+        fair_low REAL,
+        fair_mid REAL,
+        fair_high REAL,
+        peg_rating TEXT,
+        fetched_at TEXT NOT NULL,
+        UNIQUE(symbol, date)
+      )
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_valuation_symbol ON valuation_metrics(symbol)');
+
     // Sync watchlist monitors on startup
     this.syncWatchlistMonitors();
   }
@@ -1001,6 +1029,39 @@ export class Database {
       date: r.date,
       fetchedAt: r.fetched_at,
     }));
+  }
+
+  getLatestPriceBySymbol(symbol: string): number | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row: any = this.db.prepare(`
+      SELECT ph.close_price FROM price_history ph
+      JOIN securities s ON ph.security_id = s.id
+      WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+    `).get(symbol);
+    return row ? row.close_price : null;
+  }
+
+  saveValuationMetric(data: {
+    symbol: string; date: string; trailingPe: number | null; forwardPe: number | null;
+    peg: number | null; forwardPeg: number | null; psRatio: number | null;
+    trailingEps: number | null; forwardEps: number | null; forwardEpsFyEnd: string | null;
+    nextEps: number | null; nextEpsFyEnd: string | null; epsGrowthPct: number | null;
+    numAnalysts: number | null; fairLow: number | null; fairMid: number | null;
+    fairHigh: number | null; pegRating: string | null;
+  }): void {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT OR REPLACE INTO valuation_metrics
+      (id, symbol, date, trailing_pe, forward_pe, peg, forward_peg, ps_ratio,
+       trailing_eps, forward_eps, forward_eps_fy_end, next_eps, next_eps_fy_end,
+       eps_growth_pct, num_analysts, fair_low, fair_mid, fair_high, peg_rating, fetched_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, data.symbol, data.date, data.trailingPe, data.forwardPe, data.peg, data.forwardPeg,
+      data.psRatio, data.trailingEps, data.forwardEps, data.forwardEpsFyEnd,
+      data.nextEps, data.nextEpsFyEnd, data.epsGrowthPct, data.numAnalysts,
+      data.fairLow, data.fairMid, data.fairHigh, data.pegRating, now);
   }
 
   private mapRowToPriceHistory = (row: unknown): PriceHistory => {

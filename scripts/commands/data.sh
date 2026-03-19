@@ -191,6 +191,143 @@ print(count)
         sqlite3 "$DB" "DELETE FROM news WHERE published_at < datetime('now', '-30 days');"
         echo "  Archived $ARCHIVE_COUNT old articles to news-archive/"
       fi
+
+      # Fetch valuation metrics for portfolio + watchlist stocks
+      echo ""
+      echo "Fetching valuations from FMP..."
+
+      VAL_SYMBOLS=$(sqlite3 "$DB" "
+        SELECT DISTINCT symbol FROM (
+          SELECT s.symbol FROM positions p JOIN securities s ON p.security_id = s.id
+          WHERE s.type = 'stock' AND p.quantity > 0
+          UNION
+          SELECT wi.symbol FROM watchlist_items wi
+        ) ORDER BY symbol;
+      ")
+
+      python3 - "$FMP_KEY" "$DB" "$VAL_SYMBOLS" << 'PYEOF'
+import json, urllib.request, sqlite3, sys, uuid, datetime
+
+fmp_key = sys.argv[1]
+db_path = sys.argv[2]
+symbols_raw = sys.argv[3]
+symbols = [s.strip() for s in symbols_raw.strip().split('\n') if s.strip()]
+BASE = "https://financialmodelingprep.com/stable"
+today = datetime.date.today()
+today_str = today.isoformat()
+now_ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+# Create table if not exists (for CLI-only usage without app)
+conn.execute('''CREATE TABLE IF NOT EXISTS valuation_metrics (
+    id TEXT PRIMARY KEY, symbol TEXT NOT NULL, date TEXT NOT NULL,
+    trailing_pe REAL, forward_pe REAL, peg REAL, forward_peg REAL,
+    ps_ratio REAL, trailing_eps REAL, forward_eps REAL, forward_eps_fy_end TEXT,
+    next_eps REAL, next_eps_fy_end TEXT, eps_growth_pct REAL, num_analysts INTEGER,
+    fair_low REAL, fair_mid REAL, fair_high REAL, peg_rating TEXT,
+    fetched_at TEXT NOT NULL, UNIQUE(symbol, date))''')
+
+def fetch(endpoint, symbol, params=""):
+    url = f"{BASE}/{endpoint}?symbol={symbol}&apikey={fmp_key}{params}"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except:
+        return None
+
+count = 0
+errors = 0
+for symbol in symbols:
+    try:
+        # Get price
+        price_row = conn.execute("""
+            SELECT ph.close_price FROM price_history ph
+            JOIN securities s ON ph.security_id = s.id
+            WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+        """, (symbol,)).fetchone()
+        if not price_row:
+            continue
+        price = price_row['close_price']
+
+        # Ratios TTM
+        ratios = fetch("ratios-ttm", symbol)
+        t12_pe = 0; peg = 0; fwd_peg = 0; ps = 0
+        if ratios and isinstance(ratios, list) and len(ratios) > 0:
+            r = ratios[0]
+            t12_pe = r.get('priceToEarningsRatioTTM', 0) or 0
+            peg = r.get('priceToEarningsGrowthRatioTTM', 0) or 0
+            fwd_peg = r.get('forwardPriceToEarningsGrowthRatioTTM', 0) or 0
+            ps = r.get('priceToSalesRatioTTM', 0) or 0
+
+        # Trailing EPS
+        t12_eps = price / t12_pe if t12_pe and t12_pe > 0 else None
+
+        # Analyst estimates
+        estimates = fetch("analyst-estimates", symbol, "&period=annual&limit=8")
+        fwd_pe = None; fwd_eps = None; fwd_fy_end = None
+        next_eps = None; next_fy_end = None; eps_growth = None; num_analysts = None
+
+        if estimates and isinstance(estimates, list):
+            estimates.sort(key=lambda x: x.get('date', ''))
+            future = [e for e in estimates if e.get('date', '') > today_str and e.get('epsAvg', 0) and e.get('epsAvg', 0) > 0]
+
+            if len(future) >= 1:
+                fwd_eps = future[0]['epsAvg']
+                fwd_fy_end = future[0]['date'][:10]
+                fwd_pe = price / fwd_eps
+                num_analysts = future[0].get('numAnalystsEps', 0)
+
+            if len(future) >= 2:
+                next_eps = future[1]['epsAvg']
+                next_fy_end = future[1]['date'][:10]
+                eps_growth = (next_eps - fwd_eps) / fwd_eps * 100 if fwd_eps else None
+
+        # Fair price range
+        fair_low = fair_mid = fair_high = None
+        if fwd_eps and fwd_pe:
+            if fwd_pe > 30:
+                fair_low = fwd_eps * fwd_pe * 0.75
+                fair_mid = fwd_eps * fwd_pe * 0.90
+                fair_high = fwd_eps * fwd_pe * 1.10
+            else:
+                fair_low = fwd_eps * fwd_pe * 0.85
+                fair_mid = fwd_eps * fwd_pe * 1.0
+                fair_high = fwd_eps * fwd_pe * 1.15
+            if eps_growth and eps_growth > 0 and fwd_eps:
+                peg1_price = fwd_eps * eps_growth
+                if peg1_price > fair_high:
+                    fair_high = peg1_price
+
+        # PEG rating
+        peg_rating = None
+        if fwd_peg and fwd_peg > 0:
+            if fwd_peg < 0.8: peg_rating = 'CHEAP'
+            elif fwd_peg < 1.2: peg_rating = 'FAIR'
+            elif fwd_peg < 2.0: peg_rating = 'RICH'
+            else: peg_rating = 'PRICEY'
+
+        # Upsert
+        row_id = str(uuid.uuid4())
+        conn.execute("""
+            INSERT OR REPLACE INTO valuation_metrics
+            (id, symbol, date, trailing_pe, forward_pe, peg, forward_peg, ps_ratio,
+             trailing_eps, forward_eps, forward_eps_fy_end, next_eps, next_eps_fy_end,
+             eps_growth_pct, num_analysts, fair_low, fair_mid, fair_high, peg_rating, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (row_id, symbol, today_str, t12_pe, fwd_pe, peg, fwd_peg, ps,
+              t12_eps, fwd_eps, fwd_fy_end, next_eps, next_fy_end,
+              eps_growth, num_analysts, fair_low, fair_mid, fair_high, peg_rating, now_ts))
+        count += 1
+    except Exception as e:
+        errors += 1
+
+conn.commit()
+conn.close()
+print(f"  Updated {count} valuations, {errors} errors")
+PYEOF
     fi
     ;;
 

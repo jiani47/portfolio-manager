@@ -862,101 +862,81 @@ PYEOF
     ;;
 
   valuations)
-    # Portfolio-wide valuation table
-    FMP_KEY=$(get_fmp_key)
-    if [ -z "$FMP_KEY" ]; then
-      echo "Error: FMP API key not configured in ~/.pm-cli.conf"
-      exit 1
-    fi
+    # Portfolio-wide valuation table (reads from DB — run refresh first)
+    SCOPE="${2:-portfolio}"
 
-    # Get all portfolio symbols
-    SYMBOLS=$(sqlite3 "$DB" "SELECT DISTINCT s.symbol FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type = 'stock' AND p.quantity > 0;")
+    python3 - "$DB" "$SCOPE" << 'PYEOF'
+import sqlite3, sys
 
-    python3 - "$FMP_KEY" "$DB" "$SYMBOLS" << 'PYEOF'
-import json, urllib.request, sqlite3, sys, datetime
-
-fmp_key = sys.argv[1]
-db_path = sys.argv[2]
-symbols_raw = sys.argv[3]
-symbols = [s.strip() for s in symbols_raw.strip().split('\n') if s.strip()]
-BASE = "https://financialmodelingprep.com/stable"
-current_year = datetime.date.today().year
+db_path = sys.argv[1]
+scope = sys.argv[2]
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 
-def fetch(endpoint, symbol, params=""):
-    url = f"{BASE}/{endpoint}?symbol={symbol}&apikey={fmp_key}{params}"
-    try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
-    except:
-        return None
+# Get symbols based on scope
+if scope == "all":
+    symbols = [r['symbol'] for r in conn.execute("""
+        SELECT DISTINCT symbol FROM valuation_metrics ORDER BY symbol
+    """).fetchall()]
+elif scope == "watchlist":
+    symbols = [r['symbol'] for r in conn.execute("""
+        SELECT DISTINCT wi.symbol FROM watchlist_items wi ORDER BY wi.symbol
+    """).fetchall()]
+else:
+    symbols = [r['symbol'] for r in conn.execute("""
+        SELECT DISTINCT s.symbol FROM positions p JOIN securities s ON p.security_id = s.id
+        WHERE s.type = 'stock' AND p.quantity > 0 ORDER BY s.symbol
+    """).fetchall()]
 
 print()
-print(f"=== Portfolio Valuations ===")
+print(f"=== {'Portfolio' if scope == 'portfolio' else scope.title()} Valuations ===")
+
+# Check if we have data
+has_data = conn.execute("SELECT COUNT(*) as c FROM valuation_metrics").fetchone()
+if not has_data or has_data['c'] == 0:
+    print("  No valuation data. Run: pm-cli.sh refresh")
+    sys.exit(0)
+
 print()
-print(f"  {'Symbol':<7} {'Price':>8} {'T12 PE':>8} {'Fwd PE':>8} {'PEG':>6} {'FY EPS':>8} {'Growth':>8} {'vs Fair':>8}")
+print(f"  {'Symbol':<7} {'Price':>8} {'T12 PE':>8} {'Fwd PE':>8} {'PEG':>6} {'FY EPS':>8} {'Growth':>8} {'Rating':>8}")
 print(f"  {'─'*7} {'─'*8} {'─'*8} {'─'*8} {'─'*6} {'─'*8} {'─'*8} {'─'*8}")
 
-for symbol in sorted(symbols):
-    # Get price
+for symbol in symbols:
+    # Latest valuation row
+    v = conn.execute("""
+        SELECT * FROM valuation_metrics WHERE symbol = ? ORDER BY date DESC LIMIT 1
+    """, (symbol,)).fetchone()
+    if not v:
+        continue
+
+    # Current price
     price_row = conn.execute("""
         SELECT ph.close_price FROM price_history ph
         JOIN securities s ON ph.security_id = s.id
         WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
     """, (symbol,)).fetchone()
-    if not price_row:
-        continue
-    price = price_row['close_price']
+    price = price_row['close_price'] if price_row else 0
 
-    # Ratios
-    ratios = fetch("ratios-ttm", symbol)
-    t12_pe = 0
-    fwd_peg = 0
-    if ratios and isinstance(ratios, list) and len(ratios) > 0:
-        t12_pe = ratios[0].get('priceToEarningsRatioTTM', 0) or 0
-        fwd_peg = ratios[0].get('forwardPriceToEarningsGrowthRatioTTM', 0) or 0
-
-    # Estimates
-    estimates = fetch("analyst-estimates", symbol, "&period=annual&limit=8")
-    fwd_pe = 0
-    fwd_eps = 0
-    eps_growth = ""
-    vs_fair = ""
-    today_str = datetime.date.today().isoformat()
-
-    if estimates and isinstance(estimates, list):
-        estimates.sort(key=lambda x: x.get('date', ''))
-        future = [e for e in estimates if e.get('date', '') > today_str and e.get('epsAvg', 0) and e.get('epsAvg', 0) > 0]
-        fy_current = future[0] if len(future) >= 1 else None
-        fy_next = future[1] if len(future) >= 2 else None
-
-        if fy_current and fy_current.get('epsAvg', 0) > 0:
-            fwd_eps = fy_current['epsAvg']
-            fwd_pe = price / fwd_eps
-
-            if fwd_peg and fwd_peg > 0:
-                if fwd_peg < 0.8:
-                    vs_fair = "CHEAP"
-                elif fwd_peg < 1.2:
-                    vs_fair = "FAIR"
-                elif fwd_peg < 2.0:
-                    vs_fair = "RICH"
-                else:
-                    vs_fair = "PRICEY"
-
-        if fy_current and fy_next and fy_current.get('epsAvg', 0) > 0 and fy_next.get('epsAvg', 0) > 0:
-            g = (fy_next['epsAvg'] - fy_current['epsAvg']) / fy_current['epsAvg'] * 100
-            eps_growth = f"{g:+.0f}%"
+    t12_pe = v['trailing_pe']
+    fwd_pe = v['forward_pe']
+    fwd_peg = v['forward_peg']
+    fwd_eps = v['forward_eps']
+    eps_g = v['eps_growth_pct']
+    rating = v['peg_rating'] or ''
 
     t12_str = f"{t12_pe:.1f}x" if t12_pe and t12_pe > 0 else "N/A"
     fwd_str = f"{fwd_pe:.1f}x" if fwd_pe and fwd_pe > 0 else "N/A"
     peg_str = f"{fwd_peg:.2f}" if fwd_peg and fwd_peg > 0 else "N/A"
     eps_str = f"${fwd_eps:.2f}" if fwd_eps else "N/A"
+    growth_str = f"{eps_g:+.0f}%" if eps_g else ""
 
-    print(f"  {symbol:<7} ${price:>7.2f} {t12_str:>8} {fwd_str:>8} {peg_str:>6} {eps_str:>8} {eps_growth:>8} {vs_fair:>8}")
+    print(f"  {symbol:<7} ${price:>7.2f} {t12_str:>8} {fwd_str:>8} {peg_str:>6} {eps_str:>8} {growth_str:>8} {rating:>8}")
+
+# Show data freshness
+latest = conn.execute("SELECT MAX(fetched_at) as ts FROM valuation_metrics").fetchone()
+if latest and latest['ts']:
+    print(f"\n  Data as of: {latest['ts'][:16]}")
 
 print()
 conn.close()
