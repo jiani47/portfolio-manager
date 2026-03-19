@@ -1294,4 +1294,7 @@ export function setupIpcHandlers(
   // Portfolio snapshot operations
   ipcMain.handle('db:snapshots:daily-totals', (_, days?: number) => db.getSnapshotDailyTotals(days));
   ipcMain.handle('db:snapshots:position-history', (_, symbol: string, days?: number) => db.getPositionSnapshotHistory(symbol, days));
+
+  // Valuation metrics
+  ipcMain.handle('db:valuations:list', () => db.listValuationMetrics());
 }

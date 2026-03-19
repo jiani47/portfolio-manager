@@ -34,6 +34,7 @@ import {
   RebalanceBasket,
   Observation,
   ThesisScoreChange,
+  ValuationMetric,
 } from '../shared/types';
 
 export class Database {
@@ -1062,6 +1063,45 @@ export class Database {
       data.psRatio, data.trailingEps, data.forwardEps, data.forwardEpsFyEnd,
       data.nextEps, data.nextEpsFyEnd, data.epsGrowthPct, data.numAnalysts,
       data.fairLow, data.fairMid, data.fairHigh, data.pegRating, now);
+  }
+
+  private mapRowToValuationMetric = (row: unknown): ValuationMetric => {
+    const r = row as Record<string, unknown>;
+    return {
+      symbol: r.symbol as string,
+      date: r.date as string,
+      trailingPe: r.trailing_pe as number | null,
+      forwardPe: r.forward_pe as number | null,
+      peg: r.peg as number | null,
+      forwardPeg: r.forward_peg as number | null,
+      psRatio: r.ps_ratio as number | null,
+      trailingEps: r.trailing_eps as number | null,
+      forwardEps: r.forward_eps as number | null,
+      forwardEpsFyEnd: r.forward_eps_fy_end as string | null,
+      nextEps: r.next_eps as number | null,
+      nextEpsFyEnd: r.next_eps_fy_end as string | null,
+      epsGrowthPct: r.eps_growth_pct as number | null,
+      numAnalysts: r.num_analysts as number | null,
+      fairLow: r.fair_low as number | null,
+      fairMid: r.fair_mid as number | null,
+      fairHigh: r.fair_high as number | null,
+      pegRating: r.peg_rating as ValuationMetric['pegRating'],
+      fetchedAt: r.fetched_at as string,
+    };
+  };
+
+  listValuationMetrics(): ValuationMetric[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.prepare(`
+      SELECT vm.* FROM valuation_metrics vm
+      INNER JOIN (
+        SELECT symbol, MAX(date) as max_date
+        FROM valuation_metrics
+        GROUP BY symbol
+      ) latest ON vm.symbol = latest.symbol AND vm.date = latest.max_date
+      ORDER BY vm.symbol
+    `).all();
+    return rows.map(this.mapRowToValuationMetric);
   }
 
   private mapRowToPriceHistory = (row: unknown): PriceHistory => {

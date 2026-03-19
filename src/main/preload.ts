@@ -258,6 +258,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSnapshotDailyTotals: (days?: number) => ipcRenderer.invoke('db:snapshots:daily-totals', days),
   getPositionSnapshotHistory: (symbol: string, days?: number) => ipcRenderer.invoke('db:snapshots:position-history', symbol, days),
 
+  // Valuation metrics
+  getValuationMetrics: () => ipcRenderer.invoke('db:valuations:list'),
+
   // Config helpers
   getFmpApiKey: () => ipcRenderer.invoke('config:get-fmp-key'),
 

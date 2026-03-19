@@ -1039,3 +1039,25 @@ export interface TradeJournalEntry {
   decisionNote: string | null;
   accountNumber: string;
 }
+
+export interface ValuationMetric {
+  symbol: string;
+  date: string;
+  trailingPe: number | null;
+  forwardPe: number | null;
+  peg: number | null;
+  forwardPeg: number | null;
+  psRatio: number | null;
+  trailingEps: number | null;
+  forwardEps: number | null;
+  forwardEpsFyEnd: string | null;
+  nextEps: number | null;
+  nextEpsFyEnd: string | null;
+  epsGrowthPct: number | null;
+  numAnalysts: number | null;
+  fairLow: number | null;
+  fairMid: number | null;
+  fairHigh: number | null;
+  pegRating: 'CHEAP' | 'FAIR' | 'RICH' | 'PRICEY' | null;
+  fetchedAt: string;
+}

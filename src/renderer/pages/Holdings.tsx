@@ -1,10 +1,10 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePositions, useAccounts, useSecurities, useSecurityTags, useSettings, usePositionIntents, useDataProvider, usePriceLevels, useAnalytics } from '../hooks/useApi';
+import { usePositions, useAccounts, useSecurities, useSecurityTags, useSettings, usePositionIntents, useDataProvider, usePriceLevels, useAnalytics, useValuationMetrics } from '../hooks/useApi';
 import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import BrokerageImportModal from '../components/BrokerageImportModal';
 import PriceLevelTooltip from '../components/PriceLevelTooltip';
 import ChartModal from '../components/ChartModal';
-import type { Position, Security, SecurityTag, PositionIntent, Account, NewsArticle } from '../../shared/types';
+import type { Position, Security, SecurityTag, PositionIntent, Account, NewsArticle, ValuationMetric } from '../../shared/types';
 
 interface PositionWithPercent extends Position {
   portfolioPercent: number;
@@ -33,6 +33,7 @@ export default function Holdings() {
   const { settings, fetchSettings } = useSettings();
   const { levels: priceLevels, fetchLevels } = usePriceLevels();
   const { analytics, positionBetas, fetchAnalytics } = useAnalytics();
+  const { valuations, fetchValuations } = useValuationMetrics();
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
@@ -72,7 +73,8 @@ export default function Holdings() {
     fetchIntents();
     fetchLevels();
     fetchAnalytics(90);
-  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments, fetchSettings, fetchIntents, fetchLevels, fetchAnalytics]);
+    fetchValuations();
+  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchTags, fetchAssignments, fetchSettings, fetchIntents, fetchLevels, fetchAnalytics, fetchValuations]);
 
   // Listen for position sync events
   useEffect(() => {
@@ -391,6 +393,33 @@ export default function Holdings() {
     return (
       <td className={`table-cell text-right ${color}`} title={`Correlation: ${beta.correlation.toFixed(2)}`}>
         {val.toFixed(2)}
+      </td>
+    );
+  };
+
+  const pegRatingColor = (rating: string): string => {
+    switch (rating) {
+      case 'CHEAP': return 'bg-green-100 text-green-800';
+      case 'FAIR': return 'bg-blue-100 text-blue-700';
+      case 'RICH': return 'bg-amber-100 text-amber-800';
+      case 'PRICEY': return 'bg-red-100 text-red-800';
+      default: return 'bg-gray-100 text-gray-600';
+    }
+  };
+
+  const renderValuation = (position: PositionWithPercent) => {
+    const symbol = position.security?.symbol;
+    if (!symbol) return <td className="table-cell text-right text-gray-400">{'\u2014'}</td>;
+    const v = valuations.get(symbol);
+    if (!v || !v.pegRating) return <td className="table-cell text-right text-gray-400">{'\u2014'}</td>;
+    return (
+      <td className="table-cell text-right">
+        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${pegRatingColor(v.pegRating)}`}>
+          {v.pegRating}
+        </span>
+        {v.forwardPe != null && (
+          <div className="text-xs text-gray-500 mt-0.5">{v.forwardPe.toFixed(1)}x fwd</div>
+        )}
       </td>
     );
   };
@@ -974,6 +1003,7 @@ export default function Holdings() {
                       <th className="table-header text-right">Mkt Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
                       <th className="table-header text-right">Beta</th>
+                      <th className="table-header text-right">Valuation</th>
                       <th className="table-header text-center w-8"></th>
                       <th className="table-header text-right"></th>
                     </tr>
@@ -1024,6 +1054,7 @@ export default function Holdings() {
                           ) : '-'}
                         </td>
                         {renderBeta(position)}
+                        {renderValuation(position)}
                         <td className="table-cell text-center">
                           {renderNewsIcon(position)}
                         </td>
@@ -1057,6 +1088,7 @@ export default function Holdings() {
                       <th className="table-header text-right">Mkt Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
                       <th className="table-header text-right">Beta</th>
+                      <th className="table-header text-right">Valuation</th>
                       <th className="table-header text-center w-8"></th>
                       <th className="table-header text-right"></th>
                     </tr>
@@ -1097,6 +1129,7 @@ export default function Holdings() {
                           ) : '-'}
                         </td>
                         {renderBeta(position)}
+                        {renderValuation(position)}
                         <td className="table-cell text-center">
                           {renderNewsIcon(position)}
                         </td>
@@ -1130,6 +1163,7 @@ export default function Holdings() {
                       <th className="table-header text-right">Mkt Value</th>
                       <th className="table-header text-right">Gain/Loss</th>
                       <th className="table-header text-right">Beta</th>
+                      <th className="table-header text-right">Valuation</th>
                       <th className="table-header text-center w-8"></th>
                       <th className="table-header text-right"></th>
                     </tr>
@@ -1170,6 +1204,7 @@ export default function Holdings() {
                           ) : '-'}
                         </td>
                         {renderBeta(position)}
+                        {renderValuation(position)}
                         <td className="table-cell text-center">
                           {renderNewsIcon(position)}
                         </td>
@@ -1243,6 +1278,7 @@ export default function Holdings() {
                         <th className="table-header text-right">Mkt Value</th>
                         <th className="table-header text-right">Gain/Loss</th>
                         <th className="table-header text-right">Beta</th>
+                        <th className="table-header text-right">Valuation</th>
                         <th className="table-header text-center w-8"></th>
                         <th className="table-header text-right"></th>
                       </tr>
@@ -1282,6 +1318,7 @@ export default function Holdings() {
                             ) : '-'}
                           </td>
                           {renderBeta(position)}
+                          {renderValuation(position)}
                           <td className="table-cell text-center">
                             {renderNewsIcon(position)}
                           </td>
@@ -1465,6 +1502,79 @@ export default function Holdings() {
             <p className="text-sm text-gray-500 mb-4">
               {intentPosition.security?.symbol} - {intentPosition.security?.name}
             </p>
+
+            {/* Valuation Panel */}
+            {(() => {
+              const sym = intentPosition.security?.symbol;
+              const v = sym ? valuations.get(sym) : undefined;
+              if (!v) return null;
+              const price = intentPosition.marketValue && intentPosition.quantity
+                ? intentPosition.marketValue / intentPosition.quantity : 0;
+              const hasRange = v.fairLow && v.fairMid && v.fairHigh;
+              const tickPct = hasRange
+                ? Math.max(0, Math.min(100, ((price - v.fairLow!) / (v.fairHigh! - v.fairLow!)) * 100))
+                : 50;
+              return (
+                <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-medium text-gray-500 uppercase">Valuation</span>
+                    {v.pegRating && (
+                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${pegRatingColor(v.pegRating)}`}>
+                        {v.pegRating}
+                      </span>
+                    )}
+                  </div>
+                  {/* Key Metrics */}
+                  <div className="grid grid-cols-4 gap-3 mb-3">
+                    <div>
+                      <div className="text-xs text-gray-400">Fwd PE</div>
+                      <div className="text-sm font-medium">{v.forwardPe ? `${v.forwardPe.toFixed(1)}x` : '—'}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-400">PEG</div>
+                      <div className="text-sm font-medium">{v.forwardPeg ? v.forwardPeg.toFixed(2) : '—'}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-400">P/S</div>
+                      <div className="text-sm font-medium">{v.psRatio ? `${v.psRatio.toFixed(1)}x` : '—'}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-400">EPS Growth</div>
+                      <div className="text-sm font-medium">{v.epsGrowthPct ? `${v.epsGrowthPct > 0 ? '+' : ''}${v.epsGrowthPct.toFixed(0)}%` : '—'}</div>
+                    </div>
+                  </div>
+                  {/* Fair Price Range Bar */}
+                  {hasRange && (
+                    <div className="mb-2">
+                      <div className="text-xs text-gray-400 mb-1">Fair Price Range</div>
+                      <div className="relative h-2 bg-gray-200 rounded-full">
+                        <div className="absolute h-full bg-gradient-to-r from-green-200 via-blue-200 to-red-200 rounded-full w-full" />
+                        <div className="absolute top-1/2 -translate-y-1/2 w-0.5 h-4 bg-gray-400" style={{ left: '50%' }} title={`Mid: $${v.fairMid!.toFixed(0)}`} />
+                        <div className="absolute top-1/2 -translate-y-1/2 w-2 h-4 bg-gray-900 rounded-sm" style={{ left: `${tickPct}%`, marginLeft: '-4px' }} title={`Current: $${price.toFixed(2)}`} />
+                      </div>
+                      <div className="flex justify-between text-xs text-gray-400 mt-0.5">
+                        <span>${v.fairLow!.toFixed(0)}</span>
+                        <span>${v.fairMid!.toFixed(0)}</span>
+                        <span>${v.fairHigh!.toFixed(0)}</span>
+                      </div>
+                    </div>
+                  )}
+                  {/* EPS Trajectory */}
+                  {v.forwardEps && (
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-gray-400">EPS:</span>
+                      {v.trailingEps && <span className="text-gray-500">T12 ${v.trailingEps.toFixed(2)}</span>}
+                      {v.trailingEps && v.forwardEps && <span className="text-gray-300">→</span>}
+                      <span className="font-medium text-gray-700">FY ${v.forwardEps.toFixed(2)}</span>
+                      {v.nextEps && <span className="text-gray-300">→</span>}
+                      {v.nextEps && <span className="text-gray-500">+1 ${v.nextEps.toFixed(2)}</span>}
+                      {v.numAnalysts && <span className="text-gray-400 ml-1">({v.numAnalysts} analysts)</span>}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             <div className="space-y-4">
               <div>
                 <label className="label">Tier</label>

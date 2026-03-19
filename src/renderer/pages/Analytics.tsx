@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
-import { useAnalytics, useTransactions, useAccounts, useSecurities, useTradeAnalytics, useTradeJournal } from '../hooks/useApi';
-import type { PortfolioAnalytics, PositionBeta, Transaction, Security, TradeJournalEntry } from '../../shared/types';
+import { useAnalytics, useTransactions, useAccounts, useSecurities, useTradeAnalytics, useTradeJournal, useValuationMetrics } from '../hooks/useApi';
+import type { PortfolioAnalytics, PositionBeta, Transaction, Security, TradeJournalEntry, ValuationMetric } from '../../shared/types';
 import { format } from 'date-fns';
 import TransactionImportModal from '../components/TransactionImportModal';
 
@@ -264,13 +264,215 @@ function CorrelationConcentrationSection({ period: _period }: { period: number }
   );
 }
 
+// --- Valuation Section ---
+
+type SortKey = 'symbol' | 'trailingPe' | 'forwardPe' | 'peg' | 'forwardEps' | 'epsGrowthPct' | 'pegRating';
+type SortDir = 'asc' | 'desc';
+
+function pegRatingBadge(rating: ValuationMetric['pegRating']) {
+  if (!rating) return <span className="text-gray-400">—</span>;
+  const styles: Record<string, string> = {
+    CHEAP: 'bg-green-100 text-green-800',
+    FAIR: 'bg-blue-100 text-blue-800',
+    RICH: 'bg-amber-100 text-amber-800',
+    PRICEY: 'bg-red-100 text-red-800',
+  };
+  return (
+    <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded-full ${styles[rating] || 'bg-gray-100 text-gray-800'}`}>
+      {rating}
+    </span>
+  );
+}
+
+function fmtNum(v: number | null, digits = 1): string {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  return v.toFixed(digits);
+}
+
+function ValuationSection({ valuations }: { valuations: Map<string, ValuationMetric> }) {
+  const [sortKey, setSortKey] = useState<SortKey>('symbol');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
+
+  const items = useMemo(() => Array.from(valuations.values()), [valuations]);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortKey(key);
+      setSortDir(key === 'symbol' ? 'asc' : 'desc');
+    }
+  };
+
+  const sorted = useMemo(() => {
+    const list = [...items];
+    list.sort((a, b) => {
+      let av: number | string | null, bv: number | string | null;
+      if (sortKey === 'symbol') { av = a.symbol; bv = b.symbol; }
+      else if (sortKey === 'pegRating') {
+        const order = { CHEAP: 0, FAIR: 1, RICH: 2, PRICEY: 3 };
+        av = a.pegRating ? order[a.pegRating] : 99;
+        bv = b.pegRating ? order[b.pegRating] : 99;
+      } else {
+        av = a[sortKey]; bv = b[sortKey];
+      }
+      if (av === null || av === undefined) return 1;
+      if (bv === null || bv === undefined) return -1;
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return list;
+  }, [items, sortKey, sortDir]);
+
+  // Screening scores
+  const screened = useMemo(() => {
+    return items.map(v => {
+      let score = 0;
+      if (v.pegRating === 'CHEAP') score += 3;
+      else if (v.pegRating === 'FAIR') score += 2;
+      else if (v.pegRating === 'RICH') score += 1;
+      if (v.epsGrowthPct !== null) {
+        if (v.epsGrowthPct > 50) score += 2;
+        else if (v.epsGrowthPct > 30) score += 1;
+      }
+      return { ...v, score };
+    }).sort((a, b) => b.score - a.score);
+  }, [items]);
+
+  // Entry confluence
+  const confluent = useMemo(() => {
+    return items.map(v => {
+      const signals: string[] = [];
+      if ((v.pegRating === 'CHEAP' || v.pegRating === 'FAIR') && v.forwardPeg !== null && v.forwardPeg < 1.2) {
+        signals.push(`Fwd PEG ${v.forwardPeg.toFixed(2)} < 1.2`);
+      }
+      if (v.epsGrowthPct !== null && v.epsGrowthPct > 20) {
+        signals.push(`EPS Growth ${v.epsGrowthPct.toFixed(0)}%`);
+      }
+      return { ...v, signals };
+    }).filter(v => v.signals.length >= 2);
+  }, [items]);
+
+  const sortArrow = (key: SortKey) => sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+
+  const thClass = 'text-right py-1.5 font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700';
+  const thLeftClass = 'text-left py-1.5 font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700';
+
+  if (items.length === 0) {
+    return (
+      <div className="card text-center py-12">
+        <p className="text-gray-500">No valuation data available. Run price refresh to fetch valuations.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Subsection A: Portfolio Valuations */}
+      <div className="card">
+        <h3 className="text-lg font-semibold text-gray-900 mb-3">Portfolio Valuations</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-200">
+                <th className={thLeftClass} onClick={() => toggleSort('symbol')}>Symbol{sortArrow('symbol')}</th>
+                <th className={thClass} onClick={() => toggleSort('trailingPe')}>T12 PE{sortArrow('trailingPe')}</th>
+                <th className={thClass} onClick={() => toggleSort('forwardPe')}>Fwd PE{sortArrow('forwardPe')}</th>
+                <th className={thClass} onClick={() => toggleSort('peg')}>PEG{sortArrow('peg')}</th>
+                <th className={thClass} onClick={() => toggleSort('forwardEps')}>FY EPS{sortArrow('forwardEps')}</th>
+                <th className={thClass} onClick={() => toggleSort('epsGrowthPct')}>Growth{sortArrow('epsGrowthPct')}</th>
+                <th className={`${thClass} text-center`} onClick={() => toggleSort('pegRating')}>Rating{sortArrow('pegRating')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map(v => (
+                <tr key={v.symbol} className="border-b border-gray-100 hover:bg-gray-50">
+                  <td className="py-1.5 font-medium text-gray-900">{v.symbol}</td>
+                  <td className="py-1.5 text-right text-gray-700">{fmtNum(v.trailingPe)}</td>
+                  <td className="py-1.5 text-right text-gray-700">{fmtNum(v.forwardPe)}</td>
+                  <td className="py-1.5 text-right text-gray-700">{fmtNum(v.peg, 2)}</td>
+                  <td className="py-1.5 text-right text-gray-700">{fmtNum(v.forwardEps, 2)}</td>
+                  <td className={`py-1.5 text-right font-medium ${v.epsGrowthPct !== null && v.epsGrowthPct >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {v.epsGrowthPct !== null ? `${v.epsGrowthPct >= 0 ? '+' : ''}${v.epsGrowthPct.toFixed(0)}%` : '—'}
+                  </td>
+                  <td className="py-1.5 text-center">{pegRatingBadge(v.pegRating)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Subsection B: Watchlist Screening */}
+      <div className="card">
+        <h3 className="text-lg font-semibold text-gray-900 mb-3">Screening Scores</h3>
+        <p className="text-xs text-gray-500 mb-3">Composite: CHEAP=3, FAIR=2, RICH=1, PRICEY=0 + Growth &gt;50%=+2, &gt;30%=+1</p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-200">
+                <th className="text-left py-1.5 font-medium text-gray-500">Symbol</th>
+                <th className="text-center py-1.5 font-medium text-gray-500">Rating</th>
+                <th className="text-right py-1.5 font-medium text-gray-500">PEG</th>
+                <th className="text-right py-1.5 font-medium text-gray-500">Growth</th>
+                <th className="text-right py-1.5 font-medium text-gray-500">Score</th>
+              </tr>
+            </thead>
+            <tbody>
+              {screened.map(v => (
+                <tr key={v.symbol} className="border-b border-gray-100 hover:bg-gray-50">
+                  <td className="py-1.5 font-medium text-gray-900">{v.symbol}</td>
+                  <td className="py-1.5 text-center">{pegRatingBadge(v.pegRating)}</td>
+                  <td className="py-1.5 text-right text-gray-700">{fmtNum(v.peg, 2)}</td>
+                  <td className={`py-1.5 text-right font-medium ${v.epsGrowthPct !== null && v.epsGrowthPct >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {v.epsGrowthPct !== null ? `${v.epsGrowthPct >= 0 ? '+' : ''}${v.epsGrowthPct.toFixed(0)}%` : '—'}
+                  </td>
+                  <td className="py-1.5 text-right font-bold text-gray-900">{v.score}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Subsection C: Entry Confluence */}
+      <div className="card">
+        <h3 className="text-lg font-semibold text-gray-900 mb-3">Entry Confluence</h3>
+        <p className="text-xs text-gray-500 mb-3">Symbols with 2+ aligned signals: valuation (CHEAP/FAIR + Fwd PEG &lt; 1.2) and EPS growth &gt; 20%</p>
+        {confluent.length === 0 ? (
+          <p className="text-sm text-gray-500 text-center py-4">No symbols currently meet multi-signal entry criteria.</p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {confluent.map(v => (
+              <div key={v.symbol} className="border border-gray-200 rounded-lg p-3 hover:border-blue-300 transition-colors">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-semibold text-gray-900">{v.symbol}</span>
+                  {pegRatingBadge(v.pegRating)}
+                </div>
+                <ul className="space-y-0.5">
+                  {v.signals.map((s, i) => (
+                    <li key={i} className="text-xs text-gray-600 flex items-center gap-1">
+                      <span className="text-green-500">&#10003;</span> {s}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Analytics() {
   const { analytics, positionBetas, loading, fetchAnalytics } = useAnalytics();
   const { transactions, loading: txLoading, fetchTransactions, createTransaction, deleteTransaction } = useTransactions();
   const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities, createSecurity, findBySymbol } = useSecurities();
   const [selectedPeriod, setSelectedPeriod] = useState(90);
-  const [activeTab, setActiveTab] = useState<'analytics' | 'transactions' | 'trade-performance'>('analytics');
+  const [activeTab, setActiveTab] = useState<'analytics' | 'transactions' | 'trade-performance' | 'valuation'>('analytics');
 
   // Transaction state
   const [showTxModal, setShowTxModal] = useState(false);
@@ -289,6 +491,7 @@ export default function Analytics() {
     fetchAnalytics(selectedPeriod);
   }, [selectedPeriod, fetchAnalytics]);
 
+  const { valuations, loading: valLoading, fetchValuations } = useValuationMetrics();
   const { tradeAnalytics, loading: tpLoading, fetchTradeAnalytics } = useTradeAnalytics();
   const [tpPeriod, setTpPeriod] = useState<number | undefined>(undefined); // undefined = all time
   const [tpView, setTpView] = useState<'summary' | 'journal'>('summary');
@@ -302,6 +505,10 @@ export default function Analytics() {
       fetchSecurities();
     }
   }, [activeTab, fetchTransactions, fetchAccounts, fetchSecurities]);
+
+  useEffect(() => {
+    if (activeTab === 'valuation') fetchValuations();
+  }, [activeTab, fetchValuations]);
 
   useEffect(() => {
     if (activeTab === 'trade-performance') fetchTradeAnalytics(tpPeriod);
@@ -364,7 +571,7 @@ export default function Analytics() {
         <div className="flex items-center gap-4">
           <h1 className="text-2xl font-bold text-gray-900">Analytics</h1>
           <div className="flex gap-1">
-            {(['analytics', 'transactions', 'trade-performance'] as const).map(tab => (
+            {(['analytics', 'transactions', 'trade-performance', 'valuation'] as const).map(tab => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -374,7 +581,7 @@ export default function Analytics() {
                     : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
                 }`}
               >
-                {tab === 'analytics' ? 'Portfolio' : tab === 'transactions' ? 'Transactions' : 'Trade Performance'}
+                {tab === 'analytics' ? 'Portfolio' : tab === 'transactions' ? 'Transactions' : tab === 'trade-performance' ? 'Trade Performance' : 'Valuation'}
               </button>
             ))}
           </div>
@@ -1007,6 +1214,18 @@ export default function Analytics() {
                 </div>
               )}
             </>
+          )}
+        </>
+      )}
+
+      {activeTab === 'valuation' && (
+        <>
+          {valLoading ? (
+            <div className="flex items-center justify-center h-64">
+              <div className="text-gray-500">Loading valuation data...</div>
+            </div>
+          ) : (
+            <ValuationSection valuations={valuations} />
           )}
         </>
       )}

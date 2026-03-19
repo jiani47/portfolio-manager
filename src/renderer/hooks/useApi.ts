@@ -65,6 +65,7 @@ import type {
   EarningsReview,
   BrokerPLRecord,
   RebalanceBasket,
+  ValuationMetric,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -298,6 +299,9 @@ declare global {
       createEarningsReview: (data: unknown) => Promise<EarningsReview>;
       updateEarningsReview: (id: string, data: unknown) => Promise<EarningsReview>;
       getPendingEarningsReviews: () => Promise<EarningsReview[]>;
+
+      // Valuation metrics
+      getValuationMetrics: () => Promise<ValuationMetric[]>;
 
       // Broker P&L operations
       getBrokerPLSummary: () => Promise<Array<{ symbol: string; totalGainLoss: number; lotCount: number; lastCloseDate: string }>>;
@@ -1999,4 +2003,27 @@ export function useEmsBaskets() {
   }, []);
 
   return { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket };
+}
+
+export function useValuationMetrics() {
+  const [valuations, setValuations] = useState<Map<string, ValuationMetric>>(new Map());
+  const [loading, setLoading] = useState(false);
+
+  const fetchValuations = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.getValuationMetrics();
+      const map = new Map<string, ValuationMetric>();
+      for (const v of data) {
+        map.set(v.symbol, v);
+      }
+      setValuations(map);
+    } catch (err) {
+      console.error('Failed to fetch valuation metrics:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { valuations, loading, fetchValuations };
 }
