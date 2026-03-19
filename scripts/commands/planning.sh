@@ -7,8 +7,10 @@ case "$1" in
     # Position sizing: target allocation, current vs target, entry plan with S/R tranches
     SYMBOL="$2"
     if [ -z "$SYMBOL" ]; then
-      echo "Usage: pm-cli.sh size <symbol> [target_shares]"
-      echo "  Shows current vs target sizing and suggests entry plan using S/R levels."
+      echo "Usage: pm-cli.sh size <symbol> [target]"
+      echo "  target: share count (e.g. 100) or allocation % (e.g. 3%)"
+      echo "  Shows current vs target sizing, entry plan using S/R levels + ATR."
+      echo "  Works for existing positions and watchlist symbols."
       exit 1
     fi
     SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
@@ -18,7 +20,7 @@ case "$1" in
 import sqlite3, sys
 
 symbol = sys.argv[1]
-target_shares_arg = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+target_arg = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
 db_path = sys.argv[3]
 
 conn = sqlite3.connect(db_path)
@@ -37,15 +39,32 @@ pos = conn.execute("""
     WHERE s.symbol = ? AND s.type NOT IN ('cash', 'option')
 """, (symbol,)).fetchall()
 
+# Support new positions (not yet held)
+is_new = False
 if not pos:
-    print(f"  No position found for {symbol}")
-    sys.exit(1)
+    is_new = True
+    total_qty = 0
+    total_cost = 0
+    tier = 'Starter'  # default for new positions
+    # Check if it's on a watchlist for context
+    wl = conn.execute("SELECT wi.*, w.name as wl_name FROM watchlist_items wi JOIN watchlists w ON wi.watchlist_id = w.id WHERE wi.symbol = ?", (symbol,)).fetchone()
+    if wl:
+        print(f"  (Watchlist: {wl['wl_name']}" + (f" — {wl['thesis_snippet']}" if wl['thesis_snippet'] else "") + ")")
+else:
+    total_qty = sum(r['quantity'] or 0 for r in pos)
+    total_cost = sum(r['cost_basis'] or 0 for r in pos)
+    tier = pos[0]['tier'] or 'Starter'
 
-# Aggregate across accounts
-total_qty = sum(r['quantity'] or 0 for r in pos)
-total_cost = sum(r['cost_basis'] or 0 for r in pos)
-tier = pos[0]['tier'] or 'Starter'
 tier_limit = TIER_LIMITS.get(tier, 5)
+
+# Parse target arg: can be shares (e.g. "100") or percentage (e.g. "3%")
+target_shares_arg = None
+target_pct_arg = None
+if target_arg:
+    if target_arg.endswith('%'):
+        target_pct_arg = float(target_arg[:-1])
+    else:
+        target_shares_arg = target_arg
 
 # Get current price
 price_row = conn.execute("""
@@ -93,15 +112,37 @@ room_mv = target_mv - current_mv
 room_shares = int(room_mv / current_price) if room_mv > 0 else 0
 room_pct = (room_mv / portfolio_total) * 100
 
-# User override
-if target_shares_arg:
+# User override (shares or percentage)
+if target_pct_arg:
+    target_pct_final = target_pct_arg
+    target_mv_final = portfolio_total * target_pct_final / 100
+    target_shares_final = int(target_mv_final / current_price)
+    room_mv = target_mv_final - current_mv
+    room_shares = max(0, target_shares_final - int(total_qty))
+    room_pct = (room_mv / portfolio_total) * 100
+elif target_shares_arg:
     target_shares_final = int(target_shares_arg)
     target_mv_final = target_shares_final * current_price
     target_pct_final = (target_mv_final / portfolio_total) * 100
+    room_mv = target_mv_final - current_mv
+    room_shares = max(0, target_shares_final - int(total_qty))
+    room_pct = (room_mv / portfolio_total) * 100
 else:
     target_shares_final = target_shares_computed
     target_mv_final = target_mv
     target_pct_final = tier_limit
+
+# Compute ATR for volatility-adjusted tranches
+atr_row = conn.execute("""
+    SELECT AVG(high_price - low_price) as atr FROM (
+        SELECT high_price, low_price FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = ? AND high_price > 0 AND low_price > 0
+        ORDER BY ph.date DESC LIMIT 14
+    )
+""", (symbol,)).fetchone()
+atr = atr_row['atr'] if atr_row and atr_row['atr'] else None
+atr_pct = (atr / current_price * 100) if atr else None
 
 # Get S/R levels
 levels = conn.execute("""
@@ -123,17 +164,24 @@ print()
 print(f"  Tier: {tier} (limit: {tier_limit}% of portfolio)")
 print(f"  Price: ${current_price:.2f} (as of {price_date})")
 print(f"  Portfolio total: ${portfolio_total:,.0f}")
+if atr:
+    print(f"  ATR(14): ${atr:.2f} ({atr_pct:.1f}% daily range)")
 print()
 
-print(f"  ── Current Position ──")
-print(f"  Shares: {total_qty:,.0f}")
-print(f"  Avg cost: ${avg_cost:.2f}  ({unrealized_pct:+.1f}%)")
-print(f"  Market value: ${current_mv:,.0f}")
-print(f"  Weight: {current_pct:.1f}%")
+if is_new:
+    print(f"  ── New Position (not yet held) ──")
+else:
+    print(f"  ── Current Position ──")
+    print(f"  Shares: {total_qty:,.0f}")
+    print(f"  Avg cost: ${avg_cost:.2f}  ({unrealized_pct:+.1f}%)")
+    print(f"  Market value: ${current_mv:,.0f}")
+    print(f"  Weight: {current_pct:.1f}%")
 print()
 
 print(f"  ── Target ({tier} tier max: {tier_limit}%) ──")
-if target_shares_arg:
+if target_pct_arg:
+    print(f"  Target (user): {target_shares_final:,} shares (${target_mv_final:,.0f}, {target_pct_final:.1f}%)")
+elif target_shares_arg:
     print(f"  Target (user): {target_shares_final:,} shares (${target_mv_final:,.0f}, {target_pct_final:.1f}%)")
 else:
     print(f"  Target (max): {target_shares_final:,} shares (${target_mv_final:,.0f})")
@@ -159,32 +207,42 @@ if room_mv > 0 and (supports or current_price):
         tranches = []
         remaining = add_shares
 
+        # Volatility-adjusted sizing: high-ATR stocks get more weight on lower tranches
+        # Low vol (<2% ATR): 25/25/50 split (standard)
+        # Med vol (2-4% ATR): 20/30/50 (more at support)
+        # High vol (>4% ATR): 15/35/50 (much more at support)
+        if atr_pct and atr_pct > 4:
+            w1, w2 = 0.15, 0.35
+        elif atr_pct and atr_pct > 2:
+            w1, w2 = 0.20, 0.30
+        else:
+            w1, w2 = 0.25, 0.25
+
         if supports:
-            # Tranche 1: 25% at S1 (nearest support)
             s1 = supports[0]
-            t1_shares = max(1, int(add_shares * 0.25))
+            t1_shares = max(1, int(add_shares * w1))
             t1_pct = (current_price - s1['price']) / current_price * 100
             tranches.append((f"S1 ${s1['price']:.2f}", t1_shares, s1['price'], s1['strength'], t1_pct))
             remaining -= t1_shares
 
             if len(supports) >= 2:
-                # Tranche 2: 25% at S2
                 s2 = supports[1]
-                t2_shares = max(1, int(add_shares * 0.25))
+                t2_shares = max(1, int(add_shares * w2))
                 t2_pct = (current_price - s2['price']) / current_price * 100
                 tranches.append((f"S2 ${s2['price']:.2f}", t2_shares, s2['price'], s2['strength'], t2_pct))
                 remaining -= t2_shares
 
-            # Tranche 3: remaining on thesis confirmation (at current price)
             if remaining > 0:
                 tranches.append((f"Thesis confirm", remaining, current_price, None, 0))
         else:
-            # No S/R levels — split into 3 equal tranches by dollar amount
+            # No S/R levels — use ATR-based dip levels
+            dip1 = atr_pct if atr_pct else 3.0
+            dip2 = dip1 * 2
             t_size = max(1, add_shares // 3)
             tranches.append(("Now (1/3)", t_size, current_price, None, 0))
-            tranches.append(("Dip -3%", t_size, current_price * 0.97, None, 3.0))
+            tranches.append((f"Dip -{dip1:.0f}%", t_size, current_price * (1 - dip1/100), None, dip1))
             if add_shares - 2 * t_size > 0:
-                tranches.append(("Dip -5%", add_shares - 2 * t_size, current_price * 0.95, None, 5.0))
+                tranches.append((f"Dip -{dip2:.0f}%", add_shares - 2 * t_size, current_price * (1 - dip2/100), None, dip2))
 
         print(f"  {'TRANCHE':<22} {'SHARES':>7} {'PRICE':>10} {'VALUE':>12} {'FROM HERE':>10} {'STR':>4}")
         print(f"  {'─'*22} {'─'*7} {'─'*10} {'─'*12} {'─'*10} {'─'*4}")

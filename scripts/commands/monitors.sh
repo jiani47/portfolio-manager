@@ -94,8 +94,8 @@ case "$1" in
       exit 1
     fi
 
-    # Get portfolio symbols (comma-separated for safe passing)
-    SYMBOLS=$(sqlite3 "$DB" "SELECT GROUP_CONCAT(DISTINCT s.symbol) FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type != 'cash' AND p.quantity > 0;")
+    # Get portfolio + watchlist symbols (comma-separated for safe passing)
+    SYMBOLS=$(sqlite3 "$DB" "SELECT GROUP_CONCAT(DISTINCT symbol) FROM (SELECT s.symbol FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type != 'cash' AND p.quantity > 0 UNION SELECT wi.symbol FROM watchlist_items wi);")
 
     echo "=== Upcoming Earnings (next ${DAYS} days) ==="
     echo ""

@@ -153,7 +153,7 @@ export function setupIpcHandlers(
     }
 
     // Update FMP service if data provider settings changed
-    if (newSettings.dataProvider !== undefined || newSettings.dataProviderApiKey !== undefined) {
+    if (newSettings.dataProvider !== undefined || newSettings.dataProviderApiKey !== undefined || newSettings.fmpApiKey !== undefined) {
       fmpService.configure(updated);
       await massiveService.configure(updated);
     }

@@ -220,7 +220,10 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
           echo "  $SIDE_UP $SHARES $SYM | trigger: $TVAL ($TTYPE) | confirm: pm-cli.sh basket-confirm $TID"
         done
         TRIGGERED_COUNT=$(echo "$EMS_TRIGGERED" | wc -l | tr -d ' ')
-        pm_notify "EMS: $TRIGGERED_COUNT orders triggered" "Run: pm-cli.sh basket-orders" "high"
+        EMS_NOTIFY=$(echo "$EMS_TRIGGERED" | while IFS='|' read -r _SYM _SIDE _SHARES _TTYPE _TVAL _TID _BNAME; do
+          echo "$(echo "$_SIDE" | tr '[:lower:]' '[:upper:]') $_SHARES $_SYM @ $_TVAL"
+        done)
+        pm_notify "EMS: $TRIGGERED_COUNT orders triggered" "$EMS_NOTIFY" "high"
       fi
       if [ -n "$EMS_SUBMITTED" ]; then
         echo "  --- Working at Broker ---"
@@ -280,7 +283,7 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
       echo ""
     fi
 
-    # Overnight news (last 24h) — portfolio holdings only
+    # Overnight news (last 24h) — portfolio + watchlist symbols
     NEWS_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM news WHERE published_at >= datetime('now', '-1 day');" 2>/dev/null)
     if [ "$NEWS_COUNT" -gt 0 ] 2>/dev/null; then
       echo "=== Overnight News ==="
@@ -291,7 +294,9 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
           SELECT DISTINCT s.symbol FROM positions p
           JOIN securities s ON p.security_id = s.id
           WHERE s.type != 'cash'
-        ) portfolio ON n.symbol = portfolio.symbol
+          UNION
+          SELECT DISTINCT wi.symbol FROM watchlist_items wi
+        ) tracked ON n.symbol = tracked.symbol
         WHERE n.published_at >= datetime('now', '-1 day')
         ORDER BY n.symbol, n.published_at DESC;
       " | python3 -c "

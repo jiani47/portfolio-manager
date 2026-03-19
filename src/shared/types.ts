@@ -131,6 +131,7 @@ export interface AppSettings {
   aiApiKey?: string;
   dataProvider: 'fmp' | 'massive' | 'schwab' | 'none';
   dataProviderApiKey?: string;
+  fmpApiKey?: string;
   schwabClientId?: string;
   schwabClientSecret?: string;
   schwabCallbackUrl?: string;

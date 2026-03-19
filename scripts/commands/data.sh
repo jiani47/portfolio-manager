@@ -107,7 +107,7 @@ print(f'Updated {updated} prices, {errors} errors')
         NTFY_PRI="high"
         [ "$atype" = "action_required" ] && TYPE_TAG=" [ACTION REQUIRED]" && NTFY_PRI="urgent"
         echo "  $ICON $sym \$$price crossed $dir \$$level — $label$TYPE_TAG"
-        pm_notify "Monitor Triggered" "$sym $dir \$$level — $label$TYPE_TAG" "$NTFY_PRI"
+        pm_notify "$sym $ICON \$$price crossed $dir \$$level" "$label$TYPE_TAG" "$NTFY_PRI"
       done
       echo "========================="
     fi

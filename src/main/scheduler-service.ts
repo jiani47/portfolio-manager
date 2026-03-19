@@ -472,22 +472,37 @@ export class SchedulerService {
     }
   }
 
+  private getPortfolioAndWatchlistSymbols(): string[] {
+    const positions = this.db.listPositions();
+    const securities = this.db.listSecurities();
+    const securityMap = new Map(securities.map(s => [s.id, s]));
+
+    const symbolSet = new Set<string>();
+    for (const pos of positions) {
+      const security = securityMap.get(pos.securityId);
+      if (security && security.type !== 'cash') {
+        symbolSet.add(security.symbol);
+      }
+    }
+
+    try {
+      const watchlistItems = this.db.listWatchlistItems();
+      for (const item of watchlistItems) {
+        symbolSet.add(item.symbol);
+      }
+    } catch {
+      // Watchlist table may not exist yet
+    }
+
+    return Array.from(symbolSet);
+  }
+
   private async executeEarnings(): Promise<TaskResult> {
     try {
-      const positions = this.db.listPositions();
-      const securities = this.db.listSecurities();
-      const securityMap = new Map(securities.map(s => [s.id, s]));
-
-      const symbols: string[] = [];
-      for (const pos of positions) {
-        const security = securityMap.get(pos.securityId);
-        if (security && security.type !== 'cash') {
-          symbols.push(security.symbol);
-        }
-      }
+      const symbols = this.getPortfolioAndWatchlistSymbols();
 
       if (symbols.length === 0) {
-        return { success: true, message: 'No positions for earnings check' };
+        return { success: true, message: 'No symbols for earnings check' };
       }
 
       const today = new Date();
@@ -516,20 +531,11 @@ export class SchedulerService {
       const apiKey = match ? match[1].trim() : null;
       if (!apiKey) return { success: false, message: 'No FMP API key configured' };
 
-      // Get portfolio symbols
-      const positions = this.db.listPositions();
-      const securities = this.db.listSecurities();
-      const securityMap = new Map(securities.map(s => [s.id, s]));
-      const symbols: string[] = [];
-      for (const pos of positions) {
-        const security = securityMap.get(pos.securityId);
-        if (security && security.type !== 'cash') {
-          symbols.push(security.symbol);
-        }
-      }
+      // Get portfolio + watchlist symbols
+      const symbols = this.getPortfolioAndWatchlistSymbols();
 
       if (symbols.length === 0) {
-        return { success: true, message: 'No positions for news fetch' };
+        return { success: true, message: 'No symbols for news fetch' };
       }
 
       // Fetch news for portfolio symbols (batch of 10 at a time)

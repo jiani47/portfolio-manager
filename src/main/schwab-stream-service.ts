@@ -249,30 +249,51 @@ export class SchwabStreamService {
     }
   }
 
-  private async pollExtendedHoursQuotes(): Promise<void> {
+  private buildSymbolList(): string[] {
+    const positions = this.db.listPositions();
+    const securities = this.db.listSecurities();
+    const securityMap = new Map(securities.map(s => [s.id, s]));
+
+    const symbols: string[] = [];
+    this.symbolSecurityMap.clear();
+
+    // Portfolio positions
+    for (const pos of positions) {
+      const security = securityMap.get(pos.securityId);
+      if (security && security.type !== 'cash' && security.type !== 'option') {
+        if (!this.symbolSecurityMap.has(security.symbol)) {
+          symbols.push(security.symbol);
+          this.symbolSecurityMap.set(security.symbol, security.id);
+        }
+      }
+    }
+
+    // Watchlist symbols
     try {
-      // Build symbol list from portfolio
-      const positions = this.db.listPositions();
-      const securities = this.db.listSecurities();
-      const securityMap = new Map(securities.map(s => [s.id, s]));
-
-      const symbols: string[] = [];
-      this.symbolSecurityMap.clear();
-
-      for (const pos of positions) {
-        const security = securityMap.get(pos.securityId);
-        if (security && security.type !== 'cash' && security.type !== 'option') {
-          if (!this.symbolSecurityMap.has(security.symbol)) {
-            symbols.push(security.symbol);
-            this.symbolSecurityMap.set(security.symbol, security.id);
+      const watchlistItems = this.db.listWatchlistItems();
+      for (const item of watchlistItems) {
+        if (!symbols.includes(item.symbol)) {
+          symbols.push(item.symbol);
+          if (item.securityId) {
+            this.symbolSecurityMap.set(item.symbol, item.securityId);
           }
         }
       }
+    } catch {
+      // Watchlist query may fail if table doesn't exist yet
+    }
 
-      for (const idx of ['SPY', 'QQQ']) {
-        if (!symbols.includes(idx)) symbols.push(idx);
-      }
+    // Market indices
+    for (const idx of ['SPY', 'QQQ']) {
+      if (!symbols.includes(idx)) symbols.push(idx);
+    }
 
+    return symbols;
+  }
+
+  private async pollExtendedHoursQuotes(): Promise<void> {
+    try {
+      const symbols = this.buildSymbolList();
       if (symbols.length === 0) return;
 
       // Fetch quotes via REST API — includes extendedHoursQuote
@@ -366,32 +387,8 @@ export class SchwabStreamService {
 
   private async connectWithPortfolioSymbols(): Promise<void> {
     try {
-      // Get all non-cash securities from positions
-      const positions = this.db.listPositions();
-      const securities = this.db.listSecurities();
-      const securityMap = new Map(securities.map(s => [s.id, s]));
-
-      const symbols: string[] = [];
-      this.symbolSecurityMap.clear();
-
-      for (const pos of positions) {
-        const security = securityMap.get(pos.securityId);
-        if (security && security.type !== 'cash' && security.type !== 'option') {
-          if (!this.symbolSecurityMap.has(security.symbol)) {
-            symbols.push(security.symbol);
-            this.symbolSecurityMap.set(security.symbol, security.id);
-          }
-        }
-      }
-
+      const symbols = this.buildSymbolList();
       if (symbols.length === 0) return;
-
-      // Add market index proxies for dashboard
-      for (const idx of ['SPY', 'QQQ']) {
-        if (!symbols.includes(idx)) {
-          symbols.push(idx);
-        }
-      }
 
       await this.connect(symbols);
     } catch (err) {

@@ -53,6 +53,7 @@ export default function Settings() {
     aiApiKey: '',
     dataProvider: 'none',
     dataProviderApiKey: '',
+    fmpApiKey: '',
     schwabClientId: '',
     schwabClientSecret: '',
     schwabCallbackUrl: '',
@@ -117,6 +118,7 @@ export default function Settings() {
         aiApiKey: settings.aiApiKey || '',
         dataProvider: settings.dataProvider || 'none',
         dataProviderApiKey: settings.dataProviderApiKey || '',
+        fmpApiKey: settings.fmpApiKey || '',
         schwabClientId: settings.schwabClientId || '',
         schwabClientSecret: settings.schwabClientSecret || '',
         schwabCallbackUrl: settings.schwabCallbackUrl || '',
@@ -561,6 +563,25 @@ export default function Settings() {
             </>
           )}
         </div>
+        {formData.dataProvider !== 'fmp' && formData.dataProvider !== 'none' && (
+          <div className="mt-4 pt-4 border-t border-gray-200">
+            <h3 className="text-sm font-medium text-gray-700 mb-2">FMP API Key (for earnings, technicals, sectors, news)</h3>
+            <p className="text-xs text-gray-500 mb-2">
+              FMP is used for supplementary data regardless of your quote data provider.
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type={showApiKey ? 'text' : 'password'}
+                className="input flex-1 max-w-md"
+                value={formData.fmpApiKey}
+                onChange={(e) => {
+                  setFormData({ ...formData, fmpApiKey: e.target.value });
+                }}
+                placeholder="FMP API Key"
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Brokerage Connection */}
