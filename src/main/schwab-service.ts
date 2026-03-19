@@ -73,6 +73,7 @@ export class SchwabService {
   private callbackUrl: string | null = null;
   private tokens: SchwabTokens | null = null;
   private accountHashes: Map<string, string> = new Map();
+  private reauthNotifiedAt: number = 0; // Debounce: only notify once per hour
 
   // Market data rate limiting: 120 calls per minute
   private readonly MARKET_RATE_LIMIT = 120;
@@ -81,6 +82,31 @@ export class SchwabService {
 
   constructor(store: Store<{ settings: AppSettings }>) {
     this.store = store;
+  }
+
+  private throwReauthRequired(reason: string): never {
+    // Send push notification (debounced to once per hour)
+    const now = Date.now();
+    if (now - this.reauthNotifiedAt > 60 * 60 * 1000) {
+      this.reauthNotifiedAt = now;
+      try {
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        const confPath = path.join(os.homedir(), '.pm-cli.conf');
+        if (fs.existsSync(confPath)) {
+          const content = fs.readFileSync(confPath, 'utf-8');
+          const match = content.match(/^NTFY_TOPIC=(.+)$/m);
+          const topic = match ? match[1].trim() : null;
+          if (topic) {
+            const { exec } = require('child_process');
+            exec(`curl -s -H "Title: Schwab Re-Auth Required" -H "Priority: urgent" -H "Tags: warning" -d "Schwab token expired: ${reason}. Open the app to re-authenticate." "ntfy.sh/${topic}"`);
+          }
+        }
+      } catch { /* no-op */ }
+      console.error(`Schwab re-auth required: ${reason}`);
+    }
+    throw new Error('SCHWAB_REAUTH_REQUIRED');
   }
 
   configure(settings: AppSettings): void {
@@ -214,13 +240,13 @@ export class SchwabService {
 
   async refreshAccessToken(): Promise<void> {
     if (!this.tokens?.refreshToken) {
-      throw new Error('SCHWAB_REAUTH_REQUIRED');
+      this.throwReauthRequired('No refresh token');
     }
 
     if (this.tokens.refreshTokenExpiresAt <= Date.now()) {
       this.tokens = null;
       this.saveTokensToStore();
-      throw new Error('SCHWAB_REAUTH_REQUIRED');
+      this.throwReauthRequired('Refresh token expired');
     }
 
     const basicAuth = Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64');
@@ -241,7 +267,7 @@ export class SchwabService {
       if (response.status === 401 || response.status === 400) {
         this.tokens = null;
         this.saveTokensToStore();
-        throw new Error('SCHWAB_REAUTH_REQUIRED');
+        this.throwReauthRequired('Token refresh rejected (401/400)');
       }
       throw new Error(`Token refresh failed (${response.status})`);
     }
@@ -277,7 +303,7 @@ export class SchwabService {
 
   private async fetchApi(path: string, options?: RequestInit): Promise<Response> {
     if (!this.tokens) {
-      throw new Error('SCHWAB_REAUTH_REQUIRED');
+      this.throwReauthRequired('No tokens available');
     }
 
     // Auto-refresh if access token is expired (with 60s buffer)
@@ -935,7 +961,7 @@ export class SchwabService {
   }
 
   async ensureTokenFresh(): Promise<void> {
-    if (!this.tokens) throw new Error('SCHWAB_REAUTH_REQUIRED');
+    if (!this.tokens) this.throwReauthRequired('No tokens for ensureTokenFresh');
     if (this.tokens.accessTokenExpiresAt <= Date.now() + 60000) {
       await this.refreshAccessToken();
     }
