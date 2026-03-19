@@ -272,6 +272,172 @@ PYEOF
     fi
     ;;
 
+  trade-setup)
+    # Guided trade setup: valuation + technicals + S/R + sizing + commands
+    TS_SYM=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    if [ -z "$TS_SYM" ]; then
+      echo "Usage: pm-cli.sh trade-setup <symbol>"
+      echo "  Guided flow: analysis → sizing → ready-to-run commands"
+      exit 1
+    fi
+
+    python3 - "$TS_SYM" "$DB" << 'PYEOF'
+import sqlite3, sys, datetime
+
+symbol = sys.argv[1]
+db_path = sys.argv[2]
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+sec = conn.execute("SELECT id FROM securities WHERE symbol = ?", (symbol,)).fetchone()
+if not sec:
+    print(f"  Error: {symbol} not found")
+    sys.exit(1)
+
+# Current price
+price_row = conn.execute("""
+    SELECT ph.close_price, ph.date FROM price_history ph
+    JOIN securities s ON ph.security_id = s.id
+    WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+""", (symbol,)).fetchone()
+if not price_row:
+    print(f"  No price data for {symbol}")
+    sys.exit(1)
+price = price_row['close_price']
+price_date = price_row['date']
+
+# Portfolio total for sizing
+ptotal = conn.execute("""
+    SELECT SUM(p.quantity * COALESCE(
+        (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1), 0
+    )) FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type NOT IN ('cash','option') AND p.quantity > 0
+""").fetchone()[0] or 0
+
+# Valuation
+val = conn.execute("SELECT * FROM valuation_metrics WHERE symbol = ? ORDER BY date DESC LIMIT 1", (symbol,)).fetchone()
+
+# S/R levels
+supports = conn.execute("""
+    SELECT price, strength FROM price_levels WHERE symbol = ? AND level_type = 'support' AND price < ?
+    ORDER BY price DESC LIMIT 3
+""", (symbol, price)).fetchall()
+resistances = conn.execute("""
+    SELECT price, strength FROM price_levels WHERE symbol = ? AND level_type = 'resistance' AND price > ?
+    ORDER BY price ASC LIMIT 3
+""", (symbol, price)).fetchall()
+
+# ATR
+atr_row = conn.execute("""
+    SELECT AVG(high_price - low_price) as atr FROM (
+        SELECT high_price, low_price FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = ? AND high_price > 0 AND low_price > 0
+        ORDER BY ph.date DESC LIMIT 14
+    )
+""", (symbol,)).fetchone()
+atr = atr_row['atr'] if atr_row and atr_row['atr'] else 0
+atr_pct = (atr / price * 100) if atr else 0
+
+# Watchlist info
+wl = conn.execute("""
+    SELECT w.name, wi.thesis_snippet FROM watchlist_items wi
+    JOIN watchlists w ON wi.watchlist_id = w.id WHERE wi.symbol = ?
+""", (symbol,)).fetchone()
+
+# Existing position
+pos = conn.execute("""
+    SELECT SUM(p.quantity) as qty FROM positions p
+    JOIN securities s ON p.security_id = s.id
+    WHERE s.symbol = ? AND s.type NOT IN ('cash','option') AND p.quantity > 0
+""", (symbol,)).fetchone()
+cur_qty = int(pos['qty']) if pos and pos['qty'] else 0
+
+# === Display ===
+print()
+print(f"╔═══════════════════════════════════════════════╗")
+print(f"║  TRADE SETUP: {symbol:<31}║")
+print(f"╚═══════════════════════════════════════════════╝")
+print()
+
+# Context
+if wl:
+    print(f"  Watchlist: {wl['name']}" + (f" — {wl['thesis_snippet']}" if wl['thesis_snippet'] else ""))
+if cur_qty > 0:
+    print(f"  ⚠ Already hold {cur_qty} shares")
+print(f"  Price: ${price:.2f} (as of {price_date})")
+print(f"  ATR(14): ${atr:.2f} ({atr_pct:.1f}% daily range)")
+print()
+
+# Valuation
+print(f"  ── Valuation ──")
+if val:
+    t12 = f"{val['trailing_pe']:.1f}x" if val['trailing_pe'] else "N/A"
+    fwd = f"{val['forward_pe']:.1f}x" if val['forward_pe'] else "N/A"
+    peg = f"{val['forward_peg']:.2f}" if val['forward_peg'] else "N/A"
+    rating = val['peg_rating'] or '—'
+    growth = f"{val['eps_growth_pct']:+.0f}%" if val['eps_growth_pct'] else "—"
+    print(f"  T12 PE: {t12}  |  Fwd PE: {fwd}  |  PEG: {peg}  |  Rating: {rating}  |  Growth: {growth}")
+else:
+    print(f"  No valuation data (run refresh)")
+print()
+
+# S/R Levels
+print(f"  ── Support / Resistance ──")
+for s in supports:
+    dist = (price - s['price']) / price * 100
+    print(f"  S  ${s['price']:<8.2f}  str {s['strength']}/10  ({dist:.1f}% below)")
+print(f"  ●  ${price:<8.2f}  ← current")
+for r in resistances:
+    dist = (r['price'] - price) / price * 100
+    print(f"  R  ${r['price']:<8.2f}  str {r['strength']}/10  ({dist:.1f}% above)")
+
+# R/R
+if supports and resistances:
+    down = price - supports[0]['price']
+    up = resistances[0]['price'] - price
+    rr = up / down if down > 0 else 999
+    print(f"  R:R to R1/S1: {rr:.1f}x {'✓' if rr >= 2 else '⚠ < 2x'}")
+print()
+
+# Sizing (1% max for trading)
+max_alloc = 0.01
+max_mv = ptotal * max_alloc
+max_shares = int(max_mv / price) if price > 0 else 0
+print(f"  ── Sizing (1% max = ${max_mv:,.0f}) ──")
+print(f"  Max shares: {max_shares} @ ${price:.2f}")
+
+# Suggest stop at S1 or ATR-based
+if supports:
+    stop_s1 = supports[0]['price']
+    stop_risk_pct = (price - stop_s1) / price * 100
+    stop_risk_amt = max_shares * (price - stop_s1)
+    print(f"  Stop at S1: ${stop_s1:.2f} ({stop_risk_pct:.1f}% risk, ${stop_risk_amt:,.0f} at stake)")
+if atr:
+    stop_atr = price - 2 * atr
+    atr_risk_pct = 2 * atr_pct
+    atr_risk_amt = max_shares * 2 * atr
+    print(f"  Stop at 2×ATR: ${stop_atr:.2f} ({atr_risk_pct:.1f}% risk, ${atr_risk_amt:,.0f} at stake)")
+
+# Target at R1
+if resistances:
+    target = resistances[0]['price']
+    target_gain_pct = (target - price) / price * 100
+    target_gain_amt = max_shares * (target - price)
+    print(f"  Target at R1: ${target:.2f} ({target_gain_pct:+.1f}%, ${target_gain_amt:,.0f} potential)")
+print()
+
+# Ready-to-run commands
+stop_price = supports[0]['price'] if supports else (price - 2 * atr if atr else price * 0.95)
+print(f"  ── Commands ──")
+print(f"  1. Buy:        pm-cli.sh buy {max_shares} {symbol} at {price:.2f} DAY 4005")
+print(f"  2. Log trade:  pm-cli.sh trade-open {symbol} {max_shares} {price:.2f} {stop_price:.2f} \"<thesis>\" 20")
+print(f"  3. Place stop: pm-cli.sh sell {max_shares} {symbol} stop {stop_price:.2f} GTC 4005")
+print()
+
+conn.close()
+PYEOF
+    ;;
+
   trade-open)
     # Log a new trading position: pm-cli.sh trade-open <symbol> <shares> <entry_price> <stop_price> "<thesis>" [time_limit_days]
     TO_SYM=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')

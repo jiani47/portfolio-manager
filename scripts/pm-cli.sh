@@ -18,7 +18,7 @@ Ritual:
   ritual-status, intent-history, intent-changes-today
 
 Trading:
-  buy, sell, orders, cancel-order, trade-open, trade-close, trades
+  buy, sell, orders, cancel-order, trade-setup, trade-open, trade-close, trades
 
 EMS (Execution Management):
   basket-create, baskets, basket, basket-add, basket-orders, basket-confirm
@@ -27,6 +27,7 @@ EMS (Execution Management):
 Research:
   scorecard, scorecards, scorecard-update, scorecard-history, scorecard-add
   scorecard-rm, observe, observations, recall, note, notes, thesis-export
+  research
 
 Analytics:
   analytics, correlations, attribution
@@ -69,7 +70,7 @@ case "$CMD" in
     source "$SCRIPT_DIR/commands/ritual.sh" ;;
 
   # Trading
-  buy|sell|orders|cancel-order|trade-open|trade-close|trades)
+  buy|sell|orders|cancel-order|trade-setup|trade-open|trade-close|trades)
     source "$SCRIPT_DIR/commands/pretrade.sh"
     source "$SCRIPT_DIR/commands/trading.sh" ;;
 
@@ -79,7 +80,7 @@ case "$CMD" in
     source "$SCRIPT_DIR/commands/ems.sh" ;;
 
   # Research
-  scorecard|scorecards|scorecard-update|scorecard-history|scorecard-add|scorecard-rm|observe|observations|recall|note|notes|thesis-export)
+  scorecard|scorecards|scorecard-update|scorecard-history|scorecard-add|scorecard-rm|observe|observations|recall|note|notes|thesis-export|research)
     source "$SCRIPT_DIR/commands/pretrade.sh"
     source "$SCRIPT_DIR/commands/research.sh" ;;
 

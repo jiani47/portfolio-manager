@@ -626,6 +626,200 @@ with open(thesis_path, "w") as f:
 PYEOF
     ;;
 
+  research)
+    # Generate a research template for a symbol, auto-populated with available data
+    # Usage: pm-cli.sh research <symbol>
+    R_SYM=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    if [ -z "$R_SYM" ]; then
+      echo "Usage: pm-cli.sh research <symbol>"
+      echo "  Generates a research brief with auto-populated data from FMP + DB"
+      exit 1
+    fi
+
+    python3 - "$R_SYM" "$DB" << 'PYEOF'
+import sqlite3, sys, datetime, urllib.request, json, os
+
+symbol = sys.argv[1]
+db_path = sys.argv[2]
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+# Read FMP key
+fmp_key = None
+conf_path = os.path.expanduser("~/.pm-cli.conf")
+if os.path.exists(conf_path):
+    with open(conf_path) as f:
+        for line in f:
+            if line.startswith("FMP_API_KEY="):
+                fmp_key = line.split("=", 1)[1].strip()
+
+def fmp_fetch(endpoint, params=""):
+    if not fmp_key: return None
+    url = f"https://financialmodelingprep.com/stable/{endpoint}?symbol={symbol}&apikey={fmp_key}{params}"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url)) as resp:
+            return json.loads(resp.read())
+    except:
+        return None
+
+# === Gather Data ===
+
+# Profile
+profile = fmp_fetch("profile")
+p = profile[0] if profile and isinstance(profile, list) and len(profile) > 0 else {}
+
+# Price
+price_row = conn.execute("""
+    SELECT ph.close_price, ph.date FROM price_history ph
+    JOIN securities s ON ph.security_id = s.id
+    WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+""", (symbol,)).fetchone()
+price = price_row['close_price'] if price_row else p.get('price', 0)
+
+# Valuation from DB
+val = conn.execute("SELECT * FROM valuation_metrics WHERE symbol = ? ORDER BY date DESC LIMIT 1", (symbol,)).fetchone()
+
+# Key metrics
+metrics = fmp_fetch("key-metrics", "&period=annual&limit=1")
+km = metrics[0] if metrics and isinstance(metrics, list) and len(metrics) > 0 else {}
+
+# Income statement
+income = fmp_fetch("income-statement", "&period=annual&limit=3")
+
+# Analyst estimates
+estimates = fmp_fetch("analyst-estimates", "&period=annual&limit=5")
+
+# S/R levels
+supports = conn.execute("""
+    SELECT price, strength FROM price_levels WHERE symbol = ? AND level_type = 'support' ORDER BY price DESC LIMIT 3
+""", (symbol,)).fetchall()
+resistances = conn.execute("""
+    SELECT price, strength FROM price_levels WHERE symbol = ? AND level_type = 'resistance' ORDER BY price ASC LIMIT 3
+""", (symbol,)).fetchall()
+
+# Existing research notes
+notes = conn.execute("SELECT section, content, source, created_at FROM research_notes WHERE symbol = ? ORDER BY section, created_at", (symbol,)).fetchall()
+
+# Existing observations
+obs = conn.execute("SELECT observation_date, note, thesis_impact FROM observations WHERE security_id = (SELECT id FROM securities WHERE symbol = ? LIMIT 1) ORDER BY observation_date DESC LIMIT 5", (symbol,)).fetchall()
+
+# Watchlist
+wl = conn.execute("SELECT w.name, wi.thesis_snippet FROM watchlist_items wi JOIN watchlists w ON wi.watchlist_id = w.id WHERE wi.symbol = ?", (symbol,)).fetchone()
+
+# === Output ===
+now = datetime.datetime.now().strftime('%Y-%m-%d')
+print()
+print(f"{'='*60}")
+print(f"  RESEARCH BRIEF: {symbol}")
+print(f"  {p.get('companyName', '')}  |  {p.get('sector', '?')} / {p.get('industry', '?')}")
+print(f"  {p.get('exchange', '?')}  |  Mkt Cap: ${p.get('mktCap', 0)/1e9:.1f}B  |  Employees: {p.get('fullTimeEmployees', '?')}")
+if wl:
+    print(f"  Watchlist: {wl['name']}" + (f" — {wl['thesis_snippet']}" if wl['thesis_snippet'] else ""))
+print(f"  Generated: {now}")
+print(f"{'='*60}")
+
+# Business Description
+print(f"\n── Business Description ──")
+desc = p.get('description', '')
+if desc:
+    # Truncate to ~300 chars
+    if len(desc) > 300:
+        desc = desc[:297] + "..."
+    print(f"  {desc}")
+else:
+    print(f"  [No description available]")
+
+# Financials
+print(f"\n── Financials ──")
+if income and isinstance(income, list):
+    print(f"  {'Year':<6} {'Revenue':>12} {'Net Income':>12} {'EPS':>8} {'Margin':>8}")
+    print(f"  {'─'*6} {'─'*12} {'─'*12} {'─'*8} {'─'*8}")
+    for stmt in sorted(income, key=lambda x: x.get('date', '')):
+        yr = stmt.get('date', '')[:4]
+        rev = stmt.get('revenue', 0)
+        ni = stmt.get('netIncome', 0)
+        eps_val = stmt.get('eps', 0)
+        margin = (ni / rev * 100) if rev else 0
+        print(f"  {yr:<6} ${rev/1e9:>10.1f}B ${ni/1e9:>10.1f}B ${eps_val:>7.2f} {margin:>7.1f}%")
+else:
+    print(f"  [No financial data]")
+
+# Key Metrics
+print(f"\n── Key Metrics ──")
+if km:
+    print(f"  ROE: {km.get('returnOnEquity', 0)*100:.1f}%  |  ROA: {km.get('returnOnAssets', 0)*100:.1f}%  |  ROIC: {km.get('returnOnInvestedCapital', 0)*100:.1f}%")
+    print(f"  Current Ratio: {km.get('currentRatio', 0):.1f}  |  D/E: {km.get('debtToEquity', 0):.2f}")
+    print(f"  FCF Yield: {km.get('freeCashFlowYield', 0)*100:.1f}%  |  Earnings Yield: {km.get('earningsYield', 0)*100:.1f}%")
+
+# Valuation
+print(f"\n── Valuation ──")
+if val:
+    t12 = f"{val['trailing_pe']:.1f}x" if val['trailing_pe'] else "N/A"
+    fwd = f"{val['forward_pe']:.1f}x" if val['forward_pe'] else "N/A"
+    peg = f"{val['forward_peg']:.2f}" if val['forward_peg'] else "N/A"
+    rating = val['peg_rating'] or '—'
+    print(f"  T12 PE: {t12}  |  Fwd PE: {fwd}  |  PEG: {peg}  |  Rating: {rating}")
+    if val['fair_low'] and val['fair_high']:
+        print(f"  Fair Range: ${val['fair_low']:.0f} – ${val['fair_mid']:.0f} – ${val['fair_high']:.0f}  |  Current: ${price:.2f}")
+
+# EPS Estimates
+if estimates and isinstance(estimates, list):
+    estimates.sort(key=lambda x: x.get('date', ''))
+    future = [e for e in estimates if e.get('date', '') > now and e.get('epsAvg', 0)]
+    if future:
+        print(f"\n── Analyst Estimates ──")
+        print(f"  {'FY End':<12} {'EPS':>8} {'Revenue':>12} {'Analysts':>10}")
+        print(f"  {'─'*12} {'─'*8} {'─'*12} {'─'*10}")
+        for e in future[:4]:
+            eps_e = e.get('epsAvg', 0)
+            rev_e = e.get('revenueAvg', 0)
+            n = e.get('numAnalystsEps', 0)
+            print(f"  {e['date'][:10]:<12} ${eps_e:>7.2f} ${rev_e/1e9:>10.1f}B {n:>10}")
+
+# Technical Levels
+print(f"\n── Technical Levels ──")
+print(f"  Price: ${price:.2f}")
+for s in supports:
+    dist = (price - s['price']) / price * 100
+    print(f"  S  ${s['price']:.2f}  (str {s['strength']}/10, {dist:.1f}% below)")
+for r in resistances:
+    dist = (r['price'] - price) / price * 100
+    print(f"  R  ${r['price']:.2f}  (str {r['strength']}/10, {dist:.1f}% above)")
+
+# Existing Research
+if notes:
+    print(f"\n── Existing Research Notes ──")
+    cur_sec = None
+    for n in notes:
+        if n['section'] != cur_sec:
+            cur_sec = n['section']
+            print(f"  [{cur_sec}]")
+        src = f" ({n['source']})" if n['source'] else ""
+        content = n['content'][:100] + "..." if len(n['content']) > 100 else n['content']
+        print(f"    {n['created_at'][:10]}: {content}{src}")
+
+if obs:
+    print(f"\n── Recent Observations ──")
+    for o in obs:
+        impact = {'+': 'supports', '-': 'challenges', '~': 'neutral'}.get(o['thesis_impact'], o['thesis_impact'])
+        note_text = o['note'][:100] + "..." if len(o['note']) > 100 else o['note']
+        print(f"  {o['observation_date'][:10]} [{impact}] {note_text}")
+
+# Template for thesis
+print(f"\n── Thesis Template ──")
+print(f"  To build thesis, add research notes:")
+print(f"    pm-cli.sh note {symbol} business_model \"...\"")
+print(f"    pm-cli.sh note {symbol} moat \"...\"")
+print(f"    pm-cli.sh note {symbol} risks \"...\"")
+print(f"    pm-cli.sh note {symbol} catalyst \"...\"")
+print(f"    pm-cli.sh note {symbol} valuation \"...\"")
+print(f"  Then export: pm-cli.sh thesis-export {symbol}")
+print()
+
+conn.close()
+PYEOF
+    ;;
+
   note)
     # Add a research note: pm-cli.sh note <symbol> <section> "<content>" [source]
     # Sections: business_model, moat, risks, valuation, catalyst, competitive, management, other
