@@ -241,7 +241,7 @@ case "$1" in
     BASKET_STATUS=$(sqlite3 "$DB" "SELECT status FROM rebalance_baskets WHERE id = '$BASKET_ID';")
     echo "=== Basket: $BASKET_NAME ($BASKET_STATUS) ==="
     echo ""
-    echo "--- Orders with Allocation Context ---"
+    echo "--- Dynamic Allocation View (derived from target %) ---"
     PTOTAL=$(sqlite3 "$DB" "
       SELECT SUM(p.quantity * COALESCE(
         (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1), 0
@@ -249,7 +249,7 @@ case "$1" in
     ")
 
     python3 - "$DB" "$BASKET_ID" "$PTOTAL" << 'PYEOF'
-import sqlite3, sys
+import sqlite3, sys, math
 
 db_path = sys.argv[1]
 basket_id = sys.argv[2]
@@ -258,103 +258,120 @@ ptotal = float(sys.argv[3]) if sys.argv[3] else 0
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 
-orders = conn.execute("""
-    SELECT s.symbol, ep.side,
-      SUM(ept.shares) as total_shares,
-      SUM(CASE WHEN ept.status = 'filled' THEN COALESCE(ept.filled_qty, 0) ELSE 0 END) as filled_shares,
-      SUM(CASE WHEN ept.status IN ('pending','triggered') THEN ept.shares ELSE 0 END) as remaining_shares
-    FROM entry_plans ep
-    JOIN securities s ON ep.security_id = s.id
-    JOIN entry_plan_tranches ept ON ept.plan_id = ep.id
-    WHERE ep.basket_id = ?
-    GROUP BY s.symbol, ep.side
-    ORDER BY ep.side, s.symbol
-""", (basket_id,)).fetchall()
-
-print(f"  {'Symbol':<6} {'Side':<5} {'Cur%':>6} {'Tgt%':>6} {'Cur MV':>10} {'Tgt MV':>10} {'MTM':>8} {'Qty':>5} {'Filled':>6} {'Remain':>6}")
-print(f"  {'─'*6} {'─'*5} {'─'*6} {'─'*6} {'─'*10} {'─'*10} {'─'*8} {'─'*5} {'─'*6} {'─'*6}")
-
-for o in orders:
-    sym = o['symbol']
-    side = o['side'].upper()
-    total = o['total_shares']
-    filled = o['filled_shares'] or 0
-    remaining = o['remaining_shares'] or 0
-
-    price_row = conn.execute("""
+def get_price(sym):
+    row = conn.execute("""
         SELECT ph.close_price FROM price_history ph
         JOIN securities s ON ph.security_id = s.id
         WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
     """, (sym,)).fetchone()
-    price = price_row['close_price'] if price_row else 0
+    return row['close_price'] if row else 0
 
-    pos_row = conn.execute("""
+def get_position_qty(sym):
+    row = conn.execute("""
         SELECT SUM(p.quantity) as qty FROM positions p
         JOIN securities s ON p.security_id = s.id
         WHERE s.symbol = ? AND s.type NOT IN ('cash','option') AND p.quantity > 0
     """, (sym,)).fetchone()
-    cur_qty = pos_row['qty'] if pos_row and pos_row['qty'] else 0
-    cur_mv = cur_qty * price if price else 0
-    cur_pct = (cur_mv / ptotal * 100) if ptotal > 0 else 0
+    return row['qty'] if row and row['qty'] else 0
 
-    tgt_row = conn.execute("""
+def get_target_pct(sym):
+    row = conn.execute("""
         SELECT pi.target_allocation_pct FROM position_intents pi
         JOIN positions p ON pi.position_id = p.id
         JOIN securities s ON p.security_id = s.id
-        WHERE s.symbol = ? AND pi.target_allocation_pct IS NOT NULL
-        LIMIT 1
+        WHERE s.symbol = ? AND pi.target_allocation_pct IS NOT NULL LIMIT 1
     """, (sym,)).fetchone()
-    tgt_pct = tgt_row['target_allocation_pct'] if tgt_row else None
-    tgt_mv = ptotal * tgt_pct / 100 if tgt_pct is not None and ptotal > 0 else None
+    return row['target_allocation_pct'] if row else None
+
+# Get active (non-cancelled, non-filled-complete) symbols in basket
+basket_symbols = conn.execute("""
+    SELECT DISTINCT s.symbol, ep.side
+    FROM entry_plans ep
+    JOIN securities s ON ep.security_id = s.id
+    JOIN entry_plan_tranches ept ON ept.plan_id = ep.id
+    WHERE ep.basket_id = ? AND ept.status IN ('pending', 'triggered', 'submitted')
+    ORDER BY ep.side, s.symbol
+""", (basket_id,)).fetchall()
+
+# Also get filled symbols for display
+filled_symbols = conn.execute("""
+    SELECT DISTINCT s.symbol, ep.side,
+      SUM(ept.filled_qty) as filled_qty
+    FROM entry_plans ep
+    JOIN securities s ON ep.security_id = s.id
+    JOIN entry_plan_tranches ept ON ept.plan_id = ep.id
+    WHERE ep.basket_id = ? AND ept.status = 'filled'
+    GROUP BY s.symbol, ep.side
+""", (basket_id,)).fetchall()
+
+print(f"  {'Symbol':<6} {'Side':<5} {'Cur%':>6} {'Tgt%':>6} {'Cur MV':>10} {'Tgt MV':>10} {'MTM':>8} {'Need Qty':>8} {'Basket':>7} {'Status':>10}")
+print(f"  {'─'*6} {'─'*5} {'─'*6} {'─'*6} {'─'*10} {'─'*10} {'─'*8} {'─'*8} {'─'*7} {'─'*10}")
+
+# Active orders
+for row in basket_symbols:
+    sym = row['symbol']
+    side = row['side'].upper()
+    price = get_price(sym)
+    cur_qty = get_position_qty(sym)
+    cur_mv = cur_qty * price
+    cur_pct = (cur_mv / ptotal * 100) if ptotal > 0 else 0
+    tgt_pct = get_target_pct(sym)
+    tgt_mv = ptotal * tgt_pct / 100 if tgt_pct is not None else None
+
+    # Dynamic qty: derived from target
+    if tgt_pct is not None and price > 0:
+        tgt_qty = int(tgt_mv / price) if tgt_mv else 0
+        delta_qty = tgt_qty - int(cur_qty)
+        if side == 'SELL':
+            need_qty = max(0, int(cur_qty) - tgt_qty)
+        else:
+            need_qty = max(0, tgt_qty - int(cur_qty))
+    else:
+        need_qty = None
+
+    # Basket qty (what's currently in the basket)
+    bkt = conn.execute("""
+        SELECT SUM(ept.shares) as total,
+          SUM(CASE WHEN ept.status IN ('pending','triggered') THEN ept.shares ELSE 0 END) as remaining
+        FROM entry_plan_tranches ept
+        JOIN entry_plans ep ON ept.plan_id = ep.id
+        JOIN securities s ON ep.security_id = s.id
+        WHERE ep.basket_id = ? AND s.symbol = ? AND ep.side = ?
+          AND ept.status IN ('pending', 'triggered', 'submitted')
+    """, (basket_id, sym, row['side'])).fetchone()
+    basket_qty = bkt['remaining'] if bkt and bkt['remaining'] else 0
+
+    # Status: match / over / under
+    if need_qty is not None:
+        if basket_qty == need_qty or abs(basket_qty - need_qty) <= 1:
+            status = "OK"
+        elif basket_qty > need_qty:
+            status = f"OVER +{basket_qty - need_qty}"
+        else:
+            status = f"UNDER -{need_qty - basket_qty}"
+    else:
+        status = "no target"
 
     tgt_pct_str = f"{tgt_pct:.1f}%" if tgt_pct is not None else "  —"
     tgt_mv_str = f"${tgt_mv:>9,.0f}" if tgt_mv is not None else "        —"
-    price_str = f"${price:>.2f}" if price else "—"
+    need_str = f"{need_qty:>8}" if need_qty is not None else "     —"
 
-    print(f"  {sym:<6} {side:<5} {cur_pct:>5.1f}% {tgt_pct_str:>6} ${cur_mv:>9,.0f} {tgt_mv_str:>10} {price_str:>8} {total:>5} {filled:>6} {remaining:>6}")
+    print(f"  {sym:<6} {side:<5} {cur_pct:>5.1f}% {tgt_pct_str:>6} ${cur_mv:>9,.0f} {tgt_mv_str:>10} ${price:>7.2f} {need_str} {basket_qty:>7} {status:>10}")
+
+# Filled orders (for completeness)
+for row in filled_symbols:
+    sym = row['symbol']
+    side = row['side'].upper()
+    filled = int(row['filled_qty'] or 0)
+    print(f"  {sym:<6} {side:<5}                                                    {filled:>7} FILLED")
 
 # --- Portfolio Summary (Post-Rebalance) ---
-# Get all remaining (unfilled) tranches with their costs
-remaining_tranches = conn.execute("""
-    SELECT s.symbol, ep.side, ept.shares, ept.trigger_type, ept.trigger_price,
-        (SELECT ph.close_price FROM price_history ph
-         JOIN securities s2 ON ph.security_id = s2.id
-         WHERE s2.symbol = s.symbol ORDER BY ph.date DESC LIMIT 1) as mtm
-    FROM entry_plan_tranches ept
-    JOIN entry_plans ep ON ept.plan_id = ep.id
-    JOIN securities s ON ep.security_id = s.id
-    WHERE ep.basket_id = ? AND ept.status IN ('pending', 'triggered')
-""", (basket_id,)).fetchall()
-
-total_sell = 0
-total_buy = 0
-sell_detail = {}
-buy_detail = {}
-
-for t in remaining_tranches:
-    sym = t['symbol']
-    shares = t['shares']
-    mtm = t['mtm'] or 0
-    # Use trigger price for price-triggered, MTM for date-triggered
-    est_price = t['trigger_price'] if t['trigger_type'] == 'price' and t['trigger_price'] else mtm
-    value = shares * est_price
-
-    if t['side'] == 'sell':
-        total_sell += value
-        sell_detail[sym] = sell_detail.get(sym, 0) + value
-    else:
-        total_buy += value
-        buy_detail[sym] = buy_detail.get(sym, 0) + value
-
-net = total_buy - total_sell
-
 print()
-print("--- Portfolio Summary (Post-Rebalance) ---")
-print(f"  Current Portfolio MV:  ${ptotal:>12,.0f}")
-
-# Show projected post-rebalance by position
+print("--- Post-Rebalance Projection (at current prices) ---")
+print(f"  Portfolio MV: ${ptotal:>12,.0f}")
 print()
-# Get ALL positions with their current MV and target
+
+# Get ALL positions
 all_pos = conn.execute("""
     SELECT agg.symbol, agg.qty,
         (SELECT pi.target_allocation_pct FROM position_intents pi
@@ -375,43 +392,41 @@ all_pos = conn.execute("""
     ORDER BY agg.symbol
 """).fetchall()
 
-print(f"  {'Symbol':<6} {'Cur MV':>10} {'After MV':>10} {'Tgt MV':>10} {'After%':>7}")
-print(f"  {'─'*6} {'─'*10} {'─'*10} {'─'*10} {'─'*7}")
+print(f"  {'Symbol':<6} {'Cur Qty':>8} {'Tgt Qty':>8} {'Delta':>7} {'Cur MV':>10} {'Tgt MV':>10} {'Cur%':>6} {'Tgt%':>6}")
+print(f"  {'─'*6} {'─'*8} {'─'*8} {'─'*7} {'─'*10} {'─'*10} {'─'*6} {'─'*6}")
 
-total_after = 0
+total_sell = 0
+total_buy = 0
+
 for pos in all_pos:
     sym = pos['symbol']
-    cur_mv = (pos['qty'] or 0) * (pos['mtm'] or 0)
-    sell_amt = sell_detail.get(sym, 0)
-    buy_amt = buy_detail.get(sym, 0)
-    after_mv = cur_mv - sell_amt + buy_amt
-    tgt_mv = ptotal * pos['tgt_pct'] / 100 if pos['tgt_pct'] else None
-    after_pct = (after_mv / ptotal * 100) if ptotal > 0 else 0
-    total_after += after_mv
+    qty = int(pos['qty'] or 0)
+    price = pos['mtm'] or 0
+    cur_mv = qty * price
+    cur_pct = (cur_mv / ptotal * 100) if ptotal > 0 else 0
+    tgt_pct = pos['tgt_pct']
 
-    tgt_str = f"${tgt_mv:>9,.0f}" if tgt_mv is not None else "        —"
-    if sell_amt > 0 or buy_amt > 0:
-        marker = " *"
+    if tgt_pct is not None and price > 0:
+        tgt_mv = ptotal * tgt_pct / 100
+        tgt_qty = int(tgt_mv / price)
+        delta = tgt_qty - qty
+        delta_mv = delta * price
+        if delta_mv > 0:
+            total_buy += delta_mv
+        else:
+            total_sell += abs(delta_mv)
+        delta_str = f"{delta:>+7}" if delta != 0 else "      0"
+        tgt_pct_str = f"{tgt_pct:.1f}%"
+        print(f"  {sym:<6} {qty:>8} {tgt_qty:>8} {delta_str} ${cur_mv:>9,.0f} ${tgt_mv:>9,.0f} {cur_pct:>5.1f}% {tgt_pct_str:>6}")
     else:
-        marker = ""
-    print(f"  {sym:<6} ${cur_mv:>9,.0f} ${after_mv:>9,.0f} {tgt_str:>10} {after_pct:>6.1f}%{marker}")
+        print(f"  {sym:<6} {qty:>8}        —       — ${cur_mv:>9,.0f}          — {cur_pct:>5.1f}%     —")
 
-# New position buys (not currently held)
-for sym, amt in buy_detail.items():
-    already = any(p['symbol'] == sym for p in all_pos)
-    if not already:
-        after_pct = (amt / ptotal * 100) if ptotal > 0 else 0
-        print(f"  {sym:<6} $        0 ${amt:>9,.0f}          — {after_pct:>6.1f}% *")
-        total_after += amt
-
-print()
-sell_list = ", ".join(f"{s} ${v/1000:.0f}K" for s, v in sorted(sell_detail.items()))
-buy_list = ", ".join(f"{s} ${v/1000:.0f}K" for s, v in sorted(buy_detail.items()))
-print(f"  Sells:  ${total_sell:>10,.0f}  ({sell_list})")
-print(f"  Buys:   ${total_buy:>10,.0f}  ({buy_list})")
+net = total_buy - total_sell
 sign = "+" if net >= 0 else ""
-print(f"  Net:    ${sign}{net:>9,.0f}  ({'capital needed' if net > 0 else 'capital freed'})")
-print(f"  (* = changed by rebalance)")
+print()
+print(f"  Total sells:  ${total_sell:>10,.0f}")
+print(f"  Total buys:   ${total_buy:>10,.0f}")
+print(f"  Net capital:  ${sign}{net:>9,.0f}  ({'needed from cash' if net > 0 else 'freed to cash'})")
 
 conn.close()
 PYEOF
@@ -906,4 +921,157 @@ PYEOF
       echo "Run: pm-cli.sh basket-orders to review triggered orders"
     fi
     ;;
+
+  basket-resize)
+    # Dynamically resize all pending tranches to match target allocations
+    BASKET_NAME="$2"
+    if [ -z "$BASKET_NAME" ]; then
+      echo "Usage: pm-cli.sh basket-resize <basket_name>"
+      echo "  Recalculates all pending tranche quantities from target allocation %"
+      exit 1
+    fi
+    BASKET_ID=$(sqlite3 "$DB" "SELECT id FROM rebalance_baskets WHERE name = '$BASKET_NAME';")
+    if [ -z "$BASKET_ID" ]; then
+      echo "Error: Basket '$BASKET_NAME' not found"; exit 1
+    fi
+
+    PTOTAL=$(sqlite3 "$DB" "
+      SELECT SUM(p.quantity * COALESCE(
+        (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1), 0
+      )) FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type NOT IN ('cash','option') AND p.quantity > 0;
+    ")
+
+    python3 - "$DB" "$BASKET_ID" "$PTOTAL" << 'PYEOF'
+import sqlite3, sys, math
+
+db_path = sys.argv[1]
+basket_id = sys.argv[2]
+ptotal = float(sys.argv[3]) if sys.argv[3] else 0
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+# Get all active plans with pending tranches
+plans = conn.execute("""
+    SELECT ep.id as plan_id, ep.side, s.symbol
+    FROM entry_plans ep
+    JOIN securities s ON ep.security_id = s.id
+    WHERE ep.basket_id = ? AND ep.status = 'active'
+    GROUP BY ep.id
+""", (basket_id,)).fetchall()
+
+print(f"=== Resizing basket to target allocations (portfolio: ${ptotal:,.0f}) ===")
+print()
+
+updated = 0
+skipped = 0
+
+for plan in plans:
+    sym = plan['symbol']
+    side = plan['side']
+
+    # Get pending tranches for this plan
+    tranches = conn.execute("""
+        SELECT id, tranche_number, shares, trigger_type, trigger_price, trigger_date, status
+        FROM entry_plan_tranches
+        WHERE plan_id = ? AND status IN ('pending', 'triggered')
+        ORDER BY tranche_number
+    """, (plan['plan_id'],)).fetchall()
+
+    if not tranches:
+        continue
+
+    # Get current position
+    pos = conn.execute("""
+        SELECT SUM(p.quantity) as qty FROM positions p
+        JOIN securities s ON p.security_id = s.id
+        WHERE s.symbol = ? AND s.type NOT IN ('cash','option') AND p.quantity > 0
+    """, (sym,)).fetchone()
+    cur_qty = int(pos['qty']) if pos and pos['qty'] else 0
+
+    # Get target %
+    tgt_row = conn.execute("""
+        SELECT pi.target_allocation_pct FROM position_intents pi
+        JOIN positions p ON pi.position_id = p.id
+        JOIN securities s ON p.security_id = s.id
+        WHERE s.symbol = ? AND pi.target_allocation_pct IS NOT NULL LIMIT 1
+    """, (sym,)).fetchone()
+
+    if not tgt_row:
+        print(f"  {sym}: no target % set — skipping")
+        skipped += 1
+        continue
+
+    tgt_pct = tgt_row['target_allocation_pct']
+
+    # Get price (use trigger price for price-triggered, MTM for date-triggered)
+    price_row = conn.execute("""
+        SELECT ph.close_price FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+    """, (sym,)).fetchone()
+    mtm = price_row['close_price'] if price_row else 0
+
+    if mtm <= 0:
+        print(f"  {sym}: no price data — skipping")
+        skipped += 1
+        continue
+
+    # Compute total need
+    tgt_mv = ptotal * tgt_pct / 100
+    tgt_qty = int(tgt_mv / mtm)
+
+    if side == 'sell':
+        total_need = max(0, cur_qty - tgt_qty)
+    else:
+        total_need = max(0, tgt_qty - cur_qty)
+
+    # Get already filled qty for this plan
+    filled_row = conn.execute("""
+        SELECT SUM(COALESCE(filled_qty, 0)) as filled FROM entry_plan_tranches
+        WHERE plan_id = ? AND status = 'filled'
+    """, (plan['plan_id'],)).fetchone()
+    already_filled = int(filled_row['filled']) if filled_row and filled_row['filled'] else 0
+
+    remaining_need = max(0, total_need - already_filled)
+    num_tranches = len(tranches)
+    old_total = sum(t['shares'] for t in tranches)
+
+    if remaining_need == 0 and old_total > 0:
+        # Need to cancel all pending tranches — position already at/past target
+        for t in tranches:
+            conn.execute("UPDATE entry_plan_tranches SET status = 'cancelled' WHERE id = ?", (t['id'],))
+        print(f"  {sym} {side.upper()}: target reached — cancelled {num_tranches} pending tranches (was {old_total} shares)")
+        updated += 1
+        continue
+
+    if remaining_need == old_total:
+        print(f"  {sym} {side.upper()}: {old_total} shares — already correct")
+        continue
+
+    # Distribute remaining_need across tranches
+    per_tranche = remaining_need // num_tranches
+    remainder = remaining_need % num_tranches
+
+    for i, t in enumerate(tranches):
+        new_shares = per_tranche + (1 if i == num_tranches - 1 and remainder > 0 else 0)
+        if i < num_tranches - 1:
+            actual = per_tranche
+        else:
+            actual = per_tranche + remainder
+
+        if actual != t['shares']:
+            conn.execute("UPDATE entry_plan_tranches SET shares = ? WHERE id = ?", (actual, t['id']))
+
+    print(f"  {sym} {side.upper()}: {old_total} → {remaining_need} shares ({num_tranches} tranches, target {tgt_pct:.1f}% = ${tgt_mv:,.0f}, cur {cur_qty} @ ${mtm:.2f})")
+    updated += 1
+
+conn.commit()
+conn.close()
+print()
+print(f"  Resized {updated} orders, skipped {skipped}")
+print(f"  Run: pm-cli.sh basket {sys.argv[2] if len(sys.argv) > 2 else ''} to verify")
+PYEOF
+    ;;
+
 esac

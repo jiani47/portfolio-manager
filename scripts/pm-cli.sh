@@ -22,7 +22,7 @@ Trading:
 
 EMS (Execution Management):
   basket-create, baskets, basket, basket-add, basket-orders, basket-confirm
-  basket-cancel, basket-fill, basket-fills, basket-status
+  basket-cancel, basket-fill, basket-fills, basket-status, basket-resize
 
 Research:
   scorecard, scorecards, scorecard-update, scorecard-history, scorecard-add
@@ -74,7 +74,7 @@ case "$CMD" in
     source "$SCRIPT_DIR/commands/trading.sh" ;;
 
   # EMS
-  basket-create|basket-add|baskets|basket|basket-orders|basket-confirm|basket-cancel|basket-fill|basket-fills|basket-status)
+  basket-create|basket-add|baskets|basket|basket-orders|basket-confirm|basket-cancel|basket-fill|basket-fills|basket-status|basket-resize)
     source "$SCRIPT_DIR/commands/pretrade.sh"
     source "$SCRIPT_DIR/commands/ems.sh" ;;
 
