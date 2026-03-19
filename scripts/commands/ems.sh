@@ -951,13 +951,14 @@ ptotal = float(sys.argv[3]) if sys.argv[3] else 0
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 
-# Get all active plans with pending tranches
-plans = conn.execute("""
-    SELECT ep.id as plan_id, ep.side, s.symbol
+# Group by symbol+side, then distribute across ALL tranches for that symbol
+symbol_sides = conn.execute("""
+    SELECT DISTINCT s.symbol, ep.side
     FROM entry_plans ep
     JOIN securities s ON ep.security_id = s.id
-    WHERE ep.basket_id = ? AND ep.status = 'active'
-    GROUP BY ep.id
+    JOIN entry_plan_tranches ept ON ept.plan_id = ep.id
+    WHERE ep.basket_id = ? AND ep.status = 'active' AND ept.status IN ('pending', 'triggered')
+    ORDER BY ep.side, s.symbol
 """, (basket_id,)).fetchall()
 
 print(f"=== Resizing basket to target allocations (portfolio: ${ptotal:,.0f}) ===")
@@ -966,17 +967,20 @@ print()
 updated = 0
 skipped = 0
 
-for plan in plans:
-    sym = plan['symbol']
-    side = plan['side']
+for ss in symbol_sides:
+    sym = ss['symbol']
+    side = ss['side']
 
-    # Get pending tranches for this plan
+    # Get ALL pending tranches across ALL plans for this symbol+side
     tranches = conn.execute("""
-        SELECT id, tranche_number, shares, trigger_type, trigger_price, trigger_date, status
-        FROM entry_plan_tranches
-        WHERE plan_id = ? AND status IN ('pending', 'triggered')
-        ORDER BY tranche_number
-    """, (plan['plan_id'],)).fetchall()
+        SELECT ept.id, ept.tranche_number, ept.shares, ept.trigger_type, ept.trigger_price, ept.trigger_date, ept.status, ept.plan_id
+        FROM entry_plan_tranches ept
+        JOIN entry_plans ep ON ept.plan_id = ep.id
+        JOIN securities s ON ep.security_id = s.id
+        WHERE ep.basket_id = ? AND s.symbol = ? AND ep.side = ? AND ep.status = 'active'
+          AND ept.status IN ('pending', 'triggered')
+        ORDER BY ept.trigger_type, ept.tranche_number
+    """, (basket_id, sym, side)).fetchall()
 
     if not tranches:
         continue
@@ -1004,7 +1008,6 @@ for plan in plans:
 
     tgt_pct = tgt_row['target_allocation_pct']
 
-    # Get price (use trigger price for price-triggered, MTM for date-triggered)
     price_row = conn.execute("""
         SELECT ph.close_price FROM price_history ph
         JOIN securities s ON ph.security_id = s.id
@@ -1017,7 +1020,6 @@ for plan in plans:
         skipped += 1
         continue
 
-    # Compute total need
     tgt_mv = ptotal * tgt_pct / 100
     tgt_qty = int(tgt_mv / mtm)
 
@@ -1026,11 +1028,14 @@ for plan in plans:
     else:
         total_need = max(0, tgt_qty - cur_qty)
 
-    # Get already filled qty for this plan
+    # Get already filled qty across ALL plans for this symbol+side
     filled_row = conn.execute("""
-        SELECT SUM(COALESCE(filled_qty, 0)) as filled FROM entry_plan_tranches
-        WHERE plan_id = ? AND status = 'filled'
-    """, (plan['plan_id'],)).fetchone()
+        SELECT SUM(COALESCE(ept.filled_qty, 0)) as filled
+        FROM entry_plan_tranches ept
+        JOIN entry_plans ep ON ept.plan_id = ep.id
+        JOIN securities s ON ep.security_id = s.id
+        WHERE ep.basket_id = ? AND s.symbol = ? AND ep.side = ? AND ept.status = 'filled'
+    """, (basket_id, sym, side)).fetchone()
     already_filled = int(filled_row['filled']) if filled_row and filled_row['filled'] else 0
 
     remaining_need = max(0, total_need - already_filled)
@@ -1038,7 +1043,6 @@ for plan in plans:
     old_total = sum(t['shares'] for t in tranches)
 
     if remaining_need == 0 and old_total > 0:
-        # Need to cancel all pending tranches — position already at/past target
         for t in tranches:
             conn.execute("UPDATE entry_plan_tranches SET status = 'cancelled' WHERE id = ?", (t['id'],))
         print(f"  {sym} {side.upper()}: target reached — cancelled {num_tranches} pending tranches (was {old_total} shares)")
@@ -1049,12 +1053,11 @@ for plan in plans:
         print(f"  {sym} {side.upper()}: {old_total} shares — already correct")
         continue
 
-    # Distribute remaining_need across tranches
+    # Distribute remaining_need across ALL tranches evenly
     per_tranche = remaining_need // num_tranches
     remainder = remaining_need % num_tranches
 
     for i, t in enumerate(tranches):
-        new_shares = per_tranche + (1 if i == num_tranches - 1 and remainder > 0 else 0)
         if i < num_tranches - 1:
             actual = per_tranche
         else:
