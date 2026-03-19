@@ -271,4 +271,124 @@ PYEOF
       exit 1
     fi
     ;;
+
+  trade-open)
+    # Log a new trading position: pm-cli.sh trade-open <symbol> <shares> <entry_price> <stop_price> "<thesis>" [time_limit_days]
+    TO_SYM=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    TO_SHARES="${3:-}"
+    TO_ENTRY="${4:-}"
+    TO_STOP="${5:-}"
+    TO_THESIS="${6:-}"
+    TO_DAYS="${7:-20}"
+    if [ -z "$TO_SYM" ] || [ -z "$TO_SHARES" ] || [ -z "$TO_ENTRY" ] || [ -z "$TO_STOP" ] || [ -z "$TO_THESIS" ]; then
+      echo "Usage: pm-cli.sh trade-open <symbol> <shares> <entry_price> <stop_price> \"<thesis>\" [time_limit_days]"
+      echo "  Default time limit: 20 days"
+      exit 1
+    fi
+
+    SEC_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$TO_SYM' LIMIT 1;")
+    if [ -z "$SEC_ID" ]; then
+      echo "Error: Security '$TO_SYM' not found"
+      exit 1
+    fi
+
+    TO_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    TODAY=$(date +%Y-%m-%d)
+    TO_THESIS_ESC=$(echo "$TO_THESIS" | sed "s/'/''/g")
+
+    # Create table if not exists
+    sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS trading_positions (id TEXT PRIMARY KEY, security_id TEXT NOT NULL, symbol TEXT NOT NULL, entry_date TEXT NOT NULL, entry_price REAL NOT NULL, shares INTEGER NOT NULL, thesis TEXT NOT NULL, stop_price REAL, stop_order_id TEXT, time_limit_days INTEGER NOT NULL DEFAULT 20, status TEXT NOT NULL DEFAULT 'open', exit_date TEXT, exit_price REAL, exit_reason TEXT, pnl REAL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+
+    sqlite3 "$DB" "INSERT INTO trading_positions (id, security_id, symbol, entry_date, entry_price, shares, thesis, stop_price, time_limit_days, status, created_at, updated_at) VALUES ('$TO_ID', '$SEC_ID', '$TO_SYM', '$TODAY', $TO_ENTRY, $TO_SHARES, '$TO_THESIS_ESC', $TO_STOP, $TO_DAYS, 'open', '$NOW', '$NOW');"
+
+    RISK=$(python3 -c "print(f'\${abs($TO_SHARES * ($TO_ENTRY - $TO_STOP)):.0f}')")
+    RISK_PCT=$(python3 -c "print(f'{abs(($TO_ENTRY - $TO_STOP) / $TO_ENTRY * 100):.1f}%')")
+    EXPIRY=$(python3 -c "from datetime import datetime, timedelta; print((datetime.now() + timedelta(days=$TO_DAYS)).strftime('%Y-%m-%d'))")
+
+    echo "=== Trade Opened ==="
+    echo "  $TO_SYM  $TO_SHARES shares @ \$$TO_ENTRY"
+    echo "  Stop: \$$TO_STOP ($RISK_PCT, $RISK risk)"
+    echo "  Thesis: $TO_THESIS"
+    echo "  Time limit: $TO_DAYS days (expires $EXPIRY)"
+    echo ""
+    echo "  ⚠ IMPORTANT: Place GTC stop order now:"
+    echo "  pm-cli.sh sell $TO_SHARES $TO_SYM stop $TO_STOP GTC"
+    ;;
+
+  trade-close)
+    # Close a trading position: pm-cli.sh trade-close <symbol> <exit_price> "<reason>"
+    TC_SYM=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    TC_EXIT="${3:-}"
+    TC_REASON="${4:-}"
+    if [ -z "$TC_SYM" ] || [ -z "$TC_EXIT" ]; then
+      echo "Usage: pm-cli.sh trade-close <symbol> <exit_price> \"<reason>\""
+      exit 1
+    fi
+
+    TC_TRADE=$(sqlite3 -separator '|' "$DB" "SELECT id, entry_price, shares, entry_date FROM trading_positions WHERE symbol = '$TC_SYM' AND status = 'open' ORDER BY entry_date DESC LIMIT 1;" 2>/dev/null)
+    if [ -z "$TC_TRADE" ]; then
+      echo "Error: No open trade found for $TC_SYM"
+      exit 1
+    fi
+
+    TC_ID=$(echo "$TC_TRADE" | cut -d'|' -f1)
+    TC_ENTRY=$(echo "$TC_TRADE" | cut -d'|' -f2)
+    TC_SHARES=$(echo "$TC_TRADE" | cut -d'|' -f3)
+    TC_DATE=$(echo "$TC_TRADE" | cut -d'|' -f4)
+    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    TODAY=$(date +%Y-%m-%d)
+    TC_REASON_ESC=$(echo "$TC_REASON" | sed "s/'/''/g")
+
+    PNL=$(python3 -c "print(f'{$TC_SHARES * ($TC_EXIT - $TC_ENTRY):.2f}')")
+    PNL_PCT=$(python3 -c "print(f'{($TC_EXIT - $TC_ENTRY) / $TC_ENTRY * 100:.1f}')")
+    HOLD_DAYS=$(python3 -c "from datetime import datetime; print((datetime.now() - datetime.strptime('$TC_DATE', '%Y-%m-%d')).days)")
+
+    sqlite3 "$DB" "UPDATE trading_positions SET status = 'closed', exit_date = '$TODAY', exit_price = $TC_EXIT, exit_reason = '$TC_REASON_ESC', pnl = $PNL, updated_at = '$NOW' WHERE id = '$TC_ID';"
+
+    echo "=== Trade Closed ==="
+    echo "  $TC_SYM  $TC_SHARES shares"
+    echo "  Entry: \$$TC_ENTRY on $TC_DATE → Exit: \$$TC_EXIT ($HOLD_DAYS days)"
+    echo "  P&L: \$$PNL (${PNL_PCT}%)"
+    echo "  Reason: ${TC_REASON:-none}"
+    ;;
+
+  trades)
+    # List trading positions: pm-cli.sh trades [all]
+    TRADE_FILTER="AND tp.status = 'open'"
+    TRADE_LABEL="Open"
+    if [ "$2" = "all" ]; then
+      TRADE_FILTER=""
+      TRADE_LABEL="All"
+    fi
+
+    echo "=== $TRADE_LABEL Trading Positions ==="
+    sqlite3 "$DB" "
+      SELECT tp.symbol, tp.shares, tp.entry_price, tp.entry_date, tp.stop_price, tp.time_limit_days,
+        tp.thesis, tp.status, tp.exit_price, tp.pnl,
+        (SELECT ph.close_price FROM price_history ph JOIN securities s ON ph.security_id = s.id
+         WHERE s.symbol = tp.symbol ORDER BY ph.date DESC LIMIT 1) as mtm
+      FROM trading_positions tp
+      WHERE 1=1 $TRADE_FILTER
+      ORDER BY tp.entry_date DESC;
+    " 2>/dev/null | while IFS='|' read -r SYM SHARES ENTRY EDATE STOP DAYS THESIS STATUS EXIT_PX PNL MTM; do
+      if [ "$STATUS" = "open" ]; then
+        # Compute unrealized P&L
+        UPNL=$(python3 -c "print(f'\${$SHARES * ($MTM - $ENTRY):.0f}')" 2>/dev/null)
+        UPNL_PCT=$(python3 -c "print(f'{($MTM - $ENTRY) / $ENTRY * 100:.1f}%')" 2>/dev/null)
+        # Check time remaining
+        DAYS_HELD=$(python3 -c "from datetime import datetime; print((datetime.now() - datetime.strptime('$EDATE', '%Y-%m-%d')).days)" 2>/dev/null)
+        DAYS_LEFT=$((DAYS - DAYS_HELD))
+        TIME_WARN=""
+        [ "$DAYS_LEFT" -le 5 ] 2>/dev/null && TIME_WARN=" ⚠ EXPIRING"
+        [ "$DAYS_LEFT" -le 0 ] 2>/dev/null && TIME_WARN=" ⛔ EXPIRED"
+
+        echo "  $SYM  ${SHARES}sh @ \$$ENTRY → \$$MTM (${UPNL_PCT}, $UPNL) | stop \$$STOP | ${DAYS_HELD}d/${DAYS}d${TIME_WARN}"
+        echo "    Thesis: $THESIS"
+      else
+        echo "  $SYM  ${SHARES}sh @ \$$ENTRY → \$$EXIT_PX (P&L: \$$PNL) [$STATUS] — entered $EDATE"
+      fi
+    done
+    ;;
+
 esac

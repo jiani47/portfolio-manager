@@ -355,6 +355,51 @@ PYEOF
       echo ""
     fi
 
+    # === Trading Position Alerts ===
+    TRADE_ALERTS=$(sqlite3 "$DB" "
+      SELECT tp.symbol, tp.shares, tp.entry_price, tp.entry_date, tp.stop_price, tp.time_limit_days,
+        julianday('now') - julianday(tp.entry_date) as days_held,
+        tp.time_limit_days - (julianday('now') - julianday(tp.entry_date)) as days_left,
+        (SELECT ph.close_price FROM price_history ph JOIN securities s ON ph.security_id = s.id
+         WHERE s.symbol = tp.symbol ORDER BY ph.date DESC LIMIT 1) as mtm
+      FROM trading_positions tp
+      WHERE tp.status = 'open';
+    " 2>/dev/null)
+
+    if [ -n "$TRADE_ALERTS" ]; then
+      NEEDS_ALERT=0
+      ALERT_LINES=""
+      echo "$TRADE_ALERTS" | while IFS='|' read -r SYM SHARES ENTRY EDATE STOP LIMIT HELD LEFT MTM; do
+        HELD_INT=$(printf "%.0f" "$HELD" 2>/dev/null)
+        LEFT_INT=$(printf "%.0f" "$LEFT" 2>/dev/null)
+        UPNL_PCT=$(python3 -c "print(f'{($MTM - $ENTRY) / $ENTRY * 100:+.1f}%')" 2>/dev/null)
+
+        WARN=""
+        if [ "$LEFT_INT" -le 0 ] 2>/dev/null; then
+          WARN="⛔ EXPIRED"
+        elif [ "$LEFT_INT" -le 5 ] 2>/dev/null; then
+          WARN="⚠ ${LEFT_INT}d left"
+        fi
+
+        # Check if stop not set (no stop price)
+        STOP_WARN=""
+        if [ -z "$STOP" ] || [ "$STOP" = "0" ] || [ "$STOP" = "0.0" ]; then
+          STOP_WARN=" ⚠ NO STOP"
+        fi
+
+        if [ -n "$WARN" ] || [ -n "$STOP_WARN" ]; then
+          echo "  $SYM ${SHARES}sh \$$MTM ($UPNL_PCT) | stop \$$STOP | ${HELD_INT}d/${LIMIT}d ${WARN}${STOP_WARN}"
+        fi
+      done > /tmp/pm-trade-alerts-$$
+
+      if [ -s /tmp/pm-trade-alerts-$$ ]; then
+        echo "=== Trading Position Alerts ==="
+        cat /tmp/pm-trade-alerts-$$
+        echo ""
+      fi
+      rm -f /tmp/pm-trade-alerts-$$
+    fi
+
     # === Entry Confluence ===
     CONFLUENCE=$(sqlite3 "$DB" "
       SELECT DISTINCT vm.symbol, vm.peg_rating, vm.forward_peg, vm.eps_growth_pct,

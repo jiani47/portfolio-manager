@@ -833,13 +833,24 @@ pre_trade_check() {
     echo "  ✓ PASS: Position size ≤1% check (manual verification)"
     echo ""
     echo "  Manual acknowledgments:"
+    read -p "  ☐ Stop level defined (enter price, or 'n' to cancel): " STOP_PRICE
+    if [ "$STOP_PRICE" = "n" ] || [ -z "$STOP_PRICE" ]; then
+      echo "  ✗ FAIL: Trading positions require a stop loss."
+      return 1
+    fi
+    RISK_AMT=$(python3 -c "print(f'\${abs($qty * ($price - $STOP_PRICE)):.0f}')" 2>/dev/null)
+    RISK_PCT=$(python3 -c "print(f'{abs(($price - $STOP_PRICE) / $price * 100):.1f}%')" 2>/dev/null)
+    echo "  ✓ Stop: \$$STOP_PRICE ($RISK_PCT risk, $RISK_AMT at stake)"
+    echo ""
     for item in \
-      "I have a stop level defined — technical, not emotional" \
       "I will exit if no progress in 20-30 days" \
       "I accept a stop-out as success — not hoping, not averaging down"; do
       read -p "  ☐ $item (y/n): " ack
       [ "$ack" != "y" ] && { echo "  Checklist abandoned."; return 1; }
     done
+    echo ""
+    echo "  ⚠ After fill: run 'pm-cli.sh trade-open $symbol $qty $price $STOP_PRICE \"<thesis>\"'"
+    echo "  ⚠ Then place GTC stop: 'pm-cli.sh sell $qty $symbol stop $STOP_PRICE GTC'"
   else
     # Investing
     check_intent_exists "$symbol" || return 1

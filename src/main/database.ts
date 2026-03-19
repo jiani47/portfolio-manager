@@ -761,6 +761,32 @@ export class Database {
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_score_security ON thesis_score_changes(security_id)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_score_date ON thesis_score_changes(changed_at)');
 
+    // Trading positions table (lightweight trade tracking)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS trading_positions (
+        id TEXT PRIMARY KEY,
+        security_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        entry_date TEXT NOT NULL,
+        entry_price REAL NOT NULL,
+        shares INTEGER NOT NULL,
+        thesis TEXT NOT NULL,
+        stop_price REAL,
+        stop_order_id TEXT,
+        time_limit_days INTEGER NOT NULL DEFAULT 20,
+        status TEXT NOT NULL DEFAULT 'open',
+        exit_date TEXT,
+        exit_price REAL,
+        exit_reason TEXT,
+        pnl REAL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (security_id) REFERENCES securities(id)
+      )
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_trading_positions_symbol ON trading_positions(symbol)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_trading_positions_status ON trading_positions(status)');
+
     // Research notes table (append-only log)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS research_notes (
