@@ -2837,11 +2837,13 @@ export class Database {
 
   didTaskRunToday(taskId: string): boolean {
     if (!this.db) throw new Error('Database not initialized');
-    const today = new Date().toISOString().split('T')[0];
+    // Use ET date so tasks don't re-run after 8pm ET (when UTC date flips)
+    const etDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const etDateStr = etDate.toISOString().split('T')[0];
     const row = this.db.prepare(`
       SELECT COUNT(*) as cnt FROM scheduler_task_runs
       WHERE task_id = ? AND status = 'success' AND started_at >= ?
-    `).get(taskId, today + 'T00:00:00.000Z') as { cnt: number };
+    `).get(taskId, etDateStr + 'T00:00:00.000Z') as { cnt: number };
     return row.cnt > 0;
   }
 
@@ -3972,14 +3974,17 @@ export class Database {
 
   getDateTriggeredPending(): EntryPlanTranche[] {
     if (!this.db) throw new Error('Database not initialized');
+    // Use ET date to avoid UTC date flip triggering tranches early (8pm ET = next day UTC)
+    const etDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const etDateStr = etDate.toISOString().split('T')[0];
     return this.db.prepare(`
       SELECT ept.* FROM entry_plan_tranches ept
       JOIN entry_plans ep ON ept.plan_id = ep.id
       WHERE ept.trigger_type = 'date'
-        AND ept.trigger_date <= date('now')
+        AND ept.trigger_date <= ?
         AND ept.status = 'pending'
         AND ep.status = 'active'
-    `).all().map(this.mapRowToEntryPlanTranche);
+    `).all(etDateStr).map(this.mapRowToEntryPlanTranche);
   }
 
   private mapRowToRebalanceBasket = (row: unknown): RebalanceBasket => {

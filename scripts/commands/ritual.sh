@@ -220,14 +220,18 @@ print(f'  Total MV: \${total_mv:,.0f}  |  Day P&L: \${day_pnl:>+,.0f}  |  Total 
           echo "  $SIDE_UP $SHARES $SYM | trigger: $TVAL ($TTYPE) | confirm: pm-cli.sh basket-confirm $TID"
         done
         TRIGGERED_COUNT=$(echo "$EMS_TRIGGERED" | wc -l | tr -d ' ')
-        # Only push-notify once per day to avoid repeated alerts on every briefing run
-        NOTIFIED_FLAG="/tmp/pm-ems-notified-$(date +%Y%m%d)"
-        if [ ! -f "$NOTIFIED_FLAG" ]; then
-          EMS_NOTIFY=$(echo "$EMS_TRIGGERED" | while IFS='|' read -r _SYM _SIDE _SHARES _TTYPE _TVAL _TID _BNAME; do
+        # Only push-notify for tranches not yet notified (tracked in DB)
+        sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS ems_notifications (tranche_id TEXT PRIMARY KEY, notified_at TEXT NOT NULL);" 2>/dev/null
+        NEW_TRIGGERED=$(echo "$EMS_TRIGGERED" | while IFS='|' read -r _SYM _SIDE _SHARES _TTYPE _TVAL _TID _BNAME; do
+          ALREADY=$(sqlite3 "$DB" "SELECT COUNT(*) FROM ems_notifications WHERE tranche_id = '$_TID';" 2>/dev/null)
+          if [ "${ALREADY:-0}" = "0" ]; then
+            sqlite3 "$DB" "INSERT OR IGNORE INTO ems_notifications (tranche_id, notified_at) VALUES ('$_TID', '$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")');" 2>/dev/null
             echo "$(echo "$_SIDE" | tr '[:lower:]' '[:upper:]') $_SHARES $_SYM @ $_TVAL"
-          done)
-          pm_notify "EMS: $TRIGGERED_COUNT orders triggered" "$EMS_NOTIFY" "high"
-          touch "$NOTIFIED_FLAG"
+          fi
+        done)
+        if [ -n "$NEW_TRIGGERED" ]; then
+          NEW_COUNT=$(echo "$NEW_TRIGGERED" | wc -l | tr -d ' ')
+          pm_notify "EMS: $NEW_COUNT orders triggered" "$NEW_TRIGGERED" "high"
         fi
       fi
       if [ -n "$EMS_SUBMITTED" ]; then

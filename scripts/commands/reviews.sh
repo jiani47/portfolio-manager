@@ -175,11 +175,57 @@ case "$1" in
     ;;
 
   earnings-review)
-    # Interactive post-earnings review
+    # Post-earnings review — interactive or single-command
+    # Non-interactive: pm-cli.sh earnings-review <symbol> <quarter> <date> <rev_exp> <rev_act> <eps_exp> <eps_act> <rev_growth%> <eps_growth%> <trajectory> <impact> <decision> "<notes>"
     SYMBOL="$2"
     if [ -z "$SYMBOL" ]; then
-      echo "Usage: pm-cli.sh earnings-review <symbol>"
+      echo "Usage: pm-cli.sh earnings-review <symbol> [quarter date rev_exp rev_act eps_exp eps_act rev_g% eps_g% trajectory impact decision \"notes\"]"
+      echo "  trajectory: accelerating|stable|decelerating"
+      echo "  impact: confirmed|neutral|challenged"
+      echo "  decision: hold|retier|exit|defer"
+      echo "  If only symbol provided, runs in interactive mode."
       exit 1
+    fi
+
+    # Non-interactive mode if all args provided
+    if [ -n "$3" ] && [ -n "$4" ]; then
+      SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+      SEC_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$SYMBOL' LIMIT 1;")
+      if [ -z "$SEC_ID" ]; then echo "ERROR: Security '$SYMBOL' not found."; exit 1; fi
+
+      ER_QUARTER="$3"; ER_DATE="$4"
+      ER_REV_EXP="${5:-NULL}"; ER_REV_ACT="${6:-NULL}"
+      ER_EPS_EXP="${7:-NULL}"; ER_EPS_ACT="${8:-NULL}"
+      ER_REV_GROWTH="${9:-NULL}"; ER_EPS_GROWTH="${10:-NULL}"
+      ER_TRAJECTORY="${11:-stable}"; ER_IMPACT="${12:-neutral}"
+      ER_DECISION="${13:-}"; ER_NOTES="${14:-}"
+
+      ER_INV_TRIGGERED=0
+      [ "$ER_IMPACT" = "challenged" ] && ER_INV_TRIGGERED=1
+
+      ER_DEADLINE="NULL"
+      if [ "$ER_IMPACT" = "challenged" ]; then
+        ER_DEADLINE="'$(python3 -c "from datetime import datetime, timedelta; print((datetime.now() + timedelta(hours=48)).strftime('%Y-%m-%dT%H:%M:%S.000Z'))")'"
+      fi
+
+      ER_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+      NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+      ER_QUARTER_ESC=$(echo "$ER_QUARTER" | sed "s/'/''/g")
+      ER_NOTES_ESC=$(echo "$ER_NOTES" | sed "s/'/''/g")
+      [ -z "$ER_DECISION" ] && ER_DEC_SQL="NULL" || ER_DEC_SQL="'$ER_DECISION'"
+      [ -z "$ER_NOTES" ] && ER_NOTES_SQL="NULL" || ER_NOTES_SQL="'$ER_NOTES_ESC'"
+
+      sqlite3 "$DB" "INSERT INTO earnings_reviews (id, security_id, quarter, earnings_date, revenue_expected, revenue_actual, eps_expected, eps_actual, revenue_growth_pct, eps_growth_pct, growth_trajectory, thesis_impact, invalidation_triggered, decision, decision_deadline, decision_notes, created_at, updated_at) VALUES ('$ER_ID', '$SEC_ID', '$ER_QUARTER_ESC', '$ER_DATE', $ER_REV_EXP, $ER_REV_ACT, $ER_EPS_EXP, $ER_EPS_ACT, $ER_REV_GROWTH, $ER_EPS_GROWTH, '$ER_TRAJECTORY', '$ER_IMPACT', $ER_INV_TRIGGERED, $ER_DEC_SQL, $ER_DEADLINE, $ER_NOTES_SQL, '$NOW', '$NOW');"
+
+      echo "=== Earnings Review: $SYMBOL $ER_QUARTER ==="
+      echo "  Revenue: $ER_REV_ACT vs $ER_REV_EXP est"
+      echo "  EPS: $ER_EPS_ACT vs $ER_EPS_EXP est"
+      echo "  Trajectory: $ER_TRAJECTORY | Impact: $ER_IMPACT"
+      echo "  Decision: ${ER_DECISION:-DEFERRED}"
+      [ -n "$ER_NOTES" ] && echo "  Notes: $ER_NOTES"
+      echo "  ID: $ER_ID"
+      exit 0
     fi
     SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
 
