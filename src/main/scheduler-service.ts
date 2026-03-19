@@ -544,12 +544,31 @@ export class SchedulerService {
       const today = new Date().toISOString().split('T')[0];
       let count = 0;
 
+      // ADR detection cache
+      const adrCache = new Map<string, boolean>();
+      const checkAdr = async (sym: string): Promise<boolean> => {
+        if (adrCache.has(sym)) return adrCache.get(sym)!;
+        try {
+          const resp = await fetch(
+            `https://financialmodelingprep.com/stable/profile?symbol=${sym}&apikey=${apiKey}`
+          );
+          const data = resp.ok ? await resp.json() : [];
+          const isAdr = Array.isArray(data) && data.length > 0 && !!(data[0] as any).isAdr;
+          adrCache.set(sym, isAdr);
+          return isAdr;
+        } catch {
+          adrCache.set(sym, false);
+          return false;
+        }
+      };
+
       for (const symbol of symbols) {
         try {
+          const isAdr = await checkAdr(symbol);
           const price = this.db.getLatestPriceBySymbol(symbol);
           if (!price) continue;
 
-          // Fetch ratios TTM
+          // Fetch ratios TTM (reliable for ADRs — computed from USD price)
           const ratiosResp = await fetch(
             `https://financialmodelingprep.com/stable/ratios-ttm?symbol=${symbol}&apikey=${apiKey}`
           );
@@ -562,33 +581,49 @@ export class SchedulerService {
           const ps = r.priceToSalesRatioTTM || 0;
           const t12Eps = t12Pe > 0 ? price / t12Pe : null;
 
-          // Fetch analyst estimates
+          // Fetch analyst estimates — skip forward PE for ADRs (EPS in local currency)
           const estResp = await fetch(
             `https://financialmodelingprep.com/stable/analyst-estimates?symbol=${symbol}&period=annual&limit=8&apikey=${apiKey}`
           );
           const estimates = estResp.ok ? await estResp.json() : [];
-          const sorted = Array.isArray(estimates) ? (estimates as any[]).sort((a, b) => a.date.localeCompare(b.date)) : [];
-          const future = sorted.filter(e => e.date > today && e.epsAvg > 0);
+          const sorted = Array.isArray(estimates) ? (estimates as any[]).sort((a: any, b: any) => a.date.localeCompare(b.date)) : [];
+          const future = sorted.filter((e: any) => e.date > today && e.epsAvg > 0);
 
           let fwdEps: number | null = null, fwdPe: number | null = null, fwdFyEnd: string | null = null;
           let nextEps: number | null = null, nextFyEnd: string | null = null;
           let epsGrowth: number | null = null, numAnalysts: number | null = null;
 
           if (future.length >= 1) {
-            fwdEps = future[0].epsAvg;
             fwdFyEnd = future[0].date.substring(0, 10);
-            fwdPe = price / fwdEps!;
             numAnalysts = future[0].numAnalystsEps || 0;
+            if (!isAdr) {
+              fwdEps = future[0].epsAvg;
+              fwdPe = price / fwdEps!;
+            }
           }
-          if (future.length >= 2 && fwdEps) {
-            nextEps = future[1].epsAvg;
-            nextFyEnd = future[1].date.substring(0, 10);
-            epsGrowth = (nextEps! - fwdEps) / fwdEps * 100;
+          if (future.length >= 2) {
+            // EPS growth % valid for ADRs (same currency cancels)
+            epsGrowth = (future[1].epsAvg - future[0].epsAvg) / future[0].epsAvg * 100;
+            if (!isAdr) {
+              nextEps = future[1].epsAvg;
+              nextFyEnd = future[1].date.substring(0, 10);
+            }
           }
 
           // Fair price range
           let fairLow: number | null = null, fairMid: number | null = null, fairHigh: number | null = null;
-          if (fwdEps && fwdPe) {
+          if (isAdr && t12Pe > 0 && t12Eps) {
+            // ADR: use trailing PE (USD-based)
+            if (t12Pe > 30) {
+              fairLow = t12Eps * t12Pe * 0.75;
+              fairMid = t12Eps * t12Pe * 0.90;
+              fairHigh = t12Eps * t12Pe * 1.10;
+            } else {
+              fairLow = t12Eps * t12Pe * 0.85;
+              fairMid = t12Eps * t12Pe * 1.0;
+              fairHigh = t12Eps * t12Pe * 1.15;
+            }
+          } else if (fwdEps && fwdPe) {
             if (fwdPe > 30) {
               fairLow = fwdEps * fwdPe * 0.75;
               fairMid = fwdEps * fwdPe * 0.90;

@@ -238,10 +238,24 @@ def fetch(endpoint, symbol, params=""):
     except:
         return None
 
+# Detect ADRs via individual profile calls
+adr_cache = {}
+def is_adr_check(sym):
+    if sym in adr_cache:
+        return adr_cache[sym]
+    profile = fetch("profile", sym)
+    result = False
+    if profile and isinstance(profile, list) and len(profile) > 0:
+        result = bool(profile[0].get('isAdr', False))
+    adr_cache[sym] = result
+    return result
+
 count = 0
 errors = 0
 for symbol in symbols:
     try:
+        is_adr = is_adr_check(symbol)
+
         # Get price
         price_row = conn.execute("""
             SELECT ph.close_price FROM price_history ph
@@ -252,7 +266,7 @@ for symbol in symbols:
             continue
         price = price_row['close_price']
 
-        # Ratios TTM
+        # Ratios TTM (reliable for both ADRs and domestic — computed from USD price)
         ratios = fetch("ratios-ttm", symbol)
         t12_pe = 0; peg = 0; fwd_peg = 0; ps = 0
         if ratios and isinstance(ratios, list) and len(ratios) > 0:
@@ -265,7 +279,7 @@ for symbol in symbols:
         # Trailing EPS
         t12_eps = price / t12_pe if t12_pe and t12_pe > 0 else None
 
-        # Analyst estimates
+        # Analyst estimates — skip forward PE computation for ADRs (EPS in local currency)
         estimates = fetch("analyst-estimates", symbol, "&period=annual&limit=8")
         fwd_pe = None; fwd_eps = None; fwd_fy_end = None
         next_eps = None; next_fy_end = None; eps_growth = None; num_analysts = None
@@ -275,19 +289,33 @@ for symbol in symbols:
             future = [e for e in estimates if e.get('date', '') > today_str and e.get('epsAvg', 0) and e.get('epsAvg', 0) > 0]
 
             if len(future) >= 1:
-                fwd_eps = future[0]['epsAvg']
                 fwd_fy_end = future[0]['date'][:10]
-                fwd_pe = price / fwd_eps
                 num_analysts = future[0].get('numAnalystsEps', 0)
+                if not is_adr:
+                    # Only compute forward PE from estimates for domestic stocks
+                    fwd_eps = future[0]['epsAvg']
+                    fwd_pe = price / fwd_eps
 
             if len(future) >= 2:
-                next_eps = future[1]['epsAvg']
-                next_fy_end = future[1]['date'][:10]
-                eps_growth = (next_eps - fwd_eps) / fwd_eps * 100 if fwd_eps else None
+                # EPS growth % is valid even for ADRs (same currency cancels out)
+                eps_growth = (future[1]['epsAvg'] - future[0]['epsAvg']) / future[0]['epsAvg'] * 100
+                if not is_adr:
+                    next_eps = future[1]['epsAvg']
+                    next_fy_end = future[1]['date'][:10]
 
         # Fair price range
         fair_low = fair_mid = fair_high = None
-        if fwd_eps and fwd_pe:
+        if is_adr and t12_pe and t12_pe > 0 and t12_eps:
+            # ADR: use trailing PE (USD-based) for fair range since forward EPS is in local currency
+            if t12_pe > 30:
+                fair_low = t12_eps * t12_pe * 0.75
+                fair_mid = t12_eps * t12_pe * 0.90
+                fair_high = t12_eps * t12_pe * 1.10
+            else:
+                fair_low = t12_eps * t12_pe * 0.85
+                fair_mid = t12_eps * t12_pe * 1.0
+                fair_high = t12_eps * t12_pe * 1.15
+        elif fwd_eps and fwd_pe:
             if fwd_pe > 30:
                 fair_low = fwd_eps * fwd_pe * 0.75
                 fair_mid = fwd_eps * fwd_pe * 0.90
