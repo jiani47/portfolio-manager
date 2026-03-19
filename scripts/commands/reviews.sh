@@ -225,6 +225,9 @@ case "$1" in
       echo "  Decision: ${ER_DECISION:-DEFERRED}"
       [ -n "$ER_NOTES" ] && echo "  Notes: $ER_NOTES"
       echo "  ID: $ER_ID"
+      # Auto-export thesis snapshot
+      SCRIPT_DIR_ER="$(cd "$(dirname "$0")" && pwd)"
+      source "$SCRIPT_DIR_ER/research.sh" thesis-export "$SYMBOL" 2>/dev/null && echo "  Thesis snapshot updated." || true
       exit 0
     fi
     SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')

@@ -355,6 +355,60 @@ PYEOF
       echo ""
     fi
 
+    # === Entry Confluence ===
+    CONFLUENCE=$(sqlite3 "$DB" "
+      SELECT DISTINCT vm.symbol, vm.peg_rating, vm.forward_peg, vm.eps_growth_pct,
+        (SELECT ph.close_price FROM price_history ph JOIN securities s2 ON ph.security_id = s2.id
+         WHERE s2.symbol = vm.symbol ORDER BY ph.date DESC LIMIT 1) as price,
+        (SELECT pl.price FROM price_levels pl
+         WHERE pl.symbol = vm.symbol AND pl.level_type = 'support' AND pl.price <
+           (SELECT ph2.close_price FROM price_history ph2 JOIN securities s3 ON ph2.security_id = s3.id
+            WHERE s3.symbol = vm.symbol ORDER BY ph2.date DESC LIMIT 1)
+         ORDER BY pl.price DESC LIMIT 1) as nearest_support
+      FROM valuation_metrics vm
+      WHERE vm.date = (SELECT MAX(date) FROM valuation_metrics WHERE symbol = vm.symbol)
+        AND vm.peg_rating IN ('CHEAP', 'FAIR')
+        AND vm.forward_peg IS NOT NULL AND vm.forward_peg > 0 AND vm.forward_peg < 1.2
+    " 2>/dev/null)
+
+    if [ -n "$CONFLUENCE" ]; then
+      CONFLUENCE_HITS=""
+      echo "$CONFLUENCE" | while IFS='|' read -r SYM RATING PEG GROWTH PRICE SUPPORT; do
+        SIGNALS=0
+        SIGNAL_LIST=""
+        # Signal 1: Valuation
+        SIGNALS=$((SIGNALS + 1))
+        PEG_FMT=$(printf "%.2f" "$PEG" 2>/dev/null || echo "$PEG")
+        SIGNAL_LIST="$RATING PEG:$PEG_FMT"
+        # Signal 2: Near support
+        if [ -n "$SUPPORT" ] && [ -n "$PRICE" ]; then
+          PCT_FROM_S=$(python3 -c "print(f'{($PRICE - $SUPPORT) / $PRICE * 100:.1f}')" 2>/dev/null)
+          if [ "$(echo "$PCT_FROM_S < 5" | bc -l 2>/dev/null)" = "1" ]; then
+            SIGNALS=$((SIGNALS + 1))
+            SIGNAL_LIST="$SIGNAL_LIST, S\$$SUPPORT ${PCT_FROM_S}%"
+          fi
+        fi
+        # Signal 3: Growth
+        if [ -n "$GROWTH" ]; then
+          if [ "$(echo "$GROWTH > 20" | bc -l 2>/dev/null)" = "1" ]; then
+            SIGNALS=$((SIGNALS + 1))
+            GROWTH_FMT=$(printf "%.0f" "$GROWTH" 2>/dev/null || echo "$GROWTH")
+            SIGNAL_LIST="$SIGNAL_LIST, EPS+${GROWTH_FMT}%"
+          fi
+        fi
+        if [ "$SIGNALS" -ge 2 ]; then
+          echo "  $SYM \$$PRICE — $SIGNAL_LIST ($SIGNALS signals)"
+        fi
+      done > /tmp/pm-confluence-$$
+
+      if [ -s /tmp/pm-confluence-$$ ]; then
+        echo "=== Entry Confluence (2+ signals) ==="
+        cat /tmp/pm-confluence-$$
+        echo ""
+      fi
+      rm -f /tmp/pm-confluence-$$
+    fi
+
     # Overnight news (last 24h) — portfolio + watchlist symbols
     NEWS_COUNT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM news WHERE published_at >= datetime('now', '-1 day');" 2>/dev/null)
     if [ "$NEWS_COUNT" -gt 0 ] 2>/dev/null; then

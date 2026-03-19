@@ -357,6 +357,17 @@ conn.close()
 print(f"  Updated {count} valuations, {errors} errors")
 PYEOF
     fi
+
+    # Auto-resize active baskets to match current prices × target allocations
+    ACTIVE_BASKETS=$(sqlite3 "$DB" "SELECT name FROM rebalance_baskets WHERE status = 'active';")
+    if [ -n "$ACTIVE_BASKETS" ]; then
+      echo ""
+      echo "Resizing active baskets..."
+      SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+      echo "$ACTIVE_BASKETS" | while read -r BNAME; do
+        "$SCRIPT_ROOT/pm-cli.sh" basket-resize "$BNAME" 2>/dev/null | tail -2
+      done
+    fi
     ;;
 
   backfill)

@@ -400,7 +400,26 @@ print('NOT_FOUND')
     sqlite3 "$DB" "INSERT INTO thesis_score_changes (id, security_id, criteria_number, old_status, new_status, reason, changed_at) VALUES ('$CHANGE_ID', '$SEC_ID', '$CRITERIA_NUM', '$OLD_STATUS', '$NEW_STATUS_LOWER', '$(echo "$REASON" | sed "s/'/''/g")', '$TODAY');"
 
     echo "$SYMBOL $CRITERIA_NUM: $OLD_STATUS → $NEW_STATUS_LOWER ($REASON)"
-    echo "Remember to update the thesis doc: docs/positions/$SYMBOL/thesis.md"
+
+    # Auto-update the thesis doc status in-place
+    python3 - "$THESIS_PATH" "$CRITERIA_NUM" "$NEW_STATUS_LOWER" "$TODAY" << 'PYEOF'
+import sys
+thesis_path, criteria_num, new_status, today = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(thesis_path) as f:
+    lines = f.readlines()
+new_lines = []
+for line in lines:
+    if '|' in line:
+        cols = [c.strip() for c in line.split('|')]
+        if len(cols) >= 7 and cols[1].strip() == criteria_num:
+            cols[5] = f' {new_status} '
+            cols[6] = f' {today} '
+            line = '|'.join(cols) + '\n'
+    new_lines.append(line)
+with open(thesis_path, 'w') as f:
+    f.writelines(new_lines)
+PYEOF
+    echo "Thesis doc updated: $THESIS_PATH"
     ;;
 
   scorecard-history)
