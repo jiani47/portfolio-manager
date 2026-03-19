@@ -670,4 +670,118 @@ PYEOF
     done
     ;;
 
+  trade-stats)
+    # Trading P&L dashboard: win rate, avg hold, risk/reward stats
+    python3 - "$DB" << 'PYEOF'
+import sqlite3, sys
+
+db_path = sys.argv[1]
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+# Get all closed trades
+closed = conn.execute("""
+    SELECT symbol, shares, entry_price, entry_date, exit_price, exit_date,
+      stop_price, pnl, exit_reason, time_limit_days,
+      julianday(exit_date) - julianday(entry_date) as hold_days
+    FROM trading_positions WHERE status = 'closed'
+    ORDER BY exit_date DESC
+""").fetchall()
+
+# Get open trades
+open_trades = conn.execute("""
+    SELECT symbol, shares, entry_price, entry_date, stop_price, time_limit_days,
+      julianday('now') - julianday(entry_date) as days_held,
+      (SELECT ph.close_price FROM price_history ph JOIN securities s ON ph.security_id = s.id
+       WHERE s.symbol = tp.symbol ORDER BY ph.date DESC LIMIT 1) as mtm
+    FROM trading_positions tp WHERE status = 'open'
+""").fetchall()
+
+print()
+print("╔═══════════════════════════════════════════════╗")
+print("║  TRADING DASHBOARD                            ║")
+print("╚═══════════════════════════════════════════════╝")
+print()
+
+# Open positions
+if open_trades:
+    print("  ── Open Positions ──")
+    total_open_pnl = 0
+    for t in open_trades:
+        mtm = t['mtm'] or t['entry_price']
+        upnl = t['shares'] * (mtm - t['entry_price'])
+        upnl_pct = (mtm - t['entry_price']) / t['entry_price'] * 100
+        days_held = int(t['days_held'] or 0)
+        days_left = t['time_limit_days'] - days_held
+        stop_risk = (t['entry_price'] - t['stop_price']) / t['entry_price'] * 100 if t['stop_price'] else 0
+        total_open_pnl += upnl
+
+        time_warn = ""
+        if days_left <= 0: time_warn = " ⛔"
+        elif days_left <= 5: time_warn = f" ⚠{days_left}d"
+
+        print(f"  {t['symbol']:<6} {t['shares']:>4}sh  ${t['entry_price']:.2f}→${mtm:.2f}  {upnl_pct:>+6.1f}% (${upnl:>+8,.0f})  stop ${t['stop_price'] or '—'}  {days_held}d/{t['time_limit_days']}d{time_warn}")
+    print(f"  {'─'*70}")
+    print(f"  Open P&L: ${total_open_pnl:>+,.0f}")
+    print()
+
+# Closed trade stats
+if not closed:
+    print("  No closed trades yet.")
+    print()
+else:
+    wins = [t for t in closed if t['pnl'] and t['pnl'] > 0]
+    losses = [t for t in closed if t['pnl'] and t['pnl'] <= 0]
+    total_pnl = sum(t['pnl'] for t in closed if t['pnl'])
+    total_trades = len(closed)
+    win_count = len(wins)
+    loss_count = len(losses)
+    win_rate = win_count / total_trades * 100 if total_trades > 0 else 0
+
+    avg_win = sum(t['pnl'] for t in wins) / win_count if win_count > 0 else 0
+    avg_loss = sum(t['pnl'] for t in losses) / loss_count if loss_count > 0 else 0
+    avg_rr = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+
+    avg_hold = sum(t['hold_days'] or 0 for t in closed) / total_trades if total_trades > 0 else 0
+    avg_win_hold = sum(t['hold_days'] or 0 for t in wins) / win_count if win_count > 0 else 0
+    avg_loss_hold = sum(t['hold_days'] or 0 for t in losses) / loss_count if loss_count > 0 else 0
+
+    # Stopped out vs other exits
+    stopped = [t for t in closed if t['exit_reason'] and 'stop' in t['exit_reason'].lower()]
+    expired = [t for t in closed if t['exit_reason'] and 'expir' in t['exit_reason'].lower()]
+
+    print(f"  ── Performance Summary ──")
+    print(f"  Total Trades: {total_trades}  |  Wins: {win_count}  |  Losses: {loss_count}  |  Win Rate: {win_rate:.0f}%")
+    print(f"  Total P&L: ${total_pnl:>+,.0f}")
+    print(f"  Avg Win:  ${avg_win:>+,.0f}  |  Avg Loss: ${avg_loss:>+,.0f}  |  Risk/Reward: {avg_rr:.1f}x")
+    print(f"  Avg Hold: {avg_hold:.0f}d  |  Wins: {avg_win_hold:.0f}d  |  Losses: {avg_loss_hold:.0f}d")
+    if stopped: print(f"  Stopped Out: {len(stopped)}")
+    if expired: print(f"  Time Expired: {len(expired)}")
+    print()
+
+    # Recent trades
+    print(f"  ── Recent Closed Trades ──")
+    print(f"  {'Symbol':<6} {'Shares':>6} {'Entry':>8} {'Exit':>8} {'P&L':>10} {'P&L%':>7} {'Hold':>5} {'Reason'}")
+    print(f"  {'─'*6} {'─'*6} {'─'*8} {'─'*8} {'─'*10} {'─'*7} {'─'*5} {'─'*15}")
+    for t in closed[:15]:
+        pnl = t['pnl'] or 0
+        pnl_pct = (t['exit_price'] - t['entry_price']) / t['entry_price'] * 100 if t['entry_price'] else 0
+        hold = int(t['hold_days'] or 0)
+        reason = (t['exit_reason'] or '')[:15]
+        print(f"  {t['symbol']:<6} {t['shares']:>6} ${t['entry_price']:>7.2f} ${t['exit_price']:>7.2f} ${pnl:>+9,.0f} {pnl_pct:>+6.1f}% {hold:>4}d {reason}")
+    print()
+
+    # Best and worst
+    if wins:
+        best = max(wins, key=lambda t: t['pnl'])
+        print(f"  Best:  {best['symbol']} ${best['pnl']:>+,.0f} ({(best['exit_price']-best['entry_price'])/best['entry_price']*100:+.1f}%)")
+    if losses:
+        worst = min(losses, key=lambda t: t['pnl'])
+        print(f"  Worst: {worst['symbol']} ${worst['pnl']:>+,.0f} ({(worst['exit_price']-worst['entry_price'])/worst['entry_price']*100:+.1f}%)")
+
+print()
+conn.close()
+PYEOF
+    ;;
+
 esac

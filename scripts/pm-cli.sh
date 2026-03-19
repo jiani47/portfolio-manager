@@ -19,7 +19,7 @@ Ritual:
 
 Trading:
   buy, sell, orders, cancel-order, trade-enter, trade-setup, trade-open
-  trade-close, trades
+  trade-close, trades, trade-stats
 
 EMS (Execution Management):
   basket-create, baskets, basket, basket-add, basket-orders, basket-confirm
@@ -71,7 +71,7 @@ case "$CMD" in
     source "$SCRIPT_DIR/commands/ritual.sh" ;;
 
   # Trading
-  buy|sell|orders|cancel-order|trade-enter|trade-setup|trade-open|trade-close|trades)
+  buy|sell|orders|cancel-order|trade-enter|trade-setup|trade-open|trade-close|trades|trade-stats)
     source "$SCRIPT_DIR/commands/pretrade.sh"
     source "$SCRIPT_DIR/commands/trading.sh" ;;
 

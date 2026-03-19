@@ -420,6 +420,73 @@ with open(thesis_path, 'w') as f:
     f.writelines(new_lines)
 PYEOF
     echo "Thesis doc updated: $THESIS_PATH"
+
+    # Basket sync check: does this scorecard change affect allocation?
+    python3 - "$DB" "$SYMBOL" "$CRITERIA_NUM" "$NEW_STATUS_LOWER" << 'PYEOF'
+import sqlite3, sys
+
+db_path, symbol, criteria, new_status = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+# Get current intent
+intent = conn.execute("""
+    SELECT pi.tier, pi.target_allocation_pct FROM position_intents pi
+    JOIN positions p ON pi.position_id = p.id
+    JOIN securities s ON p.security_id = s.id
+    WHERE s.symbol = ? LIMIT 1
+""", (symbol,)).fetchone()
+if not intent:
+    sys.exit(0)
+
+tier = intent['tier'] or ''
+target = intent['target_allocation_pct']
+
+# Check if this is a bear criterion being triggered or a bull being challenged
+is_negative = new_status in ('triggered', 'challenged')
+is_positive = new_status in ('confirmed', 'not_triggered', 'clear')
+is_bear = criteria.startswith('R')
+
+# Conviction-impacting changes
+if is_bear and new_status == 'triggered':
+    # Bear triggered — conviction should decrease
+    tier_limits = {'Core': 12, 'Growth': 5, 'Starter': 2.5}
+    suggested = tier_limits.get(tier, target)
+    if target and target > suggested:
+        print(f"  ⚠ BASKET ALERT: {symbol} bear {criteria} triggered — current target {target}% may be too high for {tier} tier")
+        print(f"    Consider: pm-cli.sh set-intent <pos_id> ... target_alloc_pct={suggested}")
+        print(f"    Then: pm-cli.sh basket-resize <basket>")
+    # Check for active basket orders
+    basket_order = conn.execute("""
+        SELECT rb.name, ep.side, SUM(ept.shares) as total
+        FROM entry_plan_tranches ept
+        JOIN entry_plans ep ON ept.plan_id = ep.id
+        JOIN securities s ON ep.security_id = s.id
+        LEFT JOIN rebalance_baskets rb ON ep.basket_id = rb.id
+        WHERE s.symbol = ? AND ept.status IN ('pending', 'triggered') AND ep.side = 'buy'
+        GROUP BY rb.name
+    """, (symbol,)).fetchone()
+    if basket_order:
+        print(f"  ⚠ BASKET CONFLICT: {symbol} has active BUY {basket_order['total']} shares in basket '{basket_order['name']}'")
+        print(f"    Bear criterion triggered — review whether to cancel buy orders")
+
+elif not is_bear and new_status == 'challenged':
+    # Bull challenged — check if we have active buy orders
+    basket_order = conn.execute("""
+        SELECT rb.name, ep.side, SUM(ept.shares) as total
+        FROM entry_plan_tranches ept
+        JOIN entry_plans ep ON ept.plan_id = ep.id
+        JOIN securities s ON ep.security_id = s.id
+        LEFT JOIN rebalance_baskets rb ON ep.basket_id = rb.id
+        WHERE s.symbol = ? AND ept.status IN ('pending', 'triggered') AND ep.side = 'buy'
+        GROUP BY rb.name
+    """, (symbol,)).fetchone()
+    if basket_order:
+        print(f"  ⚠ BASKET FLAG: {symbol} bull {criteria} challenged — has active BUY {basket_order['total']} shares in basket '{basket_order['name']}'")
+        print(f"    Review whether thesis still supports adding")
+
+conn.close()
+PYEOF
     ;;
 
   scorecard-history)
