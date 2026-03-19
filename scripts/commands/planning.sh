@@ -656,4 +656,311 @@ PYEOF
 
     echo "  ✓ Entry plan for $SYMBOL cancelled."
     ;;
+
+  valuation)
+    # Valuation for a single symbol: PE, PEG, forward PE, fair price range
+    SYMBOL="$2"
+    if [ -z "$SYMBOL" ]; then
+      echo "Usage: pm-cli.sh valuation <symbol>"
+      echo "  Shows trailing/forward PE, PEG, EPS growth, fair price range."
+      exit 1
+    fi
+    SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+    FMP_KEY=$(get_fmp_key)
+    if [ -z "$FMP_KEY" ]; then
+      echo "Error: FMP API key not configured in ~/.pm-cli.conf"
+      exit 1
+    fi
+
+    python3 - "$SYMBOL" "$FMP_KEY" "$DB" << 'PYEOF'
+import json, urllib.request, sqlite3, sys
+
+symbol = sys.argv[1]
+fmp_key = sys.argv[2]
+db_path = sys.argv[3]
+BASE = "https://financialmodelingprep.com/stable"
+
+def fetch(endpoint, params=""):
+    url = f"{BASE}/{endpoint}?symbol={symbol}&apikey={fmp_key}{params}"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        return None
+
+# Get current price from DB
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+price_row = conn.execute("""
+    SELECT ph.close_price, ph.date FROM price_history ph
+    JOIN securities s ON ph.security_id = s.id
+    WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+""", (symbol,)).fetchone()
+
+if not price_row:
+    print(f"  No price data for {symbol}")
+    sys.exit(1)
+
+price = price_row['close_price']
+price_date = price_row['date']
+
+# Fetch ratios TTM
+ratios = fetch("ratios-ttm")
+if not ratios or not isinstance(ratios, list) or len(ratios) == 0:
+    print(f"  No ratio data for {symbol}")
+    sys.exit(1)
+r = ratios[0]
+
+t12_pe = r.get('priceToEarningsRatioTTM', 0)
+peg = r.get('priceToEarningsGrowthRatioTTM', 0)
+fwd_peg = r.get('forwardPriceToEarningsGrowthRatioTTM', 0)
+ps = r.get('priceToSalesRatioTTM', 0)
+
+# Fetch analyst estimates
+import datetime
+estimates = fetch("analyst-estimates", "&period=annual&limit=8")
+if not estimates or not isinstance(estimates, list):
+    estimates = []
+
+# Sort by date ascending
+estimates.sort(key=lambda x: x.get('date', ''))
+
+# Find next two fiscal years that haven't ended yet
+today = datetime.date.today().isoformat()
+current_year = datetime.date.today().year
+future_estimates = [e for e in estimates if e.get('date', '') > today and e.get('epsAvg', 0) and e.get('epsAvg', 0) > 0]
+
+fy_current = future_estimates[0] if len(future_estimates) >= 1 else None
+fy_next = future_estimates[1] if len(future_estimates) >= 2 else None
+
+# Compute forward PE
+fwd_pe = None
+fwd_eps = None
+if fy_current and fy_current.get('epsAvg', 0) > 0:
+    fwd_eps = fy_current['epsAvg']
+    fwd_pe = price / fwd_eps
+
+# EPS growth rate (current FY to next FY)
+eps_growth = None
+if fy_current and fy_next and fy_current.get('epsAvg', 0) > 0 and fy_next.get('epsAvg', 0) > 0:
+    eps_growth = (fy_next['epsAvg'] - fy_current['epsAvg']) / fy_current['epsAvg'] * 100
+
+# Trailing EPS
+t12_eps = price / t12_pe if t12_pe and t12_pe > 0 else None
+
+# Fair price range using PE-based valuation
+# Low: 0.8x forward PE (discount)
+# Mid: 1.0x forward PE (consensus)
+# High: 1.2x forward PE (premium) or PEG=1 justified
+fair_low = fair_mid = fair_high = None
+if fwd_eps and fwd_pe:
+    # Use sector-appropriate PE multiples
+    # For growth (fwd PE > 30): use growth-adjusted range
+    # For value (fwd PE < 20): tighter range
+    if fwd_pe > 30:
+        fair_low = fwd_eps * fwd_pe * 0.75
+        fair_mid = fwd_eps * fwd_pe * 0.90
+        fair_high = fwd_eps * fwd_pe * 1.10
+    else:
+        fair_low = fwd_eps * fwd_pe * 0.85
+        fair_mid = fwd_eps * fwd_pe * 1.0
+        fair_high = fwd_eps * fwd_pe * 1.15
+
+    # Also compute PEG=1 fair value if we have growth
+    if eps_growth and eps_growth > 0:
+        peg1_pe = eps_growth  # PEG=1 means PE = growth rate
+        peg1_price = fwd_eps * peg1_pe
+        # Use PEG=1 as alternative high anchor if it's higher
+        if peg1_price > fair_high:
+            fair_high = peg1_price
+
+# Display
+print()
+print(f"╔═══════════════════════════════════════════════╗")
+print(f"║  VALUATION: {symbol:<33}║")
+print(f"╚═══════════════════════════════════════════════╝")
+print()
+print(f"  Price: ${price:.2f} (as of {price_date})")
+print()
+
+print(f"  ── Earnings ──")
+if t12_eps:
+    print(f"  Trailing EPS (T12): ${t12_eps:.2f}")
+if fy_current:
+    n = fy_current.get('numAnalystsEps', 0)
+    fy_label = fy_current['date'][:7]
+    print(f"  Next FY ({fy_label}) EPS est: ${fy_current['epsAvg']:.2f}  ({n} analysts)")
+if fy_next:
+    n = fy_next.get('numAnalystsEps', 0)
+    fy_label = fy_next['date'][:7]
+    print(f"  FY+1   ({fy_label}) EPS est: ${fy_next['epsAvg']:.2f}  ({n} analysts)")
+if eps_growth is not None:
+    print(f"  EPS growth (next→+1): {eps_growth:+.1f}%")
+print()
+
+print(f"  ── Multiples ──")
+print(f"  Trailing PE (T12):  {t12_pe:.1f}x" if t12_pe else "  Trailing PE (T12):  N/A")
+print(f"  Forward PE (FY{current_year}): {fwd_pe:.1f}x" if fwd_pe else f"  Forward PE (FY{current_year}): N/A")
+print(f"  PEG (trailing):    {peg:.2f}" if peg else "  PEG (trailing):    N/A")
+print(f"  PEG (forward):     {fwd_peg:.2f}" if fwd_peg else "  PEG (forward):     N/A")
+print(f"  P/S (T12):         {ps:.1f}x" if ps else "  P/S (T12):         N/A")
+print()
+
+if fair_low and fair_mid and fair_high:
+    print(f"  ── Fair Price Range ──")
+    vs_low = (price - fair_low) / fair_low * 100
+    vs_mid = (price - fair_mid) / fair_mid * 100
+    vs_high = (price - fair_high) / fair_high * 100
+
+    def bar(price_val, low, high, width=30):
+        if high <= low: return ""
+        pos = (price_val - low) / (high - low)
+        pos = max(0, min(1, pos))
+        idx = int(pos * width)
+        return "─" * idx + "●" + "─" * (width - idx - 1)
+
+    range_low = min(fair_low * 0.9, price * 0.9)
+    range_high = max(fair_high * 1.1, price * 1.1)
+
+    print(f"  Low  (discount):  ${fair_low:>8.2f}  ({vs_low:+.1f}% from current)")
+    print(f"  Mid  (consensus): ${fair_mid:>8.2f}  ({vs_mid:+.1f}% from current)")
+    print(f"  High (premium):   ${fair_high:>8.2f}  ({vs_high:+.1f}% from current)")
+    print()
+
+    # Summary verdict
+    if price < fair_low:
+        print(f"  → UNDERVALUED ({abs(vs_low):.0f}% below fair range)")
+    elif price > fair_high:
+        print(f"  → OVERVALUED ({vs_high:.0f}% above fair range)")
+    elif price < fair_mid:
+        print(f"  → BELOW CONSENSUS (in lower half of fair range)")
+    else:
+        print(f"  → ABOVE CONSENSUS (in upper half of fair range)")
+
+# EPS trajectory
+if len(estimates) >= 2:
+    print()
+    print(f"  ── EPS Trajectory ──")
+    print(f"  {'Year':<6} {'EPS Est':>8} {'YoY':>8} {'Implied PE':>10}  Analysts")
+    print(f"  {'─'*6} {'─'*8} {'─'*8} {'─'*10}  {'─'*8}")
+    prev_eps = None
+    for est in estimates:
+        yr = est['date'][:4]
+        eps = est.get('epsAvg', 0)
+        n = est.get('numAnalystsEps', 0)
+        yoy = ""
+        if prev_eps and prev_eps > 0 and eps > 0:
+            yoy = f"{((eps - prev_eps) / prev_eps * 100):+.0f}%"
+        imp_pe = f"{price / eps:.1f}x" if eps > 0 else "N/A"
+        print(f"  {yr:<6} ${eps:>7.2f} {yoy:>8} {imp_pe:>10}  {n:>3}")
+        prev_eps = eps
+
+print()
+conn.close()
+PYEOF
+    ;;
+
+  valuations)
+    # Portfolio-wide valuation table
+    FMP_KEY=$(get_fmp_key)
+    if [ -z "$FMP_KEY" ]; then
+      echo "Error: FMP API key not configured in ~/.pm-cli.conf"
+      exit 1
+    fi
+
+    # Get all portfolio symbols
+    SYMBOLS=$(sqlite3 "$DB" "SELECT DISTINCT s.symbol FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type = 'stock' AND p.quantity > 0;")
+
+    python3 - "$FMP_KEY" "$DB" "$SYMBOLS" << 'PYEOF'
+import json, urllib.request, sqlite3, sys, datetime
+
+fmp_key = sys.argv[1]
+db_path = sys.argv[2]
+symbols_raw = sys.argv[3]
+symbols = [s.strip() for s in symbols_raw.strip().split('\n') if s.strip()]
+BASE = "https://financialmodelingprep.com/stable"
+current_year = datetime.date.today().year
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+def fetch(endpoint, symbol, params=""):
+    url = f"{BASE}/{endpoint}?symbol={symbol}&apikey={fmp_key}{params}"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except:
+        return None
+
+print()
+print(f"=== Portfolio Valuations ===")
+print()
+print(f"  {'Symbol':<7} {'Price':>8} {'T12 PE':>8} {'Fwd PE':>8} {'PEG':>6} {'FY EPS':>8} {'Growth':>8} {'vs Fair':>8}")
+print(f"  {'─'*7} {'─'*8} {'─'*8} {'─'*8} {'─'*6} {'─'*8} {'─'*8} {'─'*8}")
+
+for symbol in sorted(symbols):
+    # Get price
+    price_row = conn.execute("""
+        SELECT ph.close_price FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+    """, (symbol,)).fetchone()
+    if not price_row:
+        continue
+    price = price_row['close_price']
+
+    # Ratios
+    ratios = fetch("ratios-ttm", symbol)
+    t12_pe = 0
+    fwd_peg = 0
+    if ratios and isinstance(ratios, list) and len(ratios) > 0:
+        t12_pe = ratios[0].get('priceToEarningsRatioTTM', 0) or 0
+        fwd_peg = ratios[0].get('forwardPriceToEarningsGrowthRatioTTM', 0) or 0
+
+    # Estimates
+    estimates = fetch("analyst-estimates", symbol, "&period=annual&limit=8")
+    fwd_pe = 0
+    fwd_eps = 0
+    eps_growth = ""
+    vs_fair = ""
+    today_str = datetime.date.today().isoformat()
+
+    if estimates and isinstance(estimates, list):
+        estimates.sort(key=lambda x: x.get('date', ''))
+        future = [e for e in estimates if e.get('date', '') > today_str and e.get('epsAvg', 0) and e.get('epsAvg', 0) > 0]
+        fy_current = future[0] if len(future) >= 1 else None
+        fy_next = future[1] if len(future) >= 2 else None
+
+        if fy_current and fy_current.get('epsAvg', 0) > 0:
+            fwd_eps = fy_current['epsAvg']
+            fwd_pe = price / fwd_eps
+
+            if fwd_peg and fwd_peg > 0:
+                if fwd_peg < 0.8:
+                    vs_fair = "CHEAP"
+                elif fwd_peg < 1.2:
+                    vs_fair = "FAIR"
+                elif fwd_peg < 2.0:
+                    vs_fair = "RICH"
+                else:
+                    vs_fair = "PRICEY"
+
+        if fy_current and fy_next and fy_current.get('epsAvg', 0) > 0 and fy_next.get('epsAvg', 0) > 0:
+            g = (fy_next['epsAvg'] - fy_current['epsAvg']) / fy_current['epsAvg'] * 100
+            eps_growth = f"{g:+.0f}%"
+
+    t12_str = f"{t12_pe:.1f}x" if t12_pe and t12_pe > 0 else "N/A"
+    fwd_str = f"{fwd_pe:.1f}x" if fwd_pe and fwd_pe > 0 else "N/A"
+    peg_str = f"{fwd_peg:.2f}" if fwd_peg and fwd_peg > 0 else "N/A"
+    eps_str = f"${fwd_eps:.2f}" if fwd_eps else "N/A"
+
+    print(f"  {symbol:<7} ${price:>7.2f} {t12_str:>8} {fwd_str:>8} {peg_str:>6} {eps_str:>8} {eps_growth:>8} {vs_fair:>8}")
+
+print()
+conn.close()
+PYEOF
+    ;;
+
 esac

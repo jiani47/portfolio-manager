@@ -75,19 +75,18 @@ Design principles (from daily-pm-checklist.md):
 - Surface relevant research during pre-trade checklist
 - "Your thesis for KKR mentions credit cycle risk — here's the latest research from 2026-03-12"
 
-### 11.5 Valuation Framework
+### 11.5 Valuation Framework (partially done ✅)
 
-**Motivation:** Entry/exit decisions lack quantitative price anchoring. We have S/R levels (technical) but no fundamental fair value range. Need: forward PE, trailing PE, PEG, expected growth → derived fair price range.
-
-- Fetch from FMP: forward PE, trailing (T12) PE, PEG ratio, analyst expected annual growth rate
-- Store in `valuation_metrics` table: symbol, date, fwd_pe, t12_pe, peg, expected_growth_pct, fetched_at
-- Compute fair price range: low (sector median PE × EPS), mid (historical avg PE × fwd EPS), high (growth-justified PE × fwd EPS)
-- `pm-cli.sh valuation [symbol]` — show current vs fair price range with over/undervalued %
-- `pm-cli.sh valuations` — portfolio-wide table: symbol, price, fwd PE, PEG, fair range, status
-- Surface in pre-trade checklist: "ROKU at $85 is 15% above fair range mid ($74)"
-- Surface in morning briefing: positions trading significantly outside fair range
-- Refresh during `pm-cli.sh refresh` (daily, cached)
-- App: valuation column in Holdings table, fair range bar in position detail
+- [x] Fetch from FMP: trailing PE, PEG, forward PEG, P/S from `ratios-ttm`
+- [x] Fetch analyst EPS estimates from `analyst-estimates` (handles fiscal year offsets)
+- [x] Compute forward PE from next fiscal year EPS estimate
+- [x] Fair price range: discount/consensus/premium based on forward PE, PEG=1 anchor
+- [x] EPS trajectory table with implied PE at each year
+- [x] `pm-cli.sh valuation <symbol>` — full valuation with fair range + EPS trajectory
+- [x] `pm-cli.sh valuations` — portfolio-wide table with PEG-based rating (CHEAP/FAIR/RICH/PRICEY)
+- [ ] Surface in pre-trade checklist: "ROKU at $85 is 15% above fair range mid ($74)"
+- [ ] Surface in morning briefing: positions trading significantly outside fair range
+- [ ] App: valuation column in Holdings table
 
 ---
 
@@ -124,7 +123,7 @@ Design principles (from daily-pm-checklist.md):
 | Phase | Status | What | Why |
 |-------|--------|------|-----|
 | **10.5** | ✅ Done | Position sizing & lifecycle | Target sizing, ATR tranches, new position support |
-| **11.5** | Planned | Valuation framework | Fundamental price anchoring for entry/exit |
+| **11.5** | Partial | Valuation framework | CLI done, pre-trade/briefing/app integration remaining |
 | **11.1** | Planned | Research templates | Structured thesis building |
 | **11.2** | Planned | Thesis scoring in app | Visual dashboard (CLI done) |
 | **11.4** | Planned | Research integration | Surface research in pre-trade flow |
