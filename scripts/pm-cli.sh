@@ -106,7 +106,7 @@ case "$CMD" in
     source "$SCRIPT_DIR/commands/watchlists.sh" ;;
 
   # Planning
-  size|plan|plans|plan-fill|plan-cancel|valuation|valuations|screen|confluence)
+  size|plan|plans|plan-fill|plan-cancel|valuation|valuations|screen|confluence|scan-trades|earnings-prep|peers)
     source "$SCRIPT_DIR/commands/pretrade.sh"
     source "$SCRIPT_DIR/commands/planning.sh" ;;
 

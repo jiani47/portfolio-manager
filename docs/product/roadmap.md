@@ -77,17 +77,17 @@ Structured research → evidence collection → thesis building → conviction s
 #### 11.1 Research Templates — ✅ Done
 - [x] `research <symbol>` — auto-populated from FMP (financials, key metrics, estimates)
 - [x] Research notes by section (business_model, moat, risks, catalyst, etc.)
-- [ ] Peer comparison tables (same sector/industry)
+- [x] Peer comparison tables (same sector/industry) — `peers <symbol>`
 
 #### 11.2 Thesis Scoring Visual Dashboard — Planned
 - Visual dashboard in app (CLI scoring done)
 
 #### 11.3 Earnings Workflow — ✅ Done
 
-#### 11.4 Research Integration — Partially done
+#### 11.4 Research Integration — ✅ Done
 - [x] Scorecard→thesis doc auto-sync
 - [x] Scorecard→basket conflict detection
-- [ ] Surface research notes in pre-trade checklist
+- [x] Surface research notes + observations in pre-trade checklist
 
 #### 11.5 Valuation Framework — ✅ Done
 - [x] CLI: valuation, valuations, screen, confluence
@@ -121,11 +121,15 @@ Structured research → evidence collection → thesis building → conviction s
 - Earnings-review auto-exports thesis snapshot
 - Basket auto-resizes on refresh
 
-#### 16.4 Earnings Mode — Planned
-- Composite command: pull research + scorecard + observations for earnings review
+#### 16.4 Earnings Mode — ✅ Done
+- `earnings-prep <symbol>` composite: position, valuation, scorecard, observations, research notes, news, technical levels
+- Suggested post-earnings commands in footer
 
-#### 16.5 Regime-Filtered Screening — Planned
-- `screen` and `confluence` respect today's regime (don't surface punished sectors)
+#### 16.5 Regime-Filtered Screening — ✅ Done
+- [x] `confluence`, `scan-trades`, `screen` filter/flag names in regime-punished sectors
+- [x] Briefing confluence section separates actionable vs regime-blocked
+- [x] App confluence panel dims regime-blocked cards with REGIME badge
+- [x] Sector alias fuzzy-matching (free-text regime_punishing → canonical sector names)
 
 ### Phase 17: Trading Account — ✅ Done
 
@@ -144,10 +148,10 @@ Structured research → evidence collection → thesis building → conviction s
 
 | Item | Status | Mode | Impact |
 |------|--------|------|--------|
-| **16.5** Regime-filtered screening | Planned | 2 | High — prevents fighting the tape |
-| **16.4** Earnings mode composite | Planned | 1 | Medium — convenience |
-| **11.4** Research in pre-trade | Partial | 4 | Medium — surface notes during trades |
-| **11.1** Peer comparison | Planned | 6 | Low — research quality |
+| **16.5** Regime-filtered screening | ✅ Done | 2 | High — prevents fighting the tape |
+| **16.4** Earnings mode composite | ✅ Done | 1 | Medium — convenience |
+| **11.4** Research in pre-trade | ✅ Done | 4 | Medium — surface notes during trades |
+| **11.1** Peer comparison | ✅ Done | 6 | Low — research quality |
 | **11.2** Thesis dashboard in app | Planned | 1 | Low — CLI works |
 | **10.2** Portfolio optimization | Planned | 5 | Deprioritized |
 | **10.3** Stress testing | Planned | 5 | Deprioritized |

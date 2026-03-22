@@ -87,8 +87,11 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh plan-cancel <symbol>  # Cancel active entry plan for symbol
 ./scripts/pm-cli.sh valuation <symbol>   # Valuation: PE, PEG, forward PE, EPS trajectory, fair price range
 ./scripts/pm-cli.sh valuations           # Portfolio-wide valuation table (PEG-based fair value rating)
+./scripts/pm-cli.sh peers <symbol>       # Peer comparison: same-sector symbols ranked by PEG with valuation metrics
 ./scripts/pm-cli.sh screen               # Watchlist screening: rank by composite valuation+technical+growth score
 ./scripts/pm-cli.sh confluence           # Entry confluence detection: symbols with 2+ aligned entry signals
+./scripts/pm-cli.sh earnings-prep <symbol> # Pre-earnings review: position, valuation, scorecard, news, levels
+./scripts/pm-cli.sh scan-trades          # Trade scanner: confluence → trend filter → R:R analysis
 ./scripts/pm-cli.sh trade-open <sym> <shares> <entry> <stop> "<thesis>" [days]  # Log trading position
 ./scripts/pm-cli.sh trade-close <sym> <exit_price> "<reason>"  # Close trading position
 ./scripts/pm-cli.sh trades [all]          # List open (or all) trading positions
@@ -139,7 +142,7 @@ Run with the user in conversation. Three phases across the day.
    - "What's being rewarded? What's being punished?" (informed by sector data)
    - "Trend day or sorting day?"
 3. Record via: `pm-cli.sh ritual-set regime_rewarding "..."`, `ritual-set regime_punishing "..."`, `ritual-set regime_type trend|sorting`
-4. If sorting day: adds are disabled
+4. If sorting day: adds are disabled (exception: pre-planned EMS basket orders — governance already applied at plan time)
 5. Decision gate (now informed by regime):
    - "One action today: reduce, re-tier, add, or nothing?"
    - Record: `pm-cli.sh ritual-set action_chosen "reduce|retier|add|nothing"`
@@ -149,6 +152,16 @@ Run with the user in conversation. Three phases across the day.
 ### EOD
 1. Ask: "One sentence — today I did/didn't act because ___"
 2. Record: `pm-cli.sh ritual-set journal "..."`
+
+## Pre-Trade Checklist
+The `pre_trade_check` function in `scripts/commands/pretrade.sh` runs before every buy/sell order. It surfaces:
+1. **Decision Memory** — last post-mortem lesson + last decision log for the symbol
+2. **Research Notes** — last 5 notes from `research_notes` table (informational, not a gate)
+3. **Recent Observations** — last 3 from `observations` table (informational, not a gate)
+4. **Conflict checks** — regime alignment, sector churn, action consistency
+5. **Validation gates** — intent, thesis, invalidation, S/R levels, valuation, boundary checks
+
+Research notes and observations appear for both buy and sell sides. They provide context but never block trades.
 
 ## Build Commands
 - `npm run build:main` — TypeScript compile main process

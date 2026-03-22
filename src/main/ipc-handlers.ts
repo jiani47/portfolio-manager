@@ -1144,6 +1144,10 @@ export function setupIpcHandlers(
     return db.getPriceLevels(symbol);
   });
 
+  ipcMain.handle('db:trend-indicators', (_, symbols?: string[]) => {
+    return db.getTrendIndicators(symbols);
+  });
+
   ipcMain.handle('db:price-levels:refresh', (_, symbols?: string[]) => {
     db.refreshPriceLevels(symbols);
     return { ok: true };

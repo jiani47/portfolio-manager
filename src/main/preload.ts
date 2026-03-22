@@ -139,6 +139,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Sector performance
   getSectorPerformance: () => ipcRenderer.invoke('fmp:sector-performance'),
 
+  // Trend indicators (computed from price_history)
+  getTrendIndicators: (symbols?: string[]) => ipcRenderer.invoke('db:trend-indicators', symbols),
+
   // Price levels (support/resistance)
   getPriceLevels: (symbol?: string) => ipcRenderer.invoke('db:price-levels', symbol),
   refreshPriceLevels: (symbols?: string[]) => ipcRenderer.invoke('db:price-levels:refresh', symbols),

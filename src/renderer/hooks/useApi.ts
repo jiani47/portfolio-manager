@@ -49,6 +49,7 @@ import type {
   PortfolioAnalytics,
   PositionBeta,
   PriceLevel,
+  TrendIndicator,
   NewsArticle,
   SchedulerStatus,
   SchedulerHeartbeat,
@@ -215,6 +216,9 @@ declare global {
         herfindahlIndex: number;
         effectivePositions: number;
       } | null>;
+
+      // Trend indicators
+      getTrendIndicators: (symbols?: string[]) => Promise<TrendIndicator[]>;
 
       // Price levels
       getPriceLevels: (symbol?: string) => Promise<PriceLevel[]>;
@@ -1881,6 +1885,23 @@ export function usePriceLevels() {
   }, []);
 
   return { levels, loading, fetchLevels };
+}
+
+export function useTrendIndicators() {
+  const [indicators, setIndicators] = useState<TrendIndicator[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchIndicators = useCallback(async (symbols?: string[]) => {
+    setLoading(true);
+    try {
+      const data = await window.electronAPI.getTrendIndicators(symbols);
+      setIndicators(data);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return { indicators, loading, fetchIndicators };
 }
 
 export function useNews() {

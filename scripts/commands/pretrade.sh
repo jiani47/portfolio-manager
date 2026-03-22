@@ -19,7 +19,12 @@ check_sorting_day() {
   local today=$(date +%Y-%m-%d)
   local regime=$(sqlite3 "$DB" "SELECT regime_type FROM daily_rituals WHERE date='$today'" 2>/dev/null)
   if [ "$regime" = "sorting" ]; then
-    echo "  ⚠ WARN: Sorting day — adds typically disabled"
+    # EMS basket orders bypass sorting-day block — governance already applied at plan time
+    if [ "${EMS_BASKET_ORDER:-}" = "1" ]; then
+      echo "  ✓ PASS: Sorting day — EMS basket order (pre-planned, bypasses session filter)"
+      return 0
+    fi
+    echo "  ⚠ WARN: Sorting day — adds typically disabled (exception: pre-planned EMS basket orders)"
     read -p "    Override? (y/n): " ov
     [ "$ov" != "y" ] && return 1
   else
@@ -480,6 +485,11 @@ check_boundary() {
   local symbol="$1" side="$2" book="$3" qty="${4:-0}" price="${5:-0}"
 
   if [ "$book" = "investing" ]; then
+    # EMS basket orders bypass boundary check — pre-planned
+    if [ "${EMS_BASKET_ORDER:-}" = "1" ]; then
+      echo "  ✓ PASS: EMS basket order — boundary check bypassed (pre-planned)"
+      return 0
+    fi
     # Count sells (proxy for round-trips) in last 90 days
     local sell_count=$(sqlite3 "$DB" "
       SELECT COUNT(*) FROM transactions t
@@ -579,6 +589,10 @@ else:
 
 check_churn() {
   local symbol="$1"
+  if [ "${EMS_BASKET_ORDER:-}" = "1" ]; then
+    echo "  ✓ PASS: EMS basket order — churn check bypassed (pre-planned)"
+    return 0
+  fi
   local sell_count=$(sqlite3 "$DB" "
     SELECT COUNT(*) FROM transactions t
     JOIN securities s ON t.security_id=s.id
@@ -681,6 +695,10 @@ check_valuation() {
 
 check_entry_plan() {
   local symbol="$1" qty="$2" price="${3:-0}"
+  if [ "${EMS_BASKET_ORDER:-}" = "1" ]; then
+    echo "  ✓ PASS: EMS basket order — entry plan check bypassed (this IS the plan)"
+    return 0
+  fi
   local plan_id target_pct
   plan_id=$(sqlite3 "$DB" "
     SELECT ep.id FROM entry_plans ep
@@ -764,11 +782,56 @@ pre_trade_check() {
     echo ""
   fi
 
-  # Conflict surfacing (buys only)
+  # Research notes context (informational, not a gate)
+  local research_notes
+  research_notes=$(sqlite3 "$DB" "
+    SELECT '[' || substr(rn.created_at, 1, 10) || ' ' || rn.section || '] ' || replace(rn.content, char(10), ' ')
+    FROM research_notes rn
+    JOIN securities s ON rn.security_id = s.id
+    WHERE s.symbol = '$symbol'
+    ORDER BY rn.created_at DESC LIMIT 5
+  " 2>/dev/null)
+  if [ -n "$research_notes" ]; then
+    echo "  ── Research Notes ──"
+    while IFS= read -r line; do
+      # Truncate long lines to 100 chars
+      if [ ${#line} -gt 100 ]; then
+        echo "  ${line:0:97}..."
+      else
+        echo "  $line"
+      fi
+    done <<< "$research_notes"
+    echo ""
+  fi
+
+  # Recent observations context (informational, not a gate)
+  local observations
+  observations=$(sqlite3 "$DB" "
+    SELECT '[' || o.observation_date || ' ' || o.thesis_impact || '] ' || replace(o.note, char(10), ' ')
+    FROM observations o
+    JOIN securities s ON o.security_id = s.id
+    WHERE s.symbol = '$symbol'
+    ORDER BY o.observation_date DESC LIMIT 3
+  " 2>/dev/null)
+  if [ -n "$observations" ]; then
+    echo "  ── Recent Observations ──"
+    while IFS= read -r line; do
+      if [ ${#line} -gt 100 ]; then
+        echo "  ${line:0:97}..."
+      else
+        echo "  $line"
+      fi
+    done <<< "$observations"
+    echo ""
+  fi
+
+  # Conflict surfacing (buys only — EMS basket orders exempt, governance applied at plan time)
   if [ "$side" = "BUY" ]; then
     # Check if today's ritual action conflicts
     local action=$(sqlite3 "$DB" "SELECT action_chosen FROM daily_rituals WHERE date = date('now')" 2>/dev/null)
-    if [ "$action" = "reduce" ]; then
+    if [ "${EMS_BASKET_ORDER:-}" = "1" ]; then
+      echo "  ✓ PASS: EMS basket order — action-conflict check bypassed (pre-planned)"
+    elif [ "$action" = "reduce" ]; then
       echo "  ⚠ CONFLICT: Today's action is 'reduce' but you're buying."
       read -p "    Override? (y/n): " ov
       [ "$ov" != "y" ] && { echo "  Checklist abandoned."; return 1; }
@@ -778,24 +841,28 @@ pre_trade_check() {
       [ "$ov" != "y" ] && { echo "  Checklist abandoned."; return 1; }
     fi
 
-    # Check if recently sold same sector
-    local sector=$(sqlite3 "$DB" "SELECT sector FROM securities WHERE symbol='$symbol'" 2>/dev/null)
-    if [ -n "$sector" ] && [ "$sector" != "" ]; then
-      local recent_sector_sells=$(sqlite3 "$DB" "
-        SELECT s.symbol || ' on ' || t.date
-        FROM transactions t
-        JOIN securities s ON t.security_id = s.id
-        WHERE s.sector = '$sector' AND t.type = 'sell'
-        AND t.date >= date('now', '-7 days')
-        AND s.symbol != '$symbol'
-        ORDER BY t.date DESC LIMIT 3
-      " 2>/dev/null)
-      if [ -n "$recent_sector_sells" ]; then
-        echo "  ⚠ CONFLICT: You sold other $sector names in the last 7 days:"
-        echo "$recent_sector_sells" | while read -r line; do echo "    $line"; done
-        echo "    Adding $symbol reintroduces sector exposure you just reduced."
-        read -p "    Acknowledged? (y/n): " ack
-        [ "$ack" != "y" ] && { echo "  Checklist abandoned."; return 1; }
+    # Check if recently sold same sector (EMS basket orders exempt)
+    if [ "${EMS_BASKET_ORDER:-}" = "1" ]; then
+      echo "  ✓ PASS: EMS basket order — sector churn check bypassed (pre-planned)"
+    else
+      local sector=$(sqlite3 "$DB" "SELECT sector FROM securities WHERE symbol='$symbol'" 2>/dev/null)
+      if [ -n "$sector" ] && [ "$sector" != "" ]; then
+        local recent_sector_sells=$(sqlite3 "$DB" "
+          SELECT s.symbol || ' on ' || t.date
+          FROM transactions t
+          JOIN securities s ON t.security_id = s.id
+          WHERE s.sector = '$sector' AND t.type = 'sell'
+          AND t.date >= date('now', '-7 days')
+          AND s.symbol != '$symbol'
+          ORDER BY t.date DESC LIMIT 3
+        " 2>/dev/null)
+        if [ -n "$recent_sector_sells" ]; then
+          echo "  ⚠ CONFLICT: You sold other $sector names in the last 7 days:"
+          echo "$recent_sector_sells" | while read -r line; do echo "    $line"; done
+          echo "    Adding $symbol reintroduces sector exposure you just reduced."
+          read -p "    Acknowledged? (y/n): " ack
+          [ "$ack" != "y" ] && { echo "  Checklist abandoned."; return 1; }
+        fi
       fi
     fi
   fi
@@ -852,11 +919,15 @@ pre_trade_check() {
     echo "  ⚠ After fill: run 'pm-cli.sh trade-open $symbol $qty $price $STOP_PRICE \"<thesis>\"'"
     echo "  ⚠ Then place GTC stop: 'pm-cli.sh sell $qty $symbol stop $STOP_PRICE GTC'"
   else
-    # Investing
-    check_intent_exists "$symbol" || return 1
-    check_thesis_file "$symbol" "$book" || return 1
-    check_thesis "$symbol" || return 1
-    check_invalidation "$symbol" || return 1
+    # Investing (EMS basket orders bypass intent/thesis checks — governance applied at plan time)
+    if [ "${EMS_BASKET_ORDER:-}" = "1" ]; then
+      echo "  ✓ PASS: EMS basket order — intent/thesis/invalidation checks bypassed (pre-planned)"
+    else
+      check_intent_exists "$symbol" || return 1
+      check_thesis_file "$symbol" "$book" || return 1
+      check_thesis "$symbol" || return 1
+      check_invalidation "$symbol" || return 1
+    fi
     check_regime_read || return 1
     check_sorting_day || return 1
     check_reentry_cooldown "$symbol" || return 1
@@ -869,14 +940,18 @@ pre_trade_check() {
     check_pending_earnings_review "$symbol" || return 1
     check_entry_plan "$symbol" "$qty" "$price" || return 1
     echo "  ✓ PASS: Position size check (manual verification)"
-    echo ""
-    echo "  Manual acknowledgments:"
-    for item in \
-      "This is an investment — I expect to hold for months+" \
-      "I would hold through a 20-30% drawdown"; do
-      read -p "  ☐ $item (y/n): " ack
-      [ "$ack" != "y" ] && { echo "  Checklist abandoned."; return 1; }
-    done
+    if [ "${EMS_BASKET_ORDER:-}" = "1" ]; then
+      echo "  ✓ PASS: EMS basket order — manual acknowledgments bypassed (pre-planned)"
+    else
+      echo ""
+      echo "  Manual acknowledgments:"
+      for item in \
+        "This is an investment — I expect to hold for months+" \
+        "I would hold through a 20-30% drawdown"; do
+        read -p "  ☐ $item (y/n): " ack
+        [ "$ack" != "y" ] && { echo "  Checklist abandoned."; return 1; }
+      done
+    fi
   fi
 
   echo ""

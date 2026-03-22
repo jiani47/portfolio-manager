@@ -2526,6 +2526,67 @@ export class Database {
     }));
   }
 
+  getTrendIndicators(symbols?: string[]): { symbol: string; price: number; sma20: number; sma50: number; sma200: number; rsi: number; trend: string; aboveDmas: number }[] {
+    if (!this.db) throw new Error('Database not initialized');
+
+    // Get symbols to analyze
+    let targetSymbols: string[];
+    if (symbols && symbols.length > 0) {
+      targetSymbols = symbols;
+    } else {
+      const rows = this.db.prepare(`
+        SELECT DISTINCT s.symbol FROM positions p
+        JOIN securities s ON p.security_id = s.id
+        WHERE s.type NOT IN ('cash', 'other') AND p.quantity > 0
+      `).all() as { symbol: string }[];
+      targetSymbols = rows.map(r => r.symbol);
+    }
+
+    const results: { symbol: string; price: number; sma20: number; sma50: number; sma200: number; rsi: number; trend: string; aboveDmas: number }[] = [];
+
+    for (const symbol of targetSymbols) {
+      const prices = this.db.prepare(`
+        SELECT ph.close_price FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = ?
+        ORDER BY ph.date DESC LIMIT 200
+      `).all(symbol) as { close_price: number }[];
+
+      if (prices.length < 20) continue;
+
+      const closes = prices.map(p => p.close_price);
+      const price = closes[0];
+      const sma20 = closes.slice(0, 20).reduce((a, b) => a + b, 0) / 20;
+      const sma50 = closes.length >= 50 ? closes.slice(0, 50).reduce((a, b) => a + b, 0) / 50 : 0;
+      const sma200 = closes.length >= 200 ? closes.slice(0, 200).reduce((a, b) => a + b, 0) / 200 : 0;
+
+      // RSI(14) calculation
+      let rsi = 50;
+      if (closes.length >= 15) {
+        let gains = 0, losses = 0;
+        for (let i = 0; i < 14; i++) {
+          const diff = closes[i] - closes[i + 1]; // recent - older (reversed order)
+          if (diff > 0) gains += diff;
+          else losses -= diff;
+        }
+        const avgGain = gains / 14;
+        const avgLoss = losses / 14;
+        rsi = avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+      }
+
+      const aboveDmas = [sma20, sma50, sma200].filter(s => s > 0 && price >= s).length;
+      let trend: string;
+      if (aboveDmas === 3) trend = 'UPTREND';
+      else if (aboveDmas === 0) trend = 'DOWNTREND';
+      else if (sma200 > 0 && price >= sma200) trend = 'PULLBACK';
+      else trend = 'BREAKDOWN';
+
+      results.push({ symbol, price, sma20, sma50, sma200, rsi, trend, aboveDmas });
+    }
+
+    return results;
+  }
+
   createPriceLevel(symbol: string, levelType: 'support' | 'resistance', price: number, strength = 5, source = 'manual'): import('../shared/types').PriceLevel {
     if (!this.db) throw new Error('Database not initialized');
     const id = uuidv4();

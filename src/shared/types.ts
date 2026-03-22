@@ -695,6 +695,17 @@ export interface PriceLevel {
   updatedAt: string;
 }
 
+export interface TrendIndicator {
+  symbol: string;
+  price: number;
+  sma20: number;
+  sma50: number;
+  sma200: number;
+  rsi: number;
+  trend: string;
+  aboveDmas: number;
+}
+
 // News types
 export interface NewsArticle {
   symbol: string;
@@ -761,6 +772,7 @@ export interface PreTradeCheckRequest {
   quantity: number;
   accountNumber: string;
   price?: number;
+  isEmsBasketOrder?: boolean;
 }
 
 export interface PreTradeCheckResult {

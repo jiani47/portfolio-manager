@@ -865,10 +865,45 @@ PYEOF
     # Watchlist screening: rank by composite valuation + technical + growth score
     python3 - "$DB" << 'PYEOF'
 import sqlite3, sys
+from datetime import date
 
 db_path = sys.argv[1]
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
+
+# Regime filter
+SECTOR_ALIASES = {
+    'tech': 'Technology', 'technology': 'Technology',
+    'comms': 'Communication Services', 'comm services': 'Communication Services',
+    'communication': 'Communication Services', 'communication services': 'Communication Services',
+    'consumer cyclical': 'Consumer Cyclical', 'cyclical': 'Consumer Cyclical',
+    'consumer defensive': 'Consumer Defensive', 'defensive': 'Consumer Defensive',
+    'defensives': 'Consumer Defensive',
+    'financial': 'Financial Services', 'financial services': 'Financial Services',
+    'financials': 'Financial Services',
+    'healthcare': 'Healthcare', 'health': 'Healthcare',
+    'industrials': 'Industrials', 'industrial': 'Industrials',
+    'energy': 'Energy', 'oil': 'Energy',
+    'utilities': 'Utilities', 'utility': 'Utilities',
+    'basic materials': 'Basic Materials', 'materials': 'Basic Materials',
+    'real estate': 'Real Estate',
+}
+
+def get_punished_sectors(conn):
+    today = date.today().isoformat()
+    ritual = conn.execute(
+        "SELECT regime_punishing, regime_type FROM daily_rituals WHERE date = ?", (today,)
+    ).fetchone()
+    if not ritual or not ritual['regime_punishing']:
+        return set(), None
+    text = ritual['regime_punishing'].lower()
+    punished = set()
+    for alias, canonical in SECTOR_ALIASES.items():
+        if alias in text:
+            punished.add(canonical)
+    return punished, ritual['regime_type']
+
+punished_sectors, regime_type = get_punished_sectors(conn)
 
 # Get all watchlist symbols with latest valuation data
 rows = conn.execute("""
@@ -961,18 +996,369 @@ for r in rows:
 # Sort by composite score descending
 results.sort(key=lambda x: x['composite'], reverse=True)
 
+# Tag regime-blocked symbols
+if punished_sectors:
+    for r in results:
+        sector = conn.execute("SELECT sector FROM securities WHERE symbol = ?", (r['symbol'],)).fetchone()
+        sec_name = sector['sector'] if sector and sector['sector'] else None
+        r['regime_blocked'] = sec_name in punished_sectors if sec_name else False
+else:
+    for r in results:
+        r['regime_blocked'] = False
+
 print()
 print("=== Watchlist Screening ===")
+if punished_sectors:
+    print(f"  Regime: {regime_type} — dimming: {', '.join(sorted(punished_sectors))}")
 print()
 print(f"  {'Symbol':<7} {'Price':>8} {'Rating':>8} {'PEG':>6} {'Fwd PE':>8} {'Growth':>8} {'Technical':>16} {'Score':>6}  Watchlist")
 print(f"  {'─'*7} {'─'*8} {'─'*8} {'─'*6} {'─'*8} {'─'*8} {'─'*16} {'─'*6}  {'─'*12}")
 
 for r in results:
-    print(f"  {r['symbol']:<7} ${r['price']:>7.2f} {r['rating']:>8} {r['peg']:>6} {r['fwd_pe']:>8} {r['growth']:>8} {r['tech_pos']:>16} {r['composite']:>6}  {r['watchlist']}")
+    marker = '  ⊘' if r['regime_blocked'] else ''
+    print(f"  {r['symbol']:<7} ${r['price']:>7.2f} {r['rating']:>8} {r['peg']:>6} {r['fwd_pe']:>8} {r['growth']:>8} {r['tech_pos']:>16} {r['composite']:>6}  {r['watchlist']}{marker}")
 
 print()
 print("  Scoring: Valuation (CHEAP=3,FAIR=2,RICH=1,PRICEY=0) + Technical (support=+1,resistance=-1) + Growth (>50%=+2,>30%=+1)")
+if punished_sectors:
+    print("  ⊘ = in regime-punished sector (caution)")
 print()
+conn.close()
+PYEOF
+    ;;
+
+  scan-trades)
+    # Two-step trade scanner: confluence signals → trend filter → R:R analysis
+    FMP_KEY=$(get_fmp_key)
+    if [ -z "$FMP_KEY" ]; then
+      echo "ERROR: FMP API key not configured in ~/.pm-cli.conf"
+      exit 1
+    fi
+
+    python3 - "$DB" "$FMP_KEY" << 'PYEOF'
+import sqlite3, sys, json, urllib.request, time
+
+db_path = sys.argv[1]
+fmp_key = sys.argv[2]
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+# --- Regime filter: parse punished sectors from today's ritual ---
+SECTOR_ALIASES = {
+    'tech': 'Technology', 'technology': 'Technology',
+    'comms': 'Communication Services', 'comm services': 'Communication Services',
+    'communication': 'Communication Services', 'communication services': 'Communication Services',
+    'consumer cyclical': 'Consumer Cyclical', 'cyclical': 'Consumer Cyclical',
+    'consumer defensive': 'Consumer Defensive', 'defensive': 'Consumer Defensive',
+    'defensives': 'Consumer Defensive',
+    'financial': 'Financial Services', 'financial services': 'Financial Services',
+    'financials': 'Financial Services',
+    'healthcare': 'Healthcare', 'health': 'Healthcare',
+    'industrials': 'Industrials', 'industrial': 'Industrials',
+    'energy': 'Energy', 'oil': 'Energy',
+    'utilities': 'Utilities', 'utility': 'Utilities',
+    'basic materials': 'Basic Materials', 'materials': 'Basic Materials',
+    'real estate': 'Real Estate',
+}
+
+def get_punished_sectors(conn):
+    """Parse regime_punishing free-text into a set of canonical sector names."""
+    from datetime import date
+    today = date.today().isoformat()
+    ritual = conn.execute(
+        "SELECT regime_punishing, regime_type FROM daily_rituals WHERE date = ?", (today,)
+    ).fetchone()
+    if not ritual or not ritual['regime_punishing']:
+        return set(), None
+    text = ritual['regime_punishing'].lower()
+    punished = set()
+    for alias, canonical in SECTOR_ALIASES.items():
+        if alias in text:
+            punished.add(canonical)
+    return punished, ritual['regime_type']
+
+def get_symbol_sector(conn, symbol):
+    """Get the sector for a symbol from the securities table."""
+    row = conn.execute("SELECT sector FROM securities WHERE symbol = ?", (symbol,)).fetchone()
+    return row['sector'] if row and row['sector'] else None
+
+punished_sectors, regime_type = get_punished_sectors(conn)
+
+# --- Step 0: Gather confluence symbols (same as confluence command) ---
+symbols_data = conn.execute("""
+    SELECT DISTINCT symbol FROM (
+        SELECT wi.symbol FROM watchlist_items wi
+        UNION
+        SELECT s.symbol FROM positions p
+        JOIN securities s ON p.security_id = s.id
+        WHERE s.type = 'stock' AND p.quantity > 0
+    )
+""").fetchall()
+
+confluence = []
+for sd in symbols_data:
+    symbol = sd['symbol']
+    signals = []
+
+    vm = conn.execute("""
+        SELECT peg_rating, forward_peg, forward_pe, eps_growth_pct,
+               fair_low, fair_mid, fair_high
+        FROM valuation_metrics WHERE symbol = ?
+        ORDER BY date DESC LIMIT 1
+    """, (symbol,)).fetchone()
+
+    price_row = conn.execute("""
+        SELECT ph.close_price FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+    """, (symbol,)).fetchone()
+    price = price_row['close_price'] if price_row else 0
+    if not price or price <= 0:
+        continue
+
+    # Signal 1: Valuation
+    fwd_peg = None
+    rating = None
+    eps_growth = None
+    fwd_pe = None
+    if vm:
+        fwd_peg = vm['forward_peg']
+        rating = vm['peg_rating']
+        eps_growth = vm['eps_growth_pct']
+        fwd_pe = vm['forward_pe']
+        if rating in ('CHEAP', 'FAIR') and fwd_peg and fwd_peg > 0 and fwd_peg < 1.2:
+            signals.append(f"{rating} PEG:{fwd_peg:.2f}")
+
+    # Signal 2: Near support
+    nearest_s = conn.execute("""
+        SELECT price, strength FROM price_levels
+        WHERE symbol = ? AND level_type = 'support' AND price < ?
+        ORDER BY price DESC LIMIT 1
+    """, (symbol, price)).fetchone()
+    if nearest_s:
+        pct_from_s = (price - nearest_s['price']) / price * 100
+        if pct_from_s <= 5:
+            signals.append(f"S${nearest_s['price']:.0f} {pct_from_s:.1f}%")
+
+    # Signal 3: EPS growth
+    if vm and vm['eps_growth_pct'] and vm['eps_growth_pct'] > 20:
+        signals.append(f"EPS+{vm['eps_growth_pct']:.0f}%")
+
+    if len(signals) < 2:
+        continue
+
+    # Get S/R levels for R:R
+    supports = conn.execute("""
+        SELECT price, strength FROM price_levels
+        WHERE symbol = ? AND level_type = 'support' AND price < ?
+        ORDER BY price DESC LIMIT 3
+    """, (symbol, price)).fetchall()
+    resistances = conn.execute("""
+        SELECT price, strength FROM price_levels
+        WHERE symbol = ? AND level_type = 'resistance' AND price > ?
+        ORDER BY price ASC LIMIT 3
+    """, (symbol, price)).fetchall()
+
+    s1 = supports[0] if supports else None
+    r1 = resistances[0] if resistances else None
+    rr = None
+    if s1 and r1:
+        downside = price - s1['price']
+        upside = r1['price'] - price
+        rr = upside / downside if downside > 0 else 0
+
+    confluence.append({
+        'symbol': symbol, 'price': price, 'signals': signals,
+        'signal_count': len(signals), 'fwd_peg': fwd_peg, 'rating': rating,
+        'eps_growth': eps_growth, 'fwd_pe': fwd_pe,
+        's1': s1, 'r1': r1, 'rr': rr,
+        'supports': supports, 'resistances': resistances,
+        'fair_low': vm['fair_low'] if vm else None,
+        'fair_mid': vm['fair_mid'] if vm else None,
+        'fair_high': vm['fair_high'] if vm else None,
+    })
+
+if not confluence:
+    print("\n  No confluence symbols found.\n")
+    conn.close()
+    sys.exit(0)
+
+# --- Step 1: Fetch technicals from FMP for confluence symbols ---
+base = 'https://financialmodelingprep.com/stable/technical-indicators'
+
+def fetch_tech(indicator, symbol, period):
+    url = f'{base}/{indicator}?symbol={symbol}&periodLength={period}&timeframe=1day&apikey={fmp_key}'
+    try:
+        data = json.loads(urllib.request.urlopen(url).read())
+        return data[0] if data else None
+    except:
+        return None
+
+print()
+print("=" * 80)
+print("  TRADE SCANNER — Confluence + Trend + R:R")
+print("=" * 80)
+
+tradeable = []
+not_tradeable = []
+
+for c in confluence:
+    sym = c['symbol']
+    sma20 = fetch_tech('sma', sym, 20)
+    sma50 = fetch_tech('sma', sym, 50)
+    sma200 = fetch_tech('sma', sym, 200)
+    rsi_data = fetch_tech('rsi', sym, 14)
+
+    p = sma20.get('close', c['price']) if sma20 else c['price']
+    s20 = sma20.get('sma', 0) if sma20 else 0
+    s50 = sma50.get('sma', 0) if sma50 else 0
+    s200 = sma200.get('sma', 0) if sma200 else 0
+    rsi_val = rsi_data.get('rsi', 0) if rsi_data else 0
+
+    above_count = sum(1 for s in [s20, s50, s200] if s > 0 and p >= s)
+    if above_count == 3:
+        trend = 'UPTREND'
+    elif above_count == 0:
+        trend = 'DOWNTREND'
+    elif p >= s200:
+        trend = 'PULLBACK'
+    else:
+        trend = 'BREAKDOWN'
+
+    c['trend'] = trend
+    c['rsi'] = rsi_val
+    c['above_dmas'] = above_count
+    c['sma20'] = s20
+    c['sma50'] = s50
+    c['sma200'] = s200
+    c['live_price'] = p
+
+    # Tradeable = uptrend or pullback (above 200 DMA)
+    if trend in ('UPTREND', 'PULLBACK'):
+        tradeable.append(c)
+    else:
+        not_tradeable.append(c)
+
+    time.sleep(0.15)  # rate limit
+
+# --- Step 1.5: Regime filter — separate punished-sector names ---
+regime_blocked = []
+if punished_sectors:
+    filtered_tradeable = []
+    for c in tradeable:
+        sector = get_symbol_sector(conn, c['symbol'])
+        if sector and sector in punished_sectors:
+            c['block_reason'] = f"regime punishing {sector}"
+            regime_blocked.append(c)
+        else:
+            filtered_tradeable.append(c)
+    tradeable = filtered_tradeable
+
+    filtered_not_tradeable = []
+    for c in not_tradeable:
+        sector = get_symbol_sector(conn, c['symbol'])
+        if sector and sector in punished_sectors:
+            c['block_reason'] = f"regime punishing {sector}"
+            regime_blocked.append(c)
+        else:
+            filtered_not_tradeable.append(c)
+    not_tradeable = filtered_not_tradeable
+
+# --- Step 2: Display results ---
+
+# Sort tradeable by R:R descending
+tradeable.sort(key=lambda x: x.get('rr') or 0, reverse=True)
+
+if tradeable:
+    print()
+    print("  TRADEABLE (trend supports entry)")
+    print("  " + "-" * 76)
+    print(f"  {'Symbol':<8} {'Price':>8} {'Trend':<10} {'RSI':>5} {'R:R':>6} {'Signals':<28} {'Entry Level'}")
+    print("  " + "-" * 76)
+    for c in tradeable:
+        rr_str = f"{c['rr']:.1f}x" if c['rr'] else '—'
+        rr_flag = ' ✓' if c['rr'] and c['rr'] >= 2.0 else ' ⚠' if c['rr'] else ''
+        sigs = ', '.join(c['signals'])
+
+        # Determine suggested entry
+        if c['rr'] and c['rr'] >= 2.0:
+            entry = f"NOW (R:R {rr_str})"
+        elif c['sma50'] and c['live_price'] > c['sma50']:
+            # Above 50 DMA — pullback to 50 DMA is entry
+            entry = f"50 DMA ${c['sma50']:.0f}"
+        elif c['sma20'] and c['live_price'] > c['sma20']:
+            entry = f"20 DMA ${c['sma20']:.0f}"
+        else:
+            s1p = c['s1']['price'] if c['s1'] else 0
+            entry = f"S1 ${s1p:.0f}" if s1p else '—'
+
+        print(f"  {c['symbol']:<8} ${c['live_price']:>7.2f} {c['trend']:<10} {c['rsi']:>5.1f} {rr_str:>5}{rr_flag} {sigs:<28} {entry}")
+
+    # Detail section for tradeable
+    print()
+    for c in tradeable:
+        print(f"  --- {c['symbol']} ---")
+        rr_str = f"{c['rr']:.1f}x" if c['rr'] else '—'
+        print(f"  Price: ${c['live_price']:.2f} | Fwd PE: {c['fwd_pe']:.1f}x | PEG: {c['fwd_peg']:.2f} ({c['rating']})" if c['fwd_pe'] and c['fwd_peg'] else f"  Price: ${c['live_price']:.2f}")
+        print(f"  DMAs: 20=${c['sma20']:.0f} 50=${c['sma50']:.0f} 200=${c['sma200']:.0f} | RSI: {c['rsi']:.0f} | R:R: {rr_str}")
+        if c['supports']:
+            s_str = '  '.join(f"${s['price']:.0f}({s['strength']}/10)" for s in c['supports'])
+            print(f"  S: {s_str}")
+        if c['resistances']:
+            r_str = '  '.join(f"${r['price']:.0f}({r['strength']}/10)" for r in c['resistances'])
+            print(f"  R: {r_str}")
+        if c['fair_low'] and c['fair_high']:
+            print(f"  Fair: ${c['fair_low']:.0f} – ${c['fair_mid']:.0f} – ${c['fair_high']:.0f}")
+
+        # Suggest entry
+        if c['rr'] and c['rr'] >= 2.0:
+            print(f"  → ENTRY NOW: R:R {rr_str} is favorable at current price")
+        else:
+            levels = []
+            if c['sma50'] and c['live_price'] > c['sma50']:
+                levels.append(f"50 DMA pullback ${c['sma50']:.0f}")
+            if c['s1']:
+                levels.append(f"S1 ${c['s1']['price']:.0f} ({c['s1']['strength']}/10)")
+            if levels:
+                print(f"  → WAIT: R:R {rr_str} insufficient. Better entry at: {', '.join(levels)}")
+            else:
+                print(f"  → WAIT: No clear entry level with favorable R:R")
+        print()
+
+if not_tradeable:
+    print()
+    print("  NOT TRADEABLE (trend does not support entry)")
+    print("  " + "-" * 76)
+    print(f"  {'Symbol':<8} {'Price':>8} {'Trend':<12} {'RSI':>5} {'Signals':<32} {'Wait For'}")
+    print("  " + "-" * 76)
+    for c in not_tradeable:
+        sigs = ', '.join(c['signals'])
+        if c['trend'] == 'DOWNTREND':
+            wait = f"Reclaim 20 DMA ${c['sma20']:.0f}" if c['sma20'] else 'trend reversal'
+        else:
+            wait = f"Reclaim 200 DMA ${c['sma200']:.0f}" if c['sma200'] else 'trend reversal'
+        print(f"  {c['symbol']:<8} ${c['live_price']:>7.2f} {c['trend']:<12} {c['rsi']:>5.1f} {sigs:<32} {wait}")
+
+if regime_blocked:
+    print()
+    print(f"  REGIME-BLOCKED ({len(regime_blocked)} names in punished sectors)")
+    print("  " + "-" * 76)
+    print(f"  {'Symbol':<8} {'Price':>8} {'Sector':<24} {'Signals':<28} {'Reason'}")
+    print("  " + "-" * 76)
+    for c in regime_blocked:
+        sector = get_symbol_sector(conn, c['symbol']) or '?'
+        sigs = ', '.join(c['signals'])
+        print(f"  {c['symbol']:<8} ${c.get('live_price', c['price']):>7.2f} {sector:<24} {sigs:<28} {c['block_reason']}")
+
+print()
+regime_str = f", {len(regime_blocked)} regime-blocked" if regime_blocked else ""
+regime_note = f"  Regime: {regime_type or 'none'}"
+if punished_sectors:
+    regime_note += f" — punishing: {', '.join(sorted(punished_sectors))}"
+print(regime_note)
+print(f"  Summary: {len(tradeable)} tradeable, {len(not_tradeable)} waiting for trend{regime_str}")
+print()
+
 conn.close()
 PYEOF
     ;;
@@ -981,10 +1367,45 @@ PYEOF
     # Entry confluence detection: find symbols with multiple aligned signals
     python3 - "$DB" << 'PYEOF'
 import sqlite3, sys
+from datetime import date
 
 db_path = sys.argv[1]
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
+
+# Regime filter
+SECTOR_ALIASES = {
+    'tech': 'Technology', 'technology': 'Technology',
+    'comms': 'Communication Services', 'comm services': 'Communication Services',
+    'communication': 'Communication Services', 'communication services': 'Communication Services',
+    'consumer cyclical': 'Consumer Cyclical', 'cyclical': 'Consumer Cyclical',
+    'consumer defensive': 'Consumer Defensive', 'defensive': 'Consumer Defensive',
+    'defensives': 'Consumer Defensive',
+    'financial': 'Financial Services', 'financial services': 'Financial Services',
+    'financials': 'Financial Services',
+    'healthcare': 'Healthcare', 'health': 'Healthcare',
+    'industrials': 'Industrials', 'industrial': 'Industrials',
+    'energy': 'Energy', 'oil': 'Energy',
+    'utilities': 'Utilities', 'utility': 'Utilities',
+    'basic materials': 'Basic Materials', 'materials': 'Basic Materials',
+    'real estate': 'Real Estate',
+}
+
+def get_punished_sectors(conn):
+    today = date.today().isoformat()
+    ritual = conn.execute(
+        "SELECT regime_punishing, regime_type FROM daily_rituals WHERE date = ?", (today,)
+    ).fetchone()
+    if not ritual or not ritual['regime_punishing']:
+        return set(), None
+    text = ritual['regime_punishing'].lower()
+    punished = set()
+    for alias, canonical in SECTOR_ALIASES.items():
+        if alias in text:
+            punished.add(canonical)
+    return punished, ritual['regime_type']
+
+punished_sectors, regime_type = get_punished_sectors(conn)
 
 # Get all watchlist + portfolio symbols with valuation data
 symbols_data = conn.execute("""
@@ -1069,18 +1490,45 @@ for sd in symbols_data:
 # Sort by signal count descending
 results.sort(key=lambda x: x['signal_count'], reverse=True)
 
+# Regime filter
+active = []
+blocked = []
+if punished_sectors:
+    for r in results:
+        sector = conn.execute("SELECT sector FROM securities WHERE symbol = ?", (r['symbol'],)).fetchone()
+        sec_name = sector['sector'] if sector and sector['sector'] else None
+        if sec_name and sec_name in punished_sectors:
+            r['sector'] = sec_name
+            blocked.append(r)
+        else:
+            active.append(r)
+else:
+    active = results
+
 print()
 print("=== Entry Confluence Detection ===")
 print("  (Symbols with 2+ aligned entry signals)")
+if punished_sectors:
+    print(f"  Regime: {regime_type} — filtering out: {', '.join(sorted(punished_sectors))}")
 print()
 
-if not results:
+if not active and not blocked:
     print("  No confluences found. Criteria: CHEAP/FAIR PEG<1.2, within 5% of support, EPS growth >20%")
 else:
-    for r in results:
-        print(f"  {r['symbol']:<7} ${r['price']:>8.2f}  [{r['watchlist']}]  ({r['signal_count']} signals)")
-        for s in r['signals']:
-            print(f"    + {s}")
+    if active:
+        for r in active:
+            print(f"  {r['symbol']:<7} ${r['price']:>8.2f}  [{r['watchlist']}]  ({r['signal_count']} signals)")
+            for s in r['signals']:
+                print(f"    + {s}")
+            print()
+    else:
+        print("  No actionable confluences (all in punished sectors).")
+        print()
+
+    if blocked:
+        print(f"  --- Regime-blocked ({len(blocked)} in punished sectors) ---")
+        for r in blocked:
+            print(f"  {r['symbol']:<7} ${r['price']:>8.2f}  [{r['watchlist']}]  ({r['signal_count']} signals)  ⊘ {r['sector']}")
         print()
 
 print()
@@ -1166,6 +1614,473 @@ if latest and latest['ts']:
     print(f"\n  Data as of: {latest['ts'][:16]}")
 
 print()
+conn.close()
+PYEOF
+    ;;
+
+  peers)
+    # Peer comparison: same-sector symbols ranked by PEG
+    SYMBOL=$(echo "${2:-}" | tr '[:lower:]' '[:upper:]')
+    if [ -z "$SYMBOL" ]; then
+      echo "Usage: pm-cli.sh peers <symbol>"
+      exit 1
+    fi
+    python3 - "$DB" "$SYMBOL" << 'PYEOF'
+import sqlite3, sys
+
+db_path = sys.argv[1]
+symbol = sys.argv[2].upper()
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+# Look up sector/industry for the target symbol
+sec = conn.execute("SELECT sector, industry FROM securities WHERE symbol = ?", (symbol,)).fetchone()
+if not sec or not sec['sector']:
+    print(f"\n  No sector data for {symbol}. Run 'pm-cli.sh valuation {symbol}' first to populate.\n")
+    sys.exit(0)
+
+sector = sec['sector']
+industry = sec['industry'] or '—'
+
+# Find all symbols in the same sector that have valuation data
+peers = conn.execute("""
+    SELECT DISTINCT vm.symbol, vm.trailing_pe, vm.forward_pe, vm.peg, vm.forward_peg,
+           vm.eps_growth_pct, vm.peg_rating, vm.fair_low, vm.fair_high,
+           s.industry
+    FROM valuation_metrics vm
+    JOIN securities s ON s.symbol = vm.symbol
+    INNER JOIN (
+        SELECT symbol, MAX(date) as max_date
+        FROM valuation_metrics GROUP BY symbol
+    ) latest ON vm.symbol = latest.symbol AND vm.date = latest.max_date
+    WHERE s.sector = ?
+    ORDER BY vm.symbol
+""", (sector,)).fetchall()
+
+if len(peers) < 2:
+    print(f"\n  Insufficient peer data for comparison ({len(peers)} symbol(s) in {sector}).")
+    print(f"  Run 'pm-cli.sh valuation <symbol>' for more sector peers.\n")
+    sys.exit(0)
+
+# Get current prices and held quantities
+results = []
+for p in peers:
+    sym = p['symbol']
+
+    price_row = conn.execute("""
+        SELECT ph.close_price FROM price_history ph
+        JOIN securities s ON ph.security_id = s.id
+        WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+    """, (sym,)).fetchone()
+    price = price_row['close_price'] if price_row else 0
+
+    # Check if held
+    held_row = conn.execute("""
+        SELECT SUM(p.quantity) as qty FROM positions p
+        JOIN securities s ON p.security_id = s.id
+        WHERE s.symbol = ? AND p.quantity > 0
+    """, (sym,)).fetchone()
+    qty = int(held_row['qty']) if held_row and held_row['qty'] else 0
+
+    t12_pe = p['trailing_pe']
+    fwd_pe = p['forward_pe']
+    peg = p['peg']
+    fwd_peg = p['forward_peg']
+    eps_g = p['eps_growth_pct']
+    rating = p['peg_rating'] or ''
+    fair_low = p['fair_low']
+    fair_high = p['fair_high']
+    ind = p['industry'] or ''
+
+    # Use forward PEG for sorting if available, else PEG
+    sort_peg = fwd_peg if fwd_peg and fwd_peg > 0 else (peg if peg and peg > 0 else 999)
+
+    results.append({
+        'symbol': sym,
+        'price': price,
+        't12_pe': t12_pe,
+        'fwd_pe': fwd_pe,
+        'peg': peg,
+        'fwd_peg': fwd_peg,
+        'sort_peg': sort_peg,
+        'eps_g': eps_g,
+        'rating': rating,
+        'fair_low': fair_low,
+        'fair_high': fair_high,
+        'qty': qty,
+        'industry': ind,
+        'is_target': sym == symbol,
+    })
+
+# Sort by PEG ascending (cheapest first)
+results.sort(key=lambda x: x['sort_peg'])
+
+# Print header
+print()
+print(f"=== Peer Comparison: {symbol} ===")
+print(f"  Sector: {sector}  |  Industry: {industry}")
+print()
+print(f"  {'Symbol':<7} {'Price':>8}  {'T12 PE':>7} {'Fwd PE':>7}  {'PEG':>6}  {'Growth':>7} {'Rating':>8}  {'Fair Range':>18}  {'Held?':>7}")
+print(f"  {'─'*7} {'─'*8}  {'─'*7} {'─'*7}  {'─'*6}  {'─'*7} {'─'*8}  {'─'*18}  {'─'*7}")
+
+target_rank = None
+cheaper_peers = []
+for i, r in enumerate(results):
+    t12_str = f"{r['t12_pe']:.1f}x" if r['t12_pe'] and r['t12_pe'] > 0 else "—"
+    fwd_str = f"{r['fwd_pe']:.1f}x" if r['fwd_pe'] and r['fwd_pe'] > 0 else "—"
+    peg_val = r['fwd_peg'] if r['fwd_peg'] and r['fwd_peg'] > 0 else r['peg']
+    peg_str = f"{peg_val:.2f}" if peg_val and peg_val > 0 else "—"
+    growth_str = f"{r['eps_g']:+.0f}%" if r['eps_g'] else "—"
+    rating_str = r['rating'] if r['rating'] else "—"
+
+    if r['fair_low'] and r['fair_high']:
+        fair_str = f"${r['fair_low']:.0f} – ${r['fair_high']:.0f}"
+    else:
+        fair_str = "—"
+
+    if r['is_target']:
+        fair_str += " \u2190 you"
+        target_rank = i
+
+    held_str = f"{r['qty']}sh" if r['qty'] > 0 else "—"
+
+    print(f"  {r['symbol']:<7} ${r['price']:>7.0f}  {t12_str:>7} {fwd_str:>7}  {peg_str:>6}  {growth_str:>7} {rating_str:>8}  {fair_str:>18}  {held_str:>7}")
+
+    if not r['is_target'] and target_rank is None:
+        cheaper_peers.append(r['symbol'])
+
+# Takeaway
+print()
+if target_rank == 0:
+    print(f"  Takeaway: {symbol} is cheapest in peer group on PEG basis.")
+elif cheaper_peers:
+    if len(cheaper_peers) <= 3:
+        names = " and ".join(cheaper_peers)
+    else:
+        names = ", ".join(cheaper_peers[:3]) + f" (+{len(cheaper_peers)-3} more)"
+    print(f"  Takeaway: {names} {'is' if len(cheaper_peers)==1 else 'are'} cheaper on growth-adjusted basis.")
+else:
+    print(f"  Takeaway: {symbol} ranks well among peers.")
+print()
+
+conn.close()
+PYEOF
+    ;;
+
+  earnings-prep)
+    SYMBOL="$2"
+    if [ -z "$SYMBOL" ]; then
+      echo "Usage: pm-cli.sh earnings-prep <symbol>"
+      echo "  Assembles pre-earnings review: position, valuation, scorecard,"
+      echo "  observations, research notes, news, and technical levels."
+      exit 1
+    fi
+    SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+    PROJ_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+    THESIS_PATH="$PROJ_ROOT/docs/positions/$SYMBOL/thesis.md"
+
+    python3 - "$SYMBOL" "$DB" "$THESIS_PATH" << 'PYEOF'
+import sqlite3, sys, re, os
+from datetime import datetime, timedelta
+
+symbol = sys.argv[1]
+db_path = sys.argv[2]
+thesis_path = sys.argv[3]
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+# ── 1. Company Header ──
+sec = conn.execute("""
+    SELECT id, symbol, name, sector, industry FROM securities WHERE symbol = ?
+""", (symbol,)).fetchone()
+
+if not sec:
+    print(f"ERROR: Symbol {symbol} not found in securities table.")
+    sys.exit(1)
+
+sec_id = sec['id']
+name = sec['name'] or symbol
+sector = sec['sector'] or '—'
+industry = sec['industry'] or '—'
+
+# Next earnings date from earnings_reviews (most recent future date) or monitors
+next_earnings = None
+er = conn.execute("""
+    SELECT earnings_date FROM earnings_reviews
+    WHERE security_id = ? AND earnings_date >= date('now')
+    ORDER BY earnings_date ASC LIMIT 1
+""", (sec_id,)).fetchone()
+if er:
+    next_earnings = er['earnings_date']
+else:
+    mon = conn.execute("""
+        SELECT reminder_date FROM monitors
+        WHERE symbol = ? AND lower(label) LIKE '%earning%' AND status = 'active'
+        ORDER BY reminder_date ASC LIMIT 1
+    """, (symbol,)).fetchone()
+    if mon:
+        next_earnings = mon['reminder_date']
+
+print()
+print(f"{'=' * 65}")
+print(f"  EARNINGS PREP: {symbol} — {name[:40]}")
+print(f"{'=' * 65}")
+print()
+print(f"  Sector: {sector}  |  Industry: {industry}")
+print(f"  Next Earnings: {next_earnings or 'Unknown'}")
+print()
+
+# ── 2. Current Position Info ──
+positions = conn.execute("""
+    SELECT p.id, p.quantity, p.cost_basis, a.name as acct_name,
+           pi.tier, pi.thesis, pi.invalidation, pi.target_allocation_pct,
+           pi.target_hold_period, pi.entry_style
+    FROM positions p
+    JOIN securities s ON p.security_id = s.id
+    JOIN accounts a ON p.account_id = a.id
+    LEFT JOIN position_intents pi ON pi.position_id = p.id
+    WHERE s.symbol = ? AND s.type NOT IN ('cash', 'option') AND p.quantity > 0
+""", (symbol,)).fetchall()
+
+# Get current price
+price_row = conn.execute("""
+    SELECT ph.close_price, ph.date FROM price_history ph
+    JOIN securities s ON ph.security_id = s.id
+    WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
+""", (symbol,)).fetchone()
+current_price = price_row['close_price'] if price_row else 0
+price_date = price_row['date'] if price_row else '—'
+
+print(f"── Position ──")
+if not positions:
+    print(f"  Not currently held")
+else:
+    total_qty = sum(p['quantity'] or 0 for p in positions)
+    total_cost = sum(p['cost_basis'] or 0 for p in positions)
+    avg_cost = total_cost / total_qty if total_qty > 0 else 0
+    market_value = total_qty * current_price
+    unrealized_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0
+
+    print(f"  Shares: {total_qty:,.0f}  |  Avg Cost: ${avg_cost:.2f}  |  MTM: ${current_price:.2f} ({price_date})")
+    print(f"  Market Value: ${market_value:,.0f}  |  Unrealized: {unrealized_pct:+.1f}%")
+
+    if len(positions) > 1:
+        for p in positions:
+            qty = p['quantity'] or 0
+            cb = p['cost_basis'] or 0
+            ac = cb / qty if qty > 0 else 0
+            print(f"    {p['acct_name']}: {qty:,.0f} shares @ ${ac:.2f}")
+
+    # Intent info from first position with tier
+    intent = None
+    for p in positions:
+        if p['tier']:
+            intent = p
+            break
+    if intent:
+        print(f"  Tier: {intent['tier']}  |  Entry: {intent['entry_style'] or '—'}  |  Hold: {intent['target_hold_period'] or '—'}")
+        if intent['thesis']:
+            thesis = intent['thesis']
+            print(f"  Thesis: {thesis[:100]}{'...' if len(thesis) > 100 else ''}")
+        if intent['invalidation']:
+            inv = intent['invalidation']
+            print(f"  Invalidation: {inv[:100]}{'...' if len(inv) > 100 else ''}")
+print()
+
+# ── 3. Valuation Snapshot ──
+val = conn.execute("""
+    SELECT * FROM valuation_metrics WHERE symbol = ? ORDER BY date DESC LIMIT 1
+""", (symbol,)).fetchone()
+
+print(f"── Valuation ──")
+if not val:
+    print(f"  No valuation data. Run: pm-cli.sh valuation {symbol}")
+else:
+    t_pe = f"{val['trailing_pe']:.1f}x" if val['trailing_pe'] and val['trailing_pe'] > 0 else "N/A"
+    f_pe = f"{val['forward_pe']:.1f}x" if val['forward_pe'] and val['forward_pe'] > 0 else "N/A"
+    peg = f"{val['forward_peg']:.2f}" if val['forward_peg'] and val['forward_peg'] > 0 else "N/A"
+    eps_g = f"{val['eps_growth_pct']:+.0f}%" if val['eps_growth_pct'] else "N/A"
+    t_eps = f"${val['trailing_eps']:.2f}" if val['trailing_eps'] else "N/A"
+    f_eps = f"${val['forward_eps']:.2f}" if val['forward_eps'] else "N/A"
+    rating = val['peg_rating'] or '—'
+
+    print(f"  Trailing PE: {t_pe}  |  Forward PE: {f_pe}  |  PEG: {peg}")
+    print(f"  Trailing EPS: {t_eps}  |  Forward EPS: {f_eps}  |  EPS Growth: {eps_g}")
+
+    fair_low = val['fair_low']
+    fair_mid = val['fair_mid']
+    fair_high = val['fair_high']
+    if fair_low and fair_mid and fair_high:
+        print(f"  Fair Range: ${fair_low:.0f} — ${fair_mid:.0f} — ${fair_high:.0f}  |  Rating: {rating}")
+        if current_price > 0 and fair_mid > 0:
+            upside = (fair_mid - current_price) / current_price * 100
+            print(f"  MTM vs Fair Mid: {upside:+.1f}%")
+    print(f"  (as of {val['date']})")
+print()
+
+# ── 4. Scorecard Summary ──
+print(f"── Scorecard ──")
+if os.path.exists(thesis_path):
+    with open(thesis_path, 'r') as f:
+        content = f.read()
+
+    def parse_table(section_header, text):
+        pattern = r'## ' + re.escape(section_header) + r'\s*\n\s*\n?\s*\|[^\n]+\|\s*\n\s*\|[-| ]+\|\s*\n((?:\s*\|[^\n]+\|\s*\n?)*)'
+        match = re.search(pattern, text)
+        if not match:
+            return []
+        rows = []
+        for line in match.group(1).strip().split('\n'):
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            if len(cells) >= 6:
+                rows.append({
+                    'id': cells[0], 'criterion': cells[1], 'metric': cells[2],
+                    'threshold': cells[3], 'status': cells[4].lower().strip(),
+                    'last_checked': cells[5],
+                })
+        return rows
+
+    bulls = parse_table("Bull Criteria", content)
+    bears = parse_table("Bear Criteria", content)
+
+    if bulls or bears:
+        bull_confirmed = sum(1 for b in bulls if b['status'] == 'confirmed')
+        bull_pending = sum(1 for b in bulls if b['status'] == 'pending')
+        bull_challenged = sum(1 for b in bulls if b['status'] == 'challenged')
+        bear_triggered = sum(1 for b in bears if b['status'] == 'triggered')
+        bear_watching = sum(1 for b in bears if b['status'] == 'watching')
+        bear_clear = sum(1 for b in bears if b['status'] == 'not_triggered')
+
+        print(f"  Bull: {bull_confirmed} confirmed, {bull_pending} pending, {bull_challenged} challenged (of {len(bulls)})")
+        print(f"  Bear: {bear_triggered} triggered, {bear_watching} watching, {bear_clear} clear (of {len(bears)})")
+        print()
+
+        for b in bulls:
+            icon = {'confirmed': '+', 'pending': '?', 'challenged': 'X'}.get(b['status'], ' ')
+            print(f"  [{icon}] {b['id']}  {b['criterion']:<30s} {b['status']:<12s} {b['last_checked']}")
+        if bulls and bears:
+            print()
+        for b in bears:
+            icon = {'triggered': '!', 'watching': '*', 'not_triggered': '.'}.get(b['status'], ' ')
+            print(f"  [{icon}] {b['id']}  {b['criterion']:<30s} {b['status']:<12s} {b['last_checked']}")
+    else:
+        print(f"  UNSCORED — no Bull/Bear criteria tables in thesis.md")
+else:
+    print(f"  No thesis doc found at {thesis_path}")
+
+# Recent score changes
+changes = conn.execute("""
+    SELECT criteria_number, old_status, new_status, reason, changed_at
+    FROM thesis_score_changes WHERE security_id = ?
+    ORDER BY changed_at DESC LIMIT 5
+""", (sec_id,)).fetchall()
+if changes:
+    print()
+    print(f"  Recent score changes:")
+    for c in changes:
+        print(f"    {c['changed_at'][:10]}  #{c['criteria_number']}  {c['old_status']} -> {c['new_status']}  {c['reason'] or ''}")
+print()
+
+# ── 5. Recent Observations ──
+obs = conn.execute("""
+    SELECT observation_date, note, thesis_impact
+    FROM observations WHERE security_id = ?
+    ORDER BY observation_date DESC, created_at DESC LIMIT 10
+""", (sec_id,)).fetchall()
+
+print(f"── Observations (last 10) ──")
+if not obs:
+    print(f"  None recorded")
+else:
+    for o in obs:
+        impact_icon = {'supports': '+', 'challenges': '-', 'neutral': '~'}.get(o['thesis_impact'], ' ')
+        note = o['note']
+        print(f"  [{impact_icon}] {o['observation_date']}  {note[:90]}{'...' if len(note) > 90 else ''}")
+print()
+
+# ── 6. Recent Research Notes ──
+notes = conn.execute("""
+    SELECT section, content, source, created_at
+    FROM research_notes WHERE symbol = ?
+    ORDER BY created_at DESC LIMIT 15
+""", (symbol,)).fetchall()
+
+print(f"── Research Notes (recent) ──")
+if not notes:
+    print(f"  None recorded. Add with: pm-cli.sh note {symbol} <section> \"<content>\"")
+else:
+    sections = {}
+    for n in notes:
+        sec_name = n['section']
+        if sec_name not in sections:
+            sections[sec_name] = []
+        if len(sections[sec_name]) < 5:
+            sections[sec_name].append(n)
+
+    for sec_name, sec_notes in sections.items():
+        print(f"  [{sec_name}]")
+        for n in sec_notes:
+            src = f" ({n['source']})" if n['source'] else ""
+            content_text = n['content']
+            print(f"    {n['created_at'][:10]}  {content_text[:80]}{'...' if len(content_text) > 80 else ''}{src}")
+print()
+
+# ── 7. Recent News ──
+seven_days_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+news = conn.execute("""
+    SELECT title, source, published_at, url
+    FROM news WHERE symbol = ? AND published_at >= ?
+    ORDER BY published_at DESC LIMIT 10
+""", (symbol, seven_days_ago)).fetchall()
+
+print(f"── News (last 7 days) ──")
+if not news:
+    print(f"  No recent news. Run: pm-cli.sh news {symbol}")
+else:
+    for n in news:
+        src = f" ({n['source']})" if n['source'] else ""
+        print(f"  {n['published_at'][:10]}  {n['title'][:75]}{'...' if len(n['title']) > 75 else ''}{src}")
+print()
+
+# ── 8. Technical Levels (S/R) ──
+levels = conn.execute("""
+    SELECT level_type, price, strength FROM price_levels
+    WHERE symbol = ? ORDER BY price
+""", (symbol,)).fetchall()
+
+supports = [r for r in levels if r['level_type'] == 'support']
+resistances = [r for r in levels if r['level_type'] == 'resistance']
+
+print(f"── Technical Levels ──")
+print(f"  MTM: ${current_price:.2f}")
+if supports:
+    sup_str = ", ".join(
+        f"${r['price']:.2f}" + (f" (x{r['strength']})" if r['strength'] and r['strength'] > 1 else "")
+        for r in sorted(supports, key=lambda r: r['price'], reverse=True)
+    )
+    print(f"  Support: {sup_str}")
+else:
+    print(f"  Support: none computed. Run: pm-cli.sh levels-refresh {symbol}")
+if resistances:
+    res_str = ", ".join(
+        f"${r['price']:.2f}" + (f" (x{r['strength']})" if r['strength'] and r['strength'] > 1 else "")
+        for r in sorted(resistances, key=lambda r: r['price'])
+    )
+    print(f"  Resistance: {res_str}")
+else:
+    print(f"  Resistance: none computed")
+print()
+
+# ── 9. Suggested Commands ──
+print(f"── After Earnings ──")
+print(f"  pm-cli.sh earnings-review {symbol}          # Post-earnings review checklist")
+print(f"  pm-cli.sh scorecard-update {symbol} <#> <status> \"<reason>\"  # Update criteria")
+print(f"  pm-cli.sh observe {symbol} \"...\" [supports|challenges]       # Log observation")
+print(f"  pm-cli.sh valuation {symbol}                # Refresh valuation metrics")
+print(f"  pm-cli.sh note {symbol} earnings \"...\"      # Add earnings research note")
+print()
+
 conn.close()
 PYEOF
     ;;

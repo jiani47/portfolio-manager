@@ -593,8 +593,8 @@ PYEOF
     RESOLVED_ACCOUNT="$ACCT_NUM"
     ACCT_NAME=$(sqlite3 "$DB" "SELECT name FROM accounts WHERE account_number LIKE '%$ACCT_NUM' LIMIT 1")
 
-    # Pre-trade checklist
-    pre_trade_check "$SYMBOL" "$INSTRUCTION" "$QTY" "$RESOLVED_ACCOUNT" "$LIMIT_PRICE" || exit 1
+    # Pre-trade checklist (EMS basket orders bypass sorting-day block)
+    EMS_BASKET_ORDER=1 pre_trade_check "$SYMBOL" "$INSTRUCTION" "$QTY" "$RESOLVED_ACCOUNT" "$LIMIT_PRICE" || exit 1
 
     # Print order summary
     echo "==============================="

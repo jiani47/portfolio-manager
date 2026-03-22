@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
-import { useAnalytics, useTransactions, useAccounts, useSecurities, useTradeAnalytics, useTradeJournal, useValuationMetrics } from '../hooks/useApi';
-import type { PortfolioAnalytics, PositionBeta, Transaction, Security, TradeJournalEntry, ValuationMetric } from '../../shared/types';
+import { useAnalytics, useTransactions, useAccounts, useSecurities, useTradeAnalytics, useTradeJournal, useValuationMetrics, usePositions, usePositionIntents, usePriceLevels, useWatchlists, useTrendIndicators, useEarnings } from '../hooks/useApi';
+import type { PortfolioAnalytics, PositionBeta, Transaction, Security, TradeJournalEntry, ValuationMetric, Position, PositionIntent, PriceLevel, WatchlistItem, TrendIndicator, EarningsEvent } from '../../shared/types';
 import { format } from 'date-fns';
 import TransactionImportModal from '../components/TransactionImportModal';
 
@@ -289,9 +289,221 @@ function fmtNum(v: number | null, digits = 1): string {
   return v.toFixed(digits);
 }
 
-function ValuationSection({ valuations }: { valuations: Map<string, ValuationMetric> }) {
+interface ConfluenceData {
+  positions: Position[];
+  securities: Security[];
+  intents: Map<string, PositionIntent>;
+  priceLevels: PriceLevel[];
+  watchlistItems: WatchlistItem[];
+  trendIndicators: TrendIndicator[];
+  punishedSectors: Set<string>;
+  earningsEvents: EarningsEvent[];
+}
+
+const SECTOR_ALIASES: Record<string, string> = {
+  'tech': 'Technology', 'technology': 'Technology',
+  'comms': 'Communication Services', 'comm services': 'Communication Services',
+  'communication': 'Communication Services', 'communication services': 'Communication Services',
+  'consumer cyclical': 'Consumer Cyclical', 'cyclical': 'Consumer Cyclical',
+  'consumer defensive': 'Consumer Defensive', 'defensive': 'Consumer Defensive',
+  'defensives': 'Consumer Defensive',
+  'financial': 'Financial Services', 'financial services': 'Financial Services',
+  'financials': 'Financial Services',
+  'healthcare': 'Healthcare', 'health': 'Healthcare',
+  'industrials': 'Industrials', 'industrial': 'Industrials',
+  'energy': 'Energy', 'oil': 'Energy',
+  'utilities': 'Utilities', 'utility': 'Utilities',
+  'basic materials': 'Basic Materials', 'materials': 'Basic Materials',
+  'real estate': 'Real Estate',
+};
+
+function parsePunishedSectors(regimePunishing: string | null): Set<string> {
+  if (!regimePunishing) return new Set();
+  const text = regimePunishing.toLowerCase();
+  const sectors = new Set<string>();
+  for (const [alias, canonical] of Object.entries(SECTOR_ALIASES)) {
+    if (text.includes(alias)) sectors.add(canonical);
+  }
+  return sectors;
+}
+
+function getSymbolSector(symbol: string, data: ConfluenceData): string | null {
+  const sec = data.securities.find(s => s.symbol === symbol);
+  return sec?.sector ?? null;
+}
+
+function classifyCandidate(
+  symbol: string,
+  v: ValuationMetric,
+  data: ConfluenceData,
+): { type: 'investing' | 'trading'; reason: string } {
+  const secMap = new Map(data.securities.map(s => [s.id, s]));
+  const pos = data.positions.find(p => secMap.get(p.securityId)?.symbol === symbol);
+  if (pos) {
+    const intent = data.intents.get(pos.id);
+    const tier = intent?.tier || 'unknown';
+    const targetPct = intent?.targetAllocationPct;
+    const curPct = pos.marketValue && data.positions.reduce((sum, p) => sum + (p.marketValue || 0), 0) > 0
+      ? (pos.marketValue / data.positions.reduce((sum, p) => sum + (p.marketValue || 0), 0)) * 100
+      : null;
+    const underAlloc = targetPct && curPct && curPct < targetPct;
+    return {
+      type: 'investing',
+      reason: `${tier} position${underAlloc ? `, under-allocated (${curPct.toFixed(1)}% vs ${targetPct.toFixed(1)}% target)` : ''}`,
+    };
+  }
+  const wlItem = data.watchlistItems.find(w => w.symbol === symbol);
+  if (wlItem && v.forwardPeg !== null && v.forwardPeg < 1.5) {
+    return { type: 'investing', reason: `On watchlist — ${wlItem.thesisSnippet || 'no thesis'}` };
+  }
+  return { type: 'trading', reason: 'Not held, potential trade setup' };
+}
+
+function buildWhyNow(
+  symbol: string,
+  v: ValuationMetric,
+  data: ConfluenceData,
+): string[] {
+  const bullets: string[] = [];
+  // Valuation
+  if (v.pegRating && v.forwardPeg !== null) {
+    const interp: Record<string, string> = {
+      CHEAP: 'undervalued relative to growth',
+      FAIR: 'paying roughly in line with growth',
+      RICH: 'premium to growth rate',
+      PRICEY: 'significant premium to growth',
+    };
+    bullets.push(`PEG ${v.forwardPeg.toFixed(2)} (${v.pegRating}) — ${interp[v.pegRating] || ''}`);
+  }
+  // S/R proximity
+  const supports = data.priceLevels
+    .filter(l => l.symbol === symbol && l.levelType === 'support')
+    .sort((a, b) => b.price - a.price);
+  if (supports.length > 0) {
+    const top = supports[0];
+    bullets.push(`Near support $${top.price.toFixed(0)} (strength ${top.strength}/10)`);
+  }
+  // EPS growth
+  if (v.epsGrowthPct !== null) {
+    const trend = v.epsGrowthPct > 30 ? 'strong' : v.epsGrowthPct > 15 ? 'moderate' : 'steady';
+    bullets.push(`EPS growth +${v.epsGrowthPct.toFixed(0)}% — ${trend}`);
+  }
+  // Forward PE
+  if (v.forwardPe !== null) {
+    bullets.push(`Forward PE ${v.forwardPe.toFixed(1)}x`);
+  }
+  // Allocation gap
+  const secMap = new Map(data.securities.map(s => [s.id, s]));
+  const pos = data.positions.find(p => secMap.get(p.securityId)?.symbol === symbol);
+  if (pos) {
+    const intent = data.intents.get(pos.id);
+    const totalMV = data.positions.reduce((sum, p) => sum + (p.marketValue || 0), 0);
+    if (intent?.targetAllocationPct && pos.marketValue && totalMV > 0) {
+      const curPct = (pos.marketValue / totalMV) * 100;
+      if (curPct < intent.targetAllocationPct) {
+        bullets.push(`Under-allocated: ${curPct.toFixed(1)}% vs ${intent.targetAllocationPct.toFixed(1)}% target`);
+      }
+    }
+  }
+  // Watchlist
+  const wlItem = data.watchlistItems.find(w => w.symbol === symbol);
+  if (wlItem && wlItem.thesisSnippet) {
+    bullets.push(`On watchlist — ${wlItem.thesisSnippet}`);
+  }
+  return bullets;
+}
+
+function buildRisks(
+  symbol: string,
+  v: ValuationMetric,
+  data: ConfluenceData,
+): string[] {
+  const bullets: string[] = [];
+  // Support break risk
+  const supports = data.priceLevels
+    .filter(l => l.symbol === symbol && l.levelType === 'support')
+    .sort((a, b) => b.price - a.price);
+  const secMap = new Map(data.securities.map(s => [s.id, s]));
+  const pos = data.positions.find(p => secMap.get(p.securityId)?.symbol === symbol);
+  const currentPrice = pos?.currentPrice || data.watchlistItems.find(w => w.symbol === symbol)?.lastPrice;
+  if (supports.length >= 2 && currentPrice) {
+    const s2 = supports[1];
+    const downside = ((currentPrice - s2.price) / currentPrice) * 100;
+    bullets.push(`Support break below $${s2.price.toFixed(0)} = ${downside.toFixed(1)}% further downside`);
+  }
+  // Valuation risk if RICH/PRICEY
+  if ((v.pegRating === 'RICH' || v.pegRating === 'PRICEY') && v.forwardPe !== null && v.epsGrowthPct !== null) {
+    bullets.push(`Forward PE ${v.forwardPe.toFixed(1)}x — priced for ${v.epsGrowthPct.toFixed(0)}% growth`);
+  }
+  // Fair value risk
+  if (v.fairLow !== null && currentPrice && currentPrice < v.fairLow) {
+    bullets.push(`Below fair value range (low: $${v.fairLow.toFixed(0)})`);
+  }
+  if (v.fairHigh !== null && currentPrice && currentPrice > v.fairHigh) {
+    bullets.push(`Above fair value ceiling ($${v.fairHigh.toFixed(0)})`);
+  }
+  return bullets;
+}
+
+function buildCopyContext(
+  symbol: string,
+  v: ValuationMetric,
+  signals: string[],
+  candidate: { type: string; reason: string },
+  data: ConfluenceData,
+): string {
+  const secMap = new Map(data.securities.map(s => [s.id, s]));
+  const pos = data.positions.find(p => secMap.get(p.securityId)?.symbol === symbol);
+  const currentPrice = pos?.currentPrice || data.watchlistItems.find(w => w.symbol === symbol)?.lastPrice;
+  const supports = data.priceLevels
+    .filter(l => l.symbol === symbol && l.levelType === 'support')
+    .sort((a, b) => b.price - a.price)
+    .slice(0, 2);
+  const resistances = data.priceLevels
+    .filter(l => l.symbol === symbol && l.levelType === 'resistance')
+    .sort((a, b) => a.price - b.price)
+    .slice(0, 2);
+
+  const totalMV = data.positions.reduce((sum, p) => sum + (p.marketValue || 0), 0);
+  const intent = pos ? data.intents.get(pos.id) : undefined;
+  const curPct = pos?.marketValue && totalMV > 0 ? ((pos.marketValue / totalMV) * 100).toFixed(1) : null;
+
+  let text = `I'm looking at ${symbol} as a potential entry. Here's the confluence data:\n\n`;
+  text += `Symbol: ${symbol}`;
+  if (currentPrice) text += ` | Price: $${currentPrice.toFixed(2)}`;
+  if (v.forwardPeg !== null) text += ` | PEG: ${v.forwardPeg.toFixed(2)} (${v.pegRating || '?'})`;
+  if (v.forwardPe !== null) text += ` | Fwd PE: ${v.forwardPe.toFixed(1)}x`;
+  text += '\n';
+  if (v.epsGrowthPct !== null) text += `EPS Growth: +${v.epsGrowthPct.toFixed(0)}%`;
+  text += '\n';
+  text += `Signals: ${signals.join(', ')}\n`;
+  if (supports.length > 0 || resistances.length > 0) {
+    text += 'S/R:';
+    if (supports.length > 0) text += ' S ' + supports.map(s => `$${s.price.toFixed(2)} (${s.strength}/10)`).join(', S ');
+    if (resistances.length > 0) text += ' | R ' + resistances.map(r => `$${r.price.toFixed(2)} (${r.strength}/10)`).join(', R ');
+    text += '\n';
+  }
+  if (v.fairLow !== null && v.fairMid !== null && v.fairHigh !== null) {
+    text += `Fair Range: $${v.fairLow.toFixed(0)} – $${v.fairMid.toFixed(0)} – $${v.fairHigh.toFixed(0)}\n`;
+  }
+  if (pos) {
+    text += `Position: ${pos.quantity} shares`;
+    if (curPct) text += ` (${curPct}%)`;
+    if (intent?.targetAllocationPct) text += `, target ${intent.targetAllocationPct.toFixed(1)}%`;
+    text += '\n';
+  }
+  text += `Type: ${candidate.type === 'investing' ? 'Investing' : 'Trading'} — ${candidate.reason}\n`;
+  text += '\nWhat\'s your read? Should I enter here or wait for a better setup?';
+  return text;
+}
+
+function ValuationSection({ valuations, confluenceData }: { valuations: Map<string, ValuationMetric>; confluenceData: ConfluenceData }) {
   const [sortKey, setSortKey] = useState<SortKey>('symbol');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
+  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
+  const [copiedSymbol, setCopiedSymbol] = useState<string | null>(null);
+  const [selectedPeerSymbol, setSelectedPeerSymbol] = useState<string | null>(null);
+  const [expandedEarnings, setExpandedEarnings] = useState<string | null>(null);
 
   const items = useMemo(() => Array.from(valuations.values()), [valuations]);
 
@@ -356,6 +568,53 @@ function ValuationSection({ valuations }: { valuations: Map<string, ValuationMet
 
   const sortArrow = (key: SortKey) => sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
 
+  // Peer comparison data
+  const peerData = useMemo(() => {
+    if (!selectedPeerSymbol) return null;
+    const targetSec = confluenceData.securities.find(s => s.symbol === selectedPeerSymbol);
+    const sector = targetSec?.sector;
+    if (!sector) return null;
+
+    const peers = items
+      .filter(v => {
+        const sec = confluenceData.securities.find(s => s.symbol === v.symbol);
+        return sec?.sector === sector;
+      })
+      .map(v => {
+        const sec = confluenceData.securities.find(s => s.symbol === v.symbol);
+        const secMap = new Map(confluenceData.securities.map(s => [s.id, s]));
+        const pos = confluenceData.positions.find(p => secMap.get(p.securityId)?.symbol === v.symbol);
+        const totalQty = confluenceData.positions
+          .filter(p => secMap.get(p.securityId)?.symbol === v.symbol)
+          .reduce((sum, p) => sum + p.quantity, 0);
+        const sortPeg = (v.forwardPeg && v.forwardPeg > 0) ? v.forwardPeg : (v.peg && v.peg > 0) ? v.peg : 999;
+        return { ...v, industry: sec?.industry, qty: totalQty, isTarget: v.symbol === selectedPeerSymbol, sortPeg, currentPrice: pos?.currentPrice };
+      })
+      .sort((a, b) => a.sortPeg - b.sortPeg);
+
+    return { sector, industry: targetSec?.industry || '—', peers };
+  }, [selectedPeerSymbol, items, confluenceData]);
+
+  // Upcoming earnings (next 30 days)
+  const upcomingEarnings = useMemo(() => {
+    const today = new Date();
+    const thirtyDays = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const secMap = new Map(confluenceData.securities.map(s => [s.id, s]));
+    const heldSymbols = new Set(
+      confluenceData.positions
+        .filter(p => p.quantity > 0)
+        .map(p => secMap.get(p.securityId)?.symbol)
+        .filter(Boolean)
+    );
+
+    return confluenceData.earningsEvents
+      .filter(e => {
+        const d = new Date(e.date);
+        return d >= today && d <= thirtyDays && heldSymbols.has(e.symbol);
+      })
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }, [confluenceData]);
+
   const thClass = 'text-right py-1.5 font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700';
   const thLeftClass = 'text-left py-1.5 font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700';
 
@@ -387,8 +646,11 @@ function ValuationSection({ valuations }: { valuations: Map<string, ValuationMet
             </thead>
             <tbody>
               {sorted.map(v => (
-                <tr key={v.symbol} className="border-b border-gray-100 hover:bg-gray-50">
-                  <td className="py-1.5 font-medium text-gray-900">{v.symbol}</td>
+                <tr key={v.symbol} className={`border-b border-gray-100 hover:bg-gray-50 ${selectedPeerSymbol === v.symbol ? 'bg-blue-50' : ''}`}>
+                  <td
+                    className="py-1.5 font-medium text-blue-700 cursor-pointer hover:underline"
+                    onClick={() => setSelectedPeerSymbol(selectedPeerSymbol === v.symbol ? null : v.symbol)}
+                  >{v.symbol}</td>
                   <td className="py-1.5 text-right text-gray-700">{fmtNum(v.trailingPe)}</td>
                   <td className="py-1.5 text-right text-gray-700">{fmtNum(v.forwardPe)}</td>
                   <td className="py-1.5 text-right text-gray-700">{fmtNum(v.peg, 2)}</td>
@@ -402,9 +664,163 @@ function ValuationSection({ valuations }: { valuations: Map<string, ValuationMet
             </tbody>
           </table>
         </div>
+        <p className="text-xs text-gray-400 mt-2">Click a symbol to see peer comparison.</p>
       </div>
 
-      {/* Subsection B: Watchlist Screening */}
+      {/* Peer Comparison Panel */}
+      {peerData && peerData.peers.length >= 2 && (
+        <div className="card border-blue-200">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900">
+                Peer Comparison: {selectedPeerSymbol}
+              </h3>
+              <p className="text-xs text-gray-500">Sector: {peerData.sector} | Industry: {peerData.industry}</p>
+            </div>
+            <button
+              className="text-gray-400 hover:text-gray-600 text-sm"
+              onClick={() => setSelectedPeerSymbol(null)}
+            >✕ Close</button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200">
+                  <th className="text-left py-1.5 font-medium text-gray-500">Symbol</th>
+                  <th className="text-right py-1.5 font-medium text-gray-500">Price</th>
+                  <th className="text-right py-1.5 font-medium text-gray-500">T12 PE</th>
+                  <th className="text-right py-1.5 font-medium text-gray-500">Fwd PE</th>
+                  <th className="text-right py-1.5 font-medium text-gray-500">PEG</th>
+                  <th className="text-right py-1.5 font-medium text-gray-500">Growth</th>
+                  <th className="text-center py-1.5 font-medium text-gray-500">Rating</th>
+                  <th className="text-right py-1.5 font-medium text-gray-500">Fair Range</th>
+                  <th className="text-right py-1.5 font-medium text-gray-500">Held</th>
+                </tr>
+              </thead>
+              <tbody>
+                {peerData.peers.map(p => (
+                  <tr key={p.symbol} className={`border-b border-gray-100 ${p.isTarget ? 'bg-blue-50 font-medium' : 'hover:bg-gray-50'}`}>
+                    <td className="py-1.5 text-gray-900">
+                      {p.symbol}
+                      {p.isTarget && <span className="text-blue-500 ml-1 text-xs">← you</span>}
+                    </td>
+                    <td className="py-1.5 text-right text-gray-700">{p.currentPrice ? `$${p.currentPrice.toFixed(0)}` : '—'}</td>
+                    <td className="py-1.5 text-right text-gray-700">{fmtNum(p.trailingPe)}</td>
+                    <td className="py-1.5 text-right text-gray-700">{fmtNum(p.forwardPe)}</td>
+                    <td className="py-1.5 text-right text-gray-700">{p.forwardPeg && p.forwardPeg > 0 ? p.forwardPeg.toFixed(2) : fmtNum(p.peg, 2)}</td>
+                    <td className={`py-1.5 text-right font-medium ${p.epsGrowthPct !== null && p.epsGrowthPct >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {p.epsGrowthPct !== null ? `${p.epsGrowthPct >= 0 ? '+' : ''}${p.epsGrowthPct.toFixed(0)}%` : '—'}
+                    </td>
+                    <td className="py-1.5 text-center">{pegRatingBadge(p.pegRating)}</td>
+                    <td className="py-1.5 text-right text-gray-600 text-xs">
+                      {p.fairLow !== null && p.fairHigh !== null ? `$${p.fairLow.toFixed(0)}–$${p.fairHigh.toFixed(0)}` : '—'}
+                    </td>
+                    <td className="py-1.5 text-right text-gray-700">{p.qty > 0 ? `${p.qty}sh` : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {(() => {
+            const targetIdx = peerData.peers.findIndex(p => p.isTarget);
+            const cheaper = peerData.peers.slice(0, targetIdx).map(p => p.symbol);
+            if (targetIdx === 0) return <p className="text-xs text-green-700 mt-2">Cheapest in peer group on PEG basis.</p>;
+            if (cheaper.length <= 3) return <p className="text-xs text-gray-600 mt-2">Takeaway: {cheaper.join(', ')} {cheaper.length === 1 ? 'is' : 'are'} cheaper on growth-adjusted basis.</p>;
+            return <p className="text-xs text-gray-600 mt-2">Takeaway: {cheaper.slice(0, 3).join(', ')} (+{cheaper.length - 3} more) are cheaper on growth-adjusted basis.</p>;
+          })()}
+        </div>
+      )}
+
+      {/* Subsection B: Upcoming Earnings */}
+      {upcomingEarnings.length > 0 && (
+        <div className="card">
+          <h3 className="text-lg font-semibold text-gray-900 mb-3">Upcoming Earnings</h3>
+          <p className="text-xs text-gray-500 mb-3">Portfolio positions with earnings in the next 30 days. Click to expand.</p>
+          <div className="space-y-2">
+            {upcomingEarnings.map(e => {
+              const isExpEarnings = expandedEarnings === e.symbol;
+              const v = valuations.get(e.symbol);
+              const secMap = new Map(confluenceData.securities.map(s => [s.id, s]));
+              const pos = confluenceData.positions.find(p => secMap.get(p.securityId)?.symbol === e.symbol);
+              const intent = pos ? confluenceData.intents.get(pos.id) : undefined;
+              const daysUntil = Math.ceil((new Date(e.date).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+              const supports = confluenceData.priceLevels
+                .filter(l => l.symbol === e.symbol && l.levelType === 'support')
+                .sort((a, b) => b.price - a.price)
+                .slice(0, 2);
+              const resistances = confluenceData.priceLevels
+                .filter(l => l.symbol === e.symbol && l.levelType === 'resistance')
+                .sort((a, b) => a.price - b.price)
+                .slice(0, 2);
+
+              return (
+                <div
+                  key={e.symbol}
+                  className={`border rounded-lg p-3 cursor-pointer transition-colors ${isExpEarnings ? 'border-purple-300 bg-purple-50/30' : 'border-gray-200 hover:border-purple-200'}`}
+                  onClick={() => setExpandedEarnings(isExpEarnings ? null : e.symbol)}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <span className="font-semibold text-gray-900">{e.symbol}</span>
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-purple-100 text-purple-700">
+                        {e.date} ({daysUntil}d)
+                      </span>
+                      {e.time && <span className="text-xs text-gray-400">{e.time === 'bmo' ? 'Pre-market' : e.time === 'amc' ? 'After-close' : ''}</span>}
+                      {v && pegRatingBadge(v.pegRating)}
+                      {intent?.tier && <span className="text-xs text-gray-500">{intent.tier}</span>}
+                    </div>
+                    <span className="text-gray-400 text-sm">{isExpEarnings ? '▲' : '▼'}</span>
+                  </div>
+
+                  {isExpEarnings && (
+                    <div className="mt-3 pt-3 border-t border-purple-200 space-y-2 text-sm" onClick={ev => ev.stopPropagation()}>
+                      {/* Position */}
+                      {pos && (
+                        <div>
+                          <span className="text-xs font-semibold text-gray-500 uppercase">Position</span>
+                          <div className="text-gray-700">
+                            {pos.quantity} shares | MV: ${(pos.marketValue || 0).toLocaleString()} | Cost: ${pos.costBasis.toLocaleString()}
+                            {intent?.thesis && <div className="text-xs text-gray-500 mt-0.5">Thesis: {intent.thesis}</div>}
+                          </div>
+                        </div>
+                      )}
+                      {/* Valuation */}
+                      {v && (
+                        <div>
+                          <span className="text-xs font-semibold text-gray-500 uppercase">Valuation</span>
+                          <div className="flex flex-wrap gap-x-4 text-gray-700">
+                            {v.forwardPe !== null && <span>Fwd PE: <strong>{v.forwardPe.toFixed(1)}x</strong></span>}
+                            {v.forwardPeg !== null && <span>PEG: <strong>{v.forwardPeg.toFixed(2)}</strong></span>}
+                            {v.epsGrowthPct !== null && <span>EPS Growth: <strong className={v.epsGrowthPct >= 0 ? 'text-green-600' : 'text-red-600'}>{v.epsGrowthPct >= 0 ? '+' : ''}{v.epsGrowthPct.toFixed(0)}%</strong></span>}
+                            {e.epsEstimated && <span>Est EPS: <strong>${e.epsEstimated.toFixed(2)}</strong></span>}
+                          </div>
+                          {v.fairLow !== null && v.fairMid !== null && v.fairHigh !== null && (
+                            <div className="text-xs text-gray-500 mt-0.5">Fair: ${v.fairLow.toFixed(0)} – ${v.fairMid.toFixed(0)} – ${v.fairHigh.toFixed(0)}</div>
+                          )}
+                        </div>
+                      )}
+                      {/* S/R */}
+                      {(supports.length > 0 || resistances.length > 0) && (
+                        <div>
+                          <span className="text-xs font-semibold text-gray-500 uppercase">S/R Levels</span>
+                          <div className="text-gray-700">
+                            {supports.length > 0 && <span>S: {supports.map(s => `$${s.price.toFixed(0)} (${s.strength}/10)`).join('  ')}</span>}
+                            {supports.length > 0 && resistances.length > 0 && <span className="mx-2">|</span>}
+                            {resistances.length > 0 && <span>R: {resistances.map(r => `$${r.price.toFixed(0)} (${r.strength}/10)`).join('  ')}</span>}
+                          </div>
+                        </div>
+                      )}
+                      <p className="text-xs text-gray-400 mt-1">Full prep: <code className="bg-gray-100 px-1 rounded">pm-cli.sh earnings-prep {e.symbol}</code></p>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Subsection C: Watchlist Screening */}
       <div className="card">
         <h3 className="text-lg font-semibold text-gray-900 mb-3">Screening Scores</h3>
         <p className="text-xs text-gray-500 mb-3">Composite: CHEAP=3, FAIR=2, RICH=1, PRICEY=0 + Growth &gt;50%=+2, &gt;30%=+1</p>
@@ -439,26 +855,232 @@ function ValuationSection({ valuations }: { valuations: Map<string, ValuationMet
       {/* Subsection C: Entry Confluence */}
       <div className="card">
         <h3 className="text-lg font-semibold text-gray-900 mb-3">Entry Confluence</h3>
-        <p className="text-xs text-gray-500 mb-3">Symbols with 2+ aligned signals: valuation (CHEAP/FAIR + Fwd PEG &lt; 1.2) and EPS growth &gt; 20%</p>
+        <p className="text-xs text-gray-500 mb-3">Symbols with 2+ aligned signals: valuation (CHEAP/FAIR + Fwd PEG &lt; 1.2) and EPS growth &gt; 20%. Click to expand.</p>
         {confluent.length === 0 ? (
           <p className="text-sm text-gray-500 text-center py-4">No symbols currently meet multi-signal entry criteria.</p>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {confluent.map(v => (
-              <div key={v.symbol} className="border border-gray-200 rounded-lg p-3 hover:border-blue-300 transition-colors">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-semibold text-gray-900">{v.symbol}</span>
-                  {pegRatingBadge(v.pegRating)}
+            {confluent.map(v => {
+              const isExpanded = expandedSymbol === v.symbol;
+              const candidate = classifyCandidate(v.symbol, v, confluenceData);
+              const whyNow = isExpanded ? buildWhyNow(v.symbol, v, confluenceData) : [];
+              const risks = isExpanded ? buildRisks(v.symbol, v, confluenceData) : [];
+              const secMap = new Map(confluenceData.securities.map(s => [s.id, s]));
+              const pos = confluenceData.positions.find(p => secMap.get(p.securityId)?.symbol === v.symbol);
+              const currentPrice = pos?.currentPrice || confluenceData.watchlistItems.find(w => w.symbol === v.symbol)?.lastPrice;
+              const supports = confluenceData.priceLevels
+                .filter(l => l.symbol === v.symbol && l.levelType === 'support')
+                .sort((a, b) => b.price - a.price)
+                .slice(0, 2);
+              const resistances = confluenceData.priceLevels
+                .filter(l => l.symbol === v.symbol && l.levelType === 'resistance')
+                .sort((a, b) => a.price - b.price)
+                .slice(0, 2);
+
+              // Trend + R:R
+              const trend = confluenceData.trendIndicators.find(t => t.symbol === v.symbol);
+              const s1 = supports[0];
+              const r1 = resistances[0];
+              const rr = s1 && r1 && currentPrice
+                ? (r1.price - currentPrice) / (currentPrice - s1.price)
+                : null;
+              const isTradeable = trend && (trend.trend === 'UPTREND' || trend.trend === 'PULLBACK');
+              const symbolSector = getSymbolSector(v.symbol, confluenceData);
+              const isRegimeBlocked = symbolSector ? confluenceData.punishedSectors.has(symbolSector) : false;
+              const rrFavorable = rr !== null && rr >= 2.0;
+
+              const trendColor: Record<string, string> = {
+                UPTREND: 'bg-green-100 text-green-800',
+                PULLBACK: 'bg-yellow-100 text-yellow-800',
+                DOWNTREND: 'bg-red-100 text-red-800',
+                BREAKDOWN: 'bg-red-100 text-red-800',
+              };
+
+              return (
+                <div
+                  key={v.symbol}
+                  className={`border rounded-lg p-3 transition-colors cursor-pointer ${
+                    isExpanded ? 'border-blue-400 bg-blue-50/30 col-span-1 sm:col-span-2 lg:col-span-3'
+                      : isRegimeBlocked ? 'border-gray-200 bg-gray-50/50 opacity-60 hover:opacity-80'
+                      : isTradeable && rrFavorable ? 'border-green-300 bg-green-50/20 hover:border-green-400'
+                      : isTradeable ? 'border-yellow-200 hover:border-yellow-300'
+                      : 'border-gray-200 hover:border-blue-300'
+                  }`}
+                  onClick={() => setExpandedSymbol(isExpanded ? null : v.symbol)}
+                >
+                  {/* Header row */}
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-gray-900">{v.symbol}</span>
+                      {pegRatingBadge(v.pegRating)}
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${
+                        candidate.type === 'investing' ? 'bg-indigo-100 text-indigo-700' : 'bg-orange-100 text-orange-700'
+                      }`}>
+                        {candidate.type === 'investing' ? 'Investing' : 'Trading'}
+                      </span>
+                      {trend && (
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${trendColor[trend.trend] || 'bg-gray-100 text-gray-700'}`}>
+                          {trend.trend}
+                        </span>
+                      )}
+                      {rr !== null && (
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${rrFavorable ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
+                          R:R {rr.toFixed(1)}x
+                        </span>
+                      )}
+                      {isRegimeBlocked && (
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-red-50 text-red-600">
+                          REGIME
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-gray-400 text-sm">{isExpanded ? '▲' : '▼'}</span>
+                  </div>
+
+                  {/* Signal checkmarks (always visible) */}
+                  <ul className="space-y-0.5">
+                    {v.signals.map((s, i) => (
+                      <li key={i} className="text-xs text-gray-600 flex items-center gap-1">
+                        <span className="text-green-500">&#10003;</span> {s}
+                      </li>
+                    ))}
+                  </ul>
+
+                  {/* Expanded detail */}
+                  {isExpanded && (
+                    <div className="mt-3 pt-3 border-t border-blue-200 space-y-3" onClick={e => e.stopPropagation()}>
+                      {/* Type classification */}
+                      <div>
+                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</span>
+                        <p className="text-sm text-gray-800 mt-0.5">
+                          {candidate.type === 'investing' ? 'Investing' : 'Trading'} — {candidate.reason}
+                        </p>
+                      </div>
+
+                      {/* Why Now */}
+                      {whyNow.length > 0 && (
+                        <div>
+                          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Why Now</span>
+                          <ul className="mt-1 space-y-0.5">
+                            {whyNow.map((b, i) => (
+                              <li key={i} className="text-sm text-gray-700 flex items-start gap-1.5">
+                                <span className="text-blue-400 mt-0.5 shrink-0">•</span>
+                                <span>{b}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Risk to Watch */}
+                      {risks.length > 0 && (
+                        <div>
+                          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Risk to Watch</span>
+                          <ul className="mt-1 space-y-0.5">
+                            {risks.map((b, i) => (
+                              <li key={i} className="text-sm text-gray-700 flex items-start gap-1.5">
+                                <span className="text-amber-500 mt-0.5 shrink-0">•</span>
+                                <span>{b}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Key Data */}
+                      <div>
+                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Key Data</span>
+                        <div className="mt-1 text-sm text-gray-700 space-y-0.5">
+                          <div className="flex flex-wrap gap-x-4">
+                            {currentPrice && <span>Price: <strong>${currentPrice.toFixed(2)}</strong></span>}
+                            {v.forwardPe !== null && <span>Fwd PE: <strong>{v.forwardPe.toFixed(1)}x</strong></span>}
+                            {v.forwardPeg !== null && <span>PEG: <strong>{v.forwardPeg.toFixed(2)}</strong></span>}
+                            {v.epsGrowthPct !== null && <span>EPS Growth: <strong className="text-green-600">+{v.epsGrowthPct.toFixed(0)}%</strong></span>}
+                          </div>
+                          {supports.length > 0 && (
+                            <div>
+                              S: {supports.map((s, i) => (
+                                <span key={i}>
+                                  {i > 0 && '  '}
+                                  <span className="text-green-700">${s.price.toFixed(0)}</span>
+                                  <span className="text-gray-400"> ({s.strength}/10)</span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {resistances.length > 0 && (
+                            <div>
+                              R: {resistances.map((r, i) => (
+                                <span key={i}>
+                                  {i > 0 && '  '}
+                                  <span className="text-red-600">${r.price.toFixed(0)}</span>
+                                  <span className="text-gray-400"> ({r.strength}/10)</span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {v.fairLow !== null && v.fairMid !== null && v.fairHigh !== null && (
+                            <div>Fair Range: ${v.fairLow.toFixed(0)} – <strong>${v.fairMid.toFixed(0)}</strong> – ${v.fairHigh.toFixed(0)}</div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Trend + Trade Assessment */}
+                      {trend && (
+                        <div>
+                          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Trade Assessment</span>
+                          <div className="mt-1 text-sm text-gray-700 space-y-0.5">
+                            <div className="flex flex-wrap gap-x-4">
+                              <span>Trend: <strong className={isTradeable ? 'text-green-700' : 'text-red-600'}>{trend.trend}</strong></span>
+                              <span>RSI: <strong className={trend.rsi <= 30 ? 'text-red-600' : trend.rsi >= 70 ? 'text-amber-600' : ''}>{trend.rsi.toFixed(0)}</strong></span>
+                              <span>DMAs: <strong>{trend.aboveDmas}/3</strong> above</span>
+                              {rr !== null && <span>R:R: <strong className={rrFavorable ? 'text-green-700' : 'text-amber-600'}>{rr.toFixed(1)}x</strong></span>}
+                            </div>
+                            <div className="flex flex-wrap gap-x-4 text-xs text-gray-500">
+                              <span>20 DMA: ${trend.sma20.toFixed(0)}</span>
+                              <span>50 DMA: ${trend.sma50.toFixed(0)}</span>
+                              {trend.sma200 > 0 && <span>200 DMA: ${trend.sma200.toFixed(0)}</span>}
+                            </div>
+                            <div className={`mt-1 text-xs font-medium px-2 py-1 rounded inline-block ${
+                              isTradeable && rrFavorable ? 'bg-green-100 text-green-800' :
+                              isTradeable ? 'bg-yellow-100 text-yellow-800' :
+                              'bg-red-50 text-red-700'
+                            }`}>
+                              {isTradeable && rrFavorable
+                                ? `TRADEABLE — R:R ${rr!.toFixed(1)}x at current price`
+                                : isTradeable && rr !== null
+                                ? `TREND OK — R:R ${rr.toFixed(1)}x insufficient, wait for pullback${trend.sma50 ? ` to 50 DMA $${trend.sma50.toFixed(0)}` : ''}`
+                                : isTradeable
+                                ? 'TREND OK — no S/R data for R:R'
+                                : `NOT TRADEABLE — wait for ${trend.trend === 'DOWNTREND' ? `20 DMA reclaim $${trend.sma20.toFixed(0)}` : `200 DMA reclaim $${trend.sma200.toFixed(0)}`}`
+                              }
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Copy Context button */}
+                      <button
+                        className={`mt-1 px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                          copiedSymbol === v.symbol
+                            ? 'bg-green-100 text-green-700'
+                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                        }`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const text = buildCopyContext(v.symbol, v, v.signals, candidate, confluenceData);
+                          navigator.clipboard.writeText(text);
+                          setCopiedSymbol(v.symbol);
+                          setTimeout(() => setCopiedSymbol(null), 2000);
+                        }}
+                      >
+                        {copiedSymbol === v.symbol ? 'Copied!' : 'Copy Context'}
+                      </button>
+                    </div>
+                  )}
                 </div>
-                <ul className="space-y-0.5">
-                  {v.signals.map((s, i) => (
-                    <li key={i} className="text-xs text-gray-600 flex items-center gap-1">
-                      <span className="text-green-500">&#10003;</span> {s}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -498,6 +1120,15 @@ export default function Analytics() {
   const { entries: journalEntries, loading: journalLoading, fetchJournal } = useTradeJournal();
   const [journalSymbolFilter, setJournalSymbolFilter] = useState('');
 
+  // Confluence data hooks
+  const { positions: cfPositions, fetchPositions: fetchCfPositions } = usePositions();
+  const { intents: cfIntents, fetchIntents: fetchCfIntents } = usePositionIntents();
+  const { levels: cfLevels, fetchLevels: fetchCfLevels } = usePriceLevels();
+  const { items: cfWatchlistItems, fetchItems: fetchCfWatchlistItems } = useWatchlists();
+  const { indicators: cfTrend, fetchIndicators: fetchCfTrend } = useTrendIndicators();
+  const { earnings: cfEarnings, fetchPortfolioEarnings: fetchCfEarnings } = useEarnings();
+  const [cfPunishedSectors, setCfPunishedSectors] = useState<Set<string>>(new Set());
+
   useEffect(() => {
     if (activeTab === 'transactions') {
       fetchTransactions();
@@ -507,8 +1138,24 @@ export default function Analytics() {
   }, [activeTab, fetchTransactions, fetchAccounts, fetchSecurities]);
 
   useEffect(() => {
-    if (activeTab === 'valuation') fetchValuations();
-  }, [activeTab, fetchValuations]);
+    if (activeTab === 'valuation') {
+      fetchValuations();
+      fetchSecurities();
+      fetchCfPositions();
+      fetchCfIntents();
+      fetchCfLevels();
+      fetchCfWatchlistItems();
+      fetchCfTrend();
+      fetchCfEarnings();
+      // Fetch regime for confluence filtering
+      const today = new Date().toISOString().split('T')[0];
+      window.electronAPI.getDailyRitual(today).then(ritual => {
+        if (ritual) {
+          setCfPunishedSectors(parsePunishedSectors(ritual.regimePunishing || null));
+        }
+      });
+    }
+  }, [activeTab, fetchValuations, fetchSecurities, fetchCfPositions, fetchCfIntents, fetchCfLevels, fetchCfWatchlistItems, fetchCfTrend, fetchCfEarnings]);
 
   useEffect(() => {
     if (activeTab === 'trade-performance') fetchTradeAnalytics(tpPeriod);
@@ -1225,7 +1872,16 @@ export default function Analytics() {
               <div className="text-gray-500">Loading valuation data...</div>
             </div>
           ) : (
-            <ValuationSection valuations={valuations} />
+            <ValuationSection valuations={valuations} confluenceData={{
+              positions: cfPositions,
+              securities,
+              intents: cfIntents,
+              priceLevels: cfLevels,
+              watchlistItems: cfWatchlistItems,
+              trendIndicators: cfTrend,
+              punishedSectors: cfPunishedSectors,
+              earningsEvents: cfEarnings,
+            }} />
           )}
         </>
       )}

@@ -77,11 +77,11 @@ export class PreTradeValidator {
     items.push(this.checkThesisDocumented(req.symbol));
     items.push(this.checkInvalidationDefined(req.symbol));
     items.push(this.checkRegimeRead());
-    items.push(this.checkSortingDay());
+    items.push(this.checkSortingDay(req.isEmsBasketOrder));
     items.push(this.checkReentryCooldown(req.symbol));
     items.push(this.checkRapidFlip(req.symbol, 'buy'));
     items.push(this.checkPositionSize(req, 'investing'));
-    items.push(this.checkActionConflict(req.instruction));
+    items.push(this.checkActionConflict(req.instruction, req.isEmsBasketOrder));
     items.push(this.checkBoundaryViolation(req.symbol, 'investing'));
     items.push(this.checkChurn(req.symbol));
     items.push(this.checkAddSize(req));
@@ -109,11 +109,11 @@ export class PreTradeValidator {
     items.push(this.checkTradingAccount());
     items.push(this.checkThesisFile(req.symbol, 'trading'));
     items.push(this.checkRegimeRead());
-    items.push(this.checkSortingDay());
+    items.push(this.checkSortingDay(req.isEmsBasketOrder));
     items.push(this.checkReentryCooldown(req.symbol));
     items.push(this.checkRapidFlip(req.symbol, 'buy'));
     items.push(this.checkPositionSize(req, 'trading'));
-    items.push(this.checkActionConflict(req.instruction));
+    items.push(this.checkActionConflict(req.instruction, req.isEmsBasketOrder));
     items.push(this.checkBoundaryViolation(req.symbol, 'trading', req));
     items.push(this.checkChurn(req.symbol));
     items.push(this.checkSRLevels(req.symbol, 'BUY', req.price));
@@ -193,7 +193,7 @@ export class PreTradeValidator {
     return { id: 'regime-read', label: 'Regime read done today', type: 'auto', status: 'fail', detail: 'No regime read recorded for today' };
   }
 
-  private checkSortingDay(): PreTradeCheckItem {
+  private checkSortingDay(isEmsBasketOrder?: boolean): PreTradeCheckItem {
     const today = new Date().toISOString().split('T')[0];
     const rituals = this.db.listDailyRituals(1);
     const todayRitual = rituals.find(r => r.date === today);
@@ -201,7 +201,10 @@ export class PreTradeValidator {
       return { id: 'sorting-day', label: 'Sorting day check', type: 'auto', status: 'pass', detail: 'No regime set — skipped' };
     }
     if (todayRitual.regimeType === 'sorting') {
-      return { id: 'sorting-day', label: 'Sorting day — adds typically disabled', type: 'auto', status: 'warn', detail: 'Regime is sorting. Proceed only with clear rationale.' };
+      if (isEmsBasketOrder) {
+        return { id: 'sorting-day', label: 'Sorting day — EMS basket order (pre-planned, bypasses session filter)', type: 'auto', status: 'pass' };
+      }
+      return { id: 'sorting-day', label: 'Sorting day — adds typically disabled', type: 'auto', status: 'warn', detail: 'Regime is sorting. Exception: pre-planned EMS basket orders.' };
     }
     return { id: 'sorting-day', label: 'Not a sorting day', type: 'auto', status: 'pass' };
   }
@@ -322,7 +325,10 @@ export class PreTradeValidator {
   }
 
   /** Warn if today's ritual action conflicts with this trade */
-  private checkActionConflict(instruction: string): PreTradeCheckItem {
+  private checkActionConflict(instruction: string, isEmsBasketOrder?: boolean): PreTradeCheckItem {
+    if (isEmsBasketOrder) {
+      return { id: 'action-conflict', label: 'EMS basket order — action-conflict bypassed (pre-planned)', type: 'auto', status: 'pass' };
+    }
     const today = new Date().toISOString().split('T')[0];
     const rituals = this.db.listDailyRituals(1);
     const todayRitual = rituals.find(r => r.date === today);

@@ -578,7 +578,11 @@ PYEOF
       rm -f /tmp/pm-trade-alerts-$$
     fi
 
-    # === Entry Confluence ===
+    # === Entry Confluence (regime-filtered) ===
+    # Get today's punished sectors for filtering
+    REGIME_PUNISHING=$(sqlite3 "$DB" "SELECT regime_punishing FROM daily_rituals WHERE date = date('now')" 2>/dev/null)
+    REGIME_TYPE=$(sqlite3 "$DB" "SELECT regime_type FROM daily_rituals WHERE date = date('now')" 2>/dev/null)
+
     CONFLUENCE=$(sqlite3 "$DB" "
       SELECT DISTINCT vm.symbol, vm.peg_rating, vm.forward_peg, vm.eps_growth_pct,
         (SELECT ph.close_price FROM price_history ph JOIN securities s2 ON ph.security_id = s2.id
@@ -587,7 +591,8 @@ PYEOF
          WHERE pl.symbol = vm.symbol AND pl.level_type = 'support' AND pl.price <
            (SELECT ph2.close_price FROM price_history ph2 JOIN securities s3 ON ph2.security_id = s3.id
             WHERE s3.symbol = vm.symbol ORDER BY ph2.date DESC LIMIT 1)
-         ORDER BY pl.price DESC LIMIT 1) as nearest_support
+         ORDER BY pl.price DESC LIMIT 1) as nearest_support,
+        COALESCE((SELECT s4.sector FROM securities s4 WHERE s4.symbol = vm.symbol), '') as sector
       FROM valuation_metrics vm
       WHERE vm.date = (SELECT MAX(date) FROM valuation_metrics WHERE symbol = vm.symbol)
         AND vm.peg_rating IN ('CHEAP', 'FAIR')
@@ -595,8 +600,7 @@ PYEOF
     " 2>/dev/null)
 
     if [ -n "$CONFLUENCE" ]; then
-      CONFLUENCE_HITS=""
-      echo "$CONFLUENCE" | while IFS='|' read -r SYM RATING PEG GROWTH PRICE SUPPORT; do
+      echo "$CONFLUENCE" | while IFS='|' read -r SYM RATING PEG GROWTH PRICE SUPPORT SECTOR; do
         SIGNALS=0
         SIGNAL_LIST=""
         # Signal 1: Valuation
@@ -620,16 +624,43 @@ PYEOF
           fi
         fi
         if [ "$SIGNALS" -ge 2 ]; then
-          echo "  $SYM \$$PRICE — $SIGNAL_LIST ($SIGNALS signals)"
+          # Check if sector is punished
+          IS_PUNISHED=""
+          if [ -n "$REGIME_PUNISHING" ] && [ -n "$SECTOR" ]; then
+            SECTOR_LC=$(echo "$SECTOR" | tr '[:upper:]' '[:lower:]')
+            PUNISH_LC=$(echo "$REGIME_PUNISHING" | tr '[:upper:]' '[:lower:]')
+            case "$SECTOR_LC" in
+              technology) echo "$PUNISH_LC" | grep -qi 'tech' && IS_PUNISHED="1" ;;
+              communication*) echo "$PUNISH_LC" | grep -qi 'comm' && IS_PUNISHED="1" ;;
+              consumer\ cyclical) echo "$PUNISH_LC" | grep -qi 'cyclical' && IS_PUNISHED="1" ;;
+              consumer\ defensive) echo "$PUNISH_LC" | grep -qi 'defensive' && IS_PUNISHED="1" ;;
+              financial*) echo "$PUNISH_LC" | grep -qi 'financial' && IS_PUNISHED="1" ;;
+              *) echo "$PUNISH_LC" | grep -qi "$SECTOR_LC" && IS_PUNISHED="1" ;;
+            esac
+          fi
+          if [ -n "$IS_PUNISHED" ]; then
+            echo "  $SYM \$$PRICE — $SIGNAL_LIST ($SIGNALS signals) ⊘ $SECTOR" >> /tmp/pm-confluence-blocked-$$
+          else
+            echo "  $SYM \$$PRICE — $SIGNAL_LIST ($SIGNALS signals)" >> /tmp/pm-confluence-$$
+          fi
         fi
-      done > /tmp/pm-confluence-$$
+      done
 
-      if [ -s /tmp/pm-confluence-$$ ]; then
+      if [ -s /tmp/pm-confluence-$$ ] || [ -s /tmp/pm-confluence-blocked-$$ ]; then
         echo "=== Entry Confluence (2+ signals) ==="
-        cat /tmp/pm-confluence-$$
+        if [ -n "$REGIME_PUNISHING" ]; then
+          echo "  Regime: $REGIME_TYPE — filtering: $(echo "$REGIME_PUNISHING" | head -c 60)"
+        fi
+        if [ -s /tmp/pm-confluence-$$ ]; then
+          cat /tmp/pm-confluence-$$
+        fi
+        if [ -s /tmp/pm-confluence-blocked-$$ ]; then
+          BLOCKED_COUNT=$(wc -l < /tmp/pm-confluence-blocked-$$ | tr -d ' ')
+          echo "  ($BLOCKED_COUNT regime-blocked — run 'confluence' to see all)"
+        fi
         echo ""
       fi
-      rm -f /tmp/pm-confluence-$$
+      rm -f /tmp/pm-confluence-$$ /tmp/pm-confluence-blocked-$$
     fi
 
     # Overnight news (last 24h) — portfolio + watchlist symbols
