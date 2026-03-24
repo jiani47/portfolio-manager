@@ -162,19 +162,29 @@ export default function Dashboard() {
     return rituals.find(r => r.date === today) || null;
   }, [rituals]);
 
-  // Portfolio day performance from streaming data
-  const portfolioDayChange = useMemo(() => {
+  // Portfolio value and day change from streaming data
+  const { portfolioValue, portfolioDayChange } = useMemo(() => {
+    let totalValue = 0;
     let totalChange = 0;
-    const seen = new Set<string>();
     for (const pos of positions) {
       const security = securityMap.get(pos.securityId);
-      if (!security || security.type === 'cash') continue;
+      if (!security) continue;
+      if (security.type === 'cash') {
+        totalValue += pos.quantity;
+        continue;
+      }
       const quote = streamingQuotes.get(security.symbol);
-      if (!quote?.netChange) continue;
-      // Each position contributes its own quantity * price change
-      totalChange += (quote.netChange || 0) * pos.quantity;
+      if (quote?.last) {
+        totalValue += quote.last * pos.quantity;
+        if (quote.netChange) {
+          totalChange += quote.netChange * pos.quantity;
+        }
+      } else if (pos.marketValue) {
+        // Fallback to DB market value if no streaming quote
+        totalValue += pos.marketValue;
+      }
     }
-    return totalChange;
+    return { portfolioValue: totalValue, portfolioDayChange: totalChange };
   }, [positions, securityMap, streamingQuotes]);
 
   // Top movers from streaming data (deduped by symbol)
@@ -198,7 +208,17 @@ export default function Dashboard() {
       });
     }
     movers.sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct));
-    return movers.slice(0, 8);
+    const result = movers.slice(0, 8);
+    // Debug: log top movers computation
+    if (result.length > 0) {
+      console.log('[TopMovers] Computed:', result.map(m => `${m.symbol} last=$${m.price.toFixed(2)} chg=${m.change.toFixed(2)} pct=${m.changePct.toFixed(2)}%`).join(' | '));
+      // Also log raw quote data for top 3
+      for (const m of result.slice(0, 3)) {
+        const q = streamingQuotes.get(m.symbol);
+        if (q) console.log(`[TopMovers:raw] ${m.symbol} quote:`, JSON.stringify({ last: q.last, netChange: q.netChange, netChangePct: q.netChangePct, close: q.close, open: q.open, timestamp: q.timestamp }));
+      }
+    }
+    return result;
   }, [positions, securityMap, streamingQuotes, intents]);
 
   // Portfolio sector performance from streaming data
@@ -299,10 +319,10 @@ export default function Dashboard() {
             {renderIndexCard('Nasdaq (QQQ)', qqqQuote)}
             <div className="card">
               <p className="stat-label">Portfolio Value</p>
-              <p className="stat-value">{formatCurrency(summary?.totalValue || 0)}</p>
+              <p className="stat-value">{formatCurrency(portfolioValue || summary?.totalValue || 0)}</p>
               {portfolioDayChange !== 0 ? (
                 <p className={`text-sm font-medium ${portfolioDayChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  {portfolioDayChange >= 0 ? '+' : ''}{formatCurrency(portfolioDayChange)} ({((portfolioDayChange / ((summary?.totalValue || 0) - portfolioDayChange)) * 100).toFixed(2)}%) today
+                  {portfolioDayChange >= 0 ? '+' : ''}{formatCurrency(portfolioDayChange)} ({((portfolioDayChange / ((portfolioValue || summary?.totalValue || 1) - portfolioDayChange)) * 100).toFixed(2)}%) today
                 </p>
               ) : (
                 <p className="text-sm text-gray-400">{summary?.positionCount || 0} positions</p>
@@ -476,7 +496,7 @@ export default function Dashboard() {
           {/* Allocation Drift — current vs target */}
           {(() => {
             // Compute per-symbol allocation using streaming prices or fallback
-            const totalPortfolioValue = summary?.totalValue || 0;
+            const totalPortfolioValue = portfolioValue || summary?.totalValue || 0;
             if (totalPortfolioValue <= 0) return null;
 
             // Aggregate positions by symbol

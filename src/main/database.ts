@@ -1049,11 +1049,14 @@ export class Database {
   }
 
   // Get latest price per security for bootstrapping streaming quotes from DB
-  getLatestPrices(): Array<{ symbol: string; closePrice: number; openPrice: number | null; highPrice: number | null; lowPrice: number | null; volume: number | null; date: string; fetchedAt: string }> {
+  getLatestPrices(): Array<{ symbol: string; closePrice: number; previousClose: number | null; openPrice: number | null; highPrice: number | null; lowPrice: number | null; volume: number | null; date: string; fetchedAt: string }> {
     if (!this.db) throw new Error('Database not initialized');
     const stmt = this.db.prepare(`
       SELECT s.symbol, ph.close_price, ph.open_price, ph.high_price, ph.low_price,
-             ph.volume, ph.date, ph.fetched_at
+             ph.volume, ph.date, ph.fetched_at,
+             (SELECT ph2.close_price FROM price_history ph2
+              WHERE ph2.security_id = ph.security_id AND ph2.date < ph.date
+              ORDER BY ph2.date DESC LIMIT 1) as prev_close
       FROM price_history ph
       JOIN (
         SELECT security_id, MAX(date) as max_date
@@ -1065,6 +1068,7 @@ export class Database {
     return stmt.all().map((r: any) => ({
       symbol: r.symbol,
       closePrice: r.close_price,
+      previousClose: r.prev_close ?? null,
       openPrice: r.open_price,
       highPrice: r.high_price,
       lowPrice: r.low_price,
@@ -1072,6 +1076,18 @@ export class Database {
       date: r.date,
       fetchedAt: r.fetched_at,
     }));
+  }
+
+  /**
+   * Determine if we're in pre-market (before today's open) or during/post market.
+   * Pre-market: before 9:30 ET on a weekday
+   * During/post: 9:30 ET to 20:00 ET
+   */
+  static isPreMarket(): boolean {
+    const now = new Date();
+    // Convert to ET (approximate: UTC-4 EDT, UTC-5 EST)
+    const etHour = now.getUTCHours() - 4; // EDT; rough but sufficient
+    return etHour < 9 || (etHour === 9 && now.getUTCMinutes() < 30);
   }
 
   getLatestPriceBySymbol(symbol: string): number | null {

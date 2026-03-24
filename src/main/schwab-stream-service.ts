@@ -7,6 +7,43 @@ import { Database } from './database';
 import { logger } from './logger';
 import { AppSettings, StreamingQuote, StreamingStatus, StreamingState, PriceHistory } from '../shared/types';
 
+/**
+ * Resolve the best price and change from Schwab API quote fields.
+ *
+ * Market phase matters:
+ * - Pre-market: ext.lastPrice is the current pre-market trade, change vs previous close
+ * - During/post market: ext.lastPrice is STALE (from previous after-hours), use reg.lastPrice instead.
+ *   Change is computed as last - todayOpen.
+ */
+export function resolveQuote(
+  regularQuote: Record<string, number | undefined>,
+  extQuote: Record<string, number | undefined> | null | undefined,
+  isPreMarket: boolean,
+): { last: number; netChange: number; netChangePct: number } {
+  const openPrice = regularQuote.openPrice;
+
+  // Price priority depends on market phase
+  const last = isPreMarket
+    ? (extQuote?.lastPrice ?? regularQuote.lastPrice ?? regularQuote.mark ?? regularQuote.closePrice ?? 0)
+    : (regularQuote.lastPrice ?? regularQuote.mark ?? regularQuote.closePrice ?? 0);
+
+  // Change computation
+  let netChange: number;
+  let netChangePct: number;
+
+  if (isPreMarket || !openPrice) {
+    // Pre-market or no open: use Schwab's netChange (last vs previousClose)
+    netChange = regularQuote.netChange ?? 0;
+    netChangePct = regularQuote.netPercentChange ?? 0;
+  } else {
+    // During/post market: change vs today's open
+    netChange = last - openPrice;
+    netChangePct = openPrice > 0 ? (netChange / openPrice) * 100 : 0;
+  }
+
+  return { last, netChange, netChangePct };
+}
+
 function sendNtfyNotification(title: string, message: string, priority: string = 'default') {
   try {
     const fs = require('fs');
@@ -105,10 +142,20 @@ export class SchwabStreamService {
       if (prices.length === 0) return;
       logger.info(`[quotes:bootstrap] Loading ${prices.length} quotes from DB`);
       const mainWindow = this.getMainWindow();
+      const preMarket = Database.isPreMarket();
+      logger.info(`[quotes:bootstrap] Market phase: ${preMarket ? 'pre-market (ref=prevClose)' : 'during/post-market (ref=open)'}`);
       for (const p of prices) {
+        // Pre-market: change vs previous close. During/post market: change vs today's open.
+        const refPrice = preMarket
+          ? p.previousClose
+          : (p.openPrice ?? p.previousClose);
+        const netChange = refPrice ? p.closePrice - refPrice : 0;
+        const netChangePct = refPrice ? ((p.closePrice - refPrice) / refPrice) * 100 : 0;
         const quote: StreamingQuote = {
           symbol: p.symbol,
           last: p.closePrice,
+          netChange: netChange || undefined,
+          netChangePct: netChangePct || undefined,
           open: p.openPrice ?? undefined,
           high: p.highPrice ?? undefined,
           low: p.lowPrice ?? undefined,
@@ -320,12 +367,14 @@ export class SchwabStreamService {
             const regularQuote = entry.quote || entry;
             const extQuote = entry.extended || entry.extendedHoursQuote;
 
-            // Use extended hours price if available, otherwise regular
-            const last = extQuote?.lastPrice ?? regularQuote?.lastPrice ?? regularQuote?.mark ?? 0;
-            const netChange = extQuote?.netChange ?? regularQuote?.netChange ?? 0;
-            const netChangePct = extQuote?.netPercentChange ?? regularQuote?.netPercentChange ?? 0;
+            const preMarket = Database.isPreMarket();
+            const resolved = resolveQuote(regularQuote || {}, extQuote, preMarket);
+            const { last, netChange, netChangePct } = resolved;
 
             if (last === 0) continue;
+
+            // Debug: log raw Schwab fields + resolved values
+            logger.info(`[quotes:poll:raw] ${sym.toUpperCase()} | phase=${preMarket ? 'pre' : 'mkt/post'} | ext.last=${extQuote?.lastPrice ?? 'null'} | reg.last=${regularQuote?.lastPrice ?? 'null'} reg.close=${regularQuote?.closePrice ?? 'null'} reg.open=${regularQuote?.openPrice ?? 'null'} reg.mark=${regularQuote?.mark ?? 'null'} | resolved: last=$${last.toFixed(2)} change=${netChange.toFixed(2)} pct=${netChangePct.toFixed(2)}%`);
 
             const quote: StreamingQuote = {
               symbol: sym.toUpperCase(),
@@ -343,7 +392,7 @@ export class SchwabStreamService {
             };
 
             this.latestQuotes.set(sym.toUpperCase(), quote);
-            logger.debug(`[quotes:poll] ${sym.toUpperCase()} $${quote.last.toFixed(2)}`);
+            logger.info(`[quotes:poll:resolved] ${sym.toUpperCase()} last=$${quote.last.toFixed(2)} netChange=${quote.netChange?.toFixed(2)} netChangePct=${quote.netChangePct?.toFixed(2)}% close=$${quote.close?.toFixed(2) ?? 'null'} open=$${quote.open?.toFixed(2) ?? 'null'}`);
 
             // Check monitors
             if (this.db && quote.last > 0) {
