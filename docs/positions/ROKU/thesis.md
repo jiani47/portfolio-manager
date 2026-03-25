@@ -1,12 +1,12 @@
 # Roku Inc (ROKU)
 
 **Tier:** Starter
-**Conviction:** C
+**Conviction:** C+
 **Target Allocation:** 3.0%
-**Last Scored:** 2026-03-16
-**Accounts:** Schwab 6196 (500 shares)
-**Cost Basis:** $36,513 (~$73.03/share)
-**Last Updated:** 2026-03-16
+**Last Scored:** 2026-03-24
+**Accounts:** Schwab 6196 (340 shares)
+**Cost Basis:** $20,857 (~$61.34/share)
+**Last Updated:** 2026-03-24
 
 ## Thesis
 
@@ -30,30 +30,43 @@
 
 ## Bull Criteria
 
+### Structural (why the moat holds)
+
 | # | Criterion | Metric | Threshold | Status | Last Checked |
 |---|-----------|--------|-----------|--------|--------------|
-| B1 | CTV platform share | US CTV device market share | >33% | confirmed | 2026-03-16 |
-| B2 | First profitable year | FY net income | Positive | confirmed | 2026-03-16 |
-| B3 | Ad market growth | CTV ad market YoY growth | >10% | confirmed | 2026-03-16 |
-| B4 | Platform revenue above market | Platform revenue YoY growth vs CTV market | Growing faster than market | confirmed | 2026-03-16 |
-| B5 | ARPU growth | Revenue per streaming household | Increasing YoY | pending | 2026-03-16 |
-| B6 | Platform gross margin | Platform segment gross margin | >48% | confirmed | 2026-03-16 |
+| B1 | ACR / first-party data moat | Cross-platform TV measurement on 90M+ deterministic household IDs | No competitor achieves equivalent cross-input (streaming + linear + HDMI) TV measurement | confirmed | 2026-03-24 |
+| B2 | Platform neutrality | Major streamers distribute on Roku without content conflict | No app disputes causing removals; content providers prefer Roku over Amazon/Google who compete with their own services | confirmed | 2026-03-24 |
+| B3 | OEM licensing flywheel | % of North American TVs sold running Roku OS | >30% of TV shipments (currently ~33%); OEMs get free OS, reference designs, lower return rates in exchange for ad inventory + data rights | confirmed | 2026-03-24 |
+
+### Execution (proving the structure works)
+
+| # | Criterion | Metric | Threshold | Status | Last Checked |
+|---|-----------|--------|-----------|--------|--------------|
+| B4 | Platform revenue outgrowing market | Platform rev YoY vs CTV ad market YoY | Growing faster than market (currently +18% vs +14% market) | confirmed | 2026-03-24 |
+| B5 | Margin expansion | Platform gross margin + operating leverage | Platform GM >48% (currently 51-52%), adj EBITDA margin expanding (11.5%, +267bps YoY) | confirmed | 2026-03-24 |
+| B6 | The Roku Channel as growth engine | % of US TV streaming viewership | >5% share and growing (currently 6.3%, up from 4.6% a year ago). Zero-CAC distribution on 90M+ installed devices — no standalone FAST service can match this | confirmed | 2026-03-24 |
+
+### Why these bulls matter together
+
+Roku's ACR data (B1) enables superior ad targeting → higher CPMs → more ad spend → platform revenue growth (B4). Platform neutrality (B2) keeps content providers on-platform, which keeps users engaged, which keeps OEMs shipping Roku OS (B3), which grows the installed base, which feeds more ACR data (B1). The Roku Channel (B6) monetizes the installed base directly with zero acquisition cost, and margin expansion (B5) proves the flywheel is generating profit, not just growth.
 
 ## Bear Criteria
 
 | # | Criterion | Metric | Threshold | Status | Last Checked |
 |---|-----------|--------|-----------|--------|--------------|
-| R1 | Amazon Fire TV share gains | Fire TV US CTV share | >25% with Roku declining | watching | 2026-03-16 |
-| R2 | Smart TV OS competition | Samsung + LG combined share | >25% | watching | 2026-03-16 |
-| R3 | ARPU disclosure removed | Quarterly ARPU reporting | No longer disclosed | triggered | 2026-03-16 |
-| R4 | Hardware losses structural | Devices gross margin | Negative mid-teens, guided to continue | triggered | 2026-03-16 |
-| R5 | Ad market stays soft | CTV ad growth rate | <10% sustained | not_triggered | 2026-03-16 |
-| R6 | Programmatic share erosion | Open programmatic CTV share | QoQ decline with LG/Samsung gaining | watching | 2026-03-16 |
+| R1 | Amazon Fire TV share gains | Fire TV US CTV share | >25% with Roku declining | watching | 2026-03-24 |
+| R2 | Smart TV OS competition | Samsung + LG combined share | >25% | watching | 2026-03-24 |
+| R3 | ARPU disclosure removed | Quarterly ARPU reporting | No longer disclosed — use revenue-per-household as proxy ($54/yr currently) | triggered | 2026-03-24 |
+| R4 | Hardware losses structural | Devices gross margin | Negative mid-teens, guided to continue in 2026. Known loss-leader model — concern is if losses widen without offsetting platform growth | triggered | 2026-03-24 |
+| R5 | Ad market cyclicality | CTV ad growth rate | <10% sustained (currently 14%) | not_triggered | 2026-03-24 |
+| R6 | Programmatic share erosion | Open programmatic CTV share | Sustained QoQ decline with LG/Samsung gaining (LG surged 79% QoQ in Q4, Roku dipped 11%) | watching | 2026-03-24 |
+| R7 | OEM partner defection | # of top-5 OEM partners shipping Roku as primary OS | 2+ major OEMs drop Roku as primary OS. TCL diversifying to Google TV is early signal. Hisense pulled back to handful of Roku models. Roku making own TVs adds channel conflict. | watching | 2026-03-24 |
 
 ## Score Summary
 
-Bull: 5/6 confirmed (1 pending — ARPU uncheckable) | Bear: 2/6 triggered (3 watching)
-Suggested conviction: C (executing well as #1 platform but ARPU governance gap and structural hardware losses are concerns)
+Bull: 6/6 confirmed | Bear: 2/7 triggered (4 watching, 1 clear)
+
+**Conviction: C+** — All structural bulls intact and execution is strong, but three factors keep this below B-: (1) OEM flywheel showing cracks — TCL diversifying, Hisense pulling back, Roku's own TVs create channel conflict; (2) ACR data moat is confirmed but monetization at scale unproven — ARPU non-disclosure is suspicious, not neutral; (3) Amazon Fire TV growing 65% YoY, Roku share dipped 38%→37%. One more quarter of erosion makes it a trend, not noise. Valuation above consensus ($97 vs $87) means the market is pricing in execution we haven't fully verified. **Promotion to B- at May earnings if**: platform rev reaccelerates >20%, OEM partnerships stabilize, programmatic share holds steady.
 
 ## Invalidation Framework
 
@@ -72,11 +85,15 @@ Suggested conviction: C (executing well as #1 platform but ARPU governance gap a
 - **Content cost escalation** — if The Roku Channel requires significant content investment to maintain viewership (Netflix-level spend)
 - **Hardware losses widen** — if Devices gross margin goes below -20% without offsetting platform growth
 
-### What Would Make Me Add
+### What Would Promote to Solid B
 - Platform revenue growth reaccelerates above 20% (sustained, not one quarter)
+- OEM partnerships stabilize — TCL recommits, or new major OEM win
+- The Roku Channel crosses 8% of US TV streaming (proves zero-CAC content flywheel)
+- International expansion shows inflection in LatAm (45% CTV share, growing)
+
+### What Would Make Me Add
+- Stock pulls back to $70-75 on macro (not market share loss) — structural bulls still intact at lower price
 - ARPU disclosure resumes and shows acceleration
-- Stock pulls back to $70-75 on macro (not market share loss)
-- International streaming households hit an inflection (meaningful contribution outside US/Canada/Mexico)
 - NOT: "ad market recovery" — this is already happening at 14% growth. Don't wait for a catalyst that's already here.
 
 ## Risk Notes
@@ -85,7 +102,7 @@ Suggested conviction: C (executing well as #1 platform but ARPU governance gap a
 - **Ad-cyclical business.** A recession directly hits CTV ad spending. The 2023-2024 ad softness dropped the stock from $300+ to $55. Revenue concentration in advertising = macro sensitivity.
 - **Amazon's endgame.** Amazon doesn't need Fire TV to be profitable — it's a Prime acquisition channel. They can subsidize forever. If Fire TV reaches 25%+ share, Roku's platform premium erodes.
 - **Smart TV OS threat.** Samsung and LG have native OS on their TVs. As smart TVs replace streaming sticks, the "separate device" moat weakens. Roku's counter is being the default OS on TCL/Hisense, but those are lower-end brands.
-- **500 shares at $73 cost, currently $91 (+25%).** Reasonable unrealized gain but thin margin — a -20% pullback puts you near breakeven.
+- **340 shares at $61 cost, currently $97 (+58%).** Healthy gain but high beta (1.70) means a -20% market drawdown could erase ~35% of position value.
 
 ## 2026 Guidance
 
@@ -101,3 +118,4 @@ Suggested conviction: C (executing well as #1 platform but ARPU governance gap a
 |------|--------|-------|
 | 2026-03-06 | Thesis documented | Growth tier — #1 CTV platform but ad pricing is cyclical and tied to broader market |
 | 2026-03-15 | Thesis deep review | Key findings: platform dominance confirmed (37% share), profitability arrived ($88M FY2025), but ARPU no longer disclosed (governance gap), Amazon Fire TV growing 65% YoY (accelerating threat), CTV ad growth is steady 14% not a snapback (catalyst already played out). Hardware losses are structural. Business is executing but upside may be priced in at $91. |
+| 2026-03-24 | Thesis restructured | Rewrote bull criteria around structural moat (ACR data, platform neutrality, OEM flywheel) instead of lagging metrics. Added B6 Roku Channel as growth engine. Added R7 OEM partner defection risk. Dropped old B2 (profitability — backward), B3 (ad market — not Roku-specific), B5 (ARPU — uncheckable). Conviction set at C+ — structural bulls intact but OEM cracks, ARPU opacity, and Amazon growth keep it below B-. Sized to 3% (~215 shares). Revisit at May earnings for B- promotion. Ecosystem risk logged as observation, not a bear. |

@@ -493,91 +493,133 @@ export default function Dashboard() {
             )}
           </div>
 
-          {/* Allocation Drift — current vs target */}
+          {/* Portfolio Allocation — current vs target */}
           {(() => {
-            // Compute per-symbol allocation using streaming prices or fallback
             const totalPortfolioValue = portfolioValue || summary?.totalValue || 0;
             if (totalPortfolioValue <= 0) return null;
 
-            // Aggregate positions by symbol
-            const symbolAlloc = new Map<string, { symbol: string; currentPct: number; targetPct: number | null; tier: string; marketValue: number }>();
-            const seen = new Set<string>();
+            type AllocRow = { symbol: string; currentPct: number; targetPct: number | null; tier: string; marketValue: number };
+            const symbolAgg = new Map<string, { mv: number; targetPct: number | null; tier: string }>();
+            let cashMV = 0;
+
             for (const pos of positions) {
               const security = securityMap.get(pos.securityId);
-              if (!security || security.type === 'cash' || security.type === 'option') continue;
-              if (seen.has(security.symbol)) continue;
-              seen.add(security.symbol);
+              if (!security || security.type === 'option') continue;
+              if (security.type === 'cash') {
+                cashMV += pos.quantity;
+                continue;
+              }
               const intent = intents.get(pos.id);
               const quote = streamingQuotes.get(security.symbol);
               const price = quote?.last || (pos.marketValue && pos.quantity > 0 ? pos.marketValue / pos.quantity : 0);
               const mv = price * pos.quantity;
-              const currentPct = (mv / totalPortfolioValue) * 100;
-              const targetPct = intent?.targetAllocationPct ?? null;
-              symbolAlloc.set(security.symbol, {
-                symbol: security.symbol,
-                currentPct,
-                targetPct,
-                tier: intent?.tier || 'Untagged',
-                marketValue: mv,
+              const existing = symbolAgg.get(security.symbol);
+              if (existing) {
+                existing.mv += mv;
+                // Use intent from whichever position has one (prefer one with target set)
+                if (intent?.targetAllocationPct != null && existing.targetPct == null) {
+                  existing.targetPct = intent.targetAllocationPct;
+                  existing.tier = intent.tier || existing.tier;
+                }
+                if (intent?.tier && existing.tier === 'Untagged') {
+                  existing.tier = intent.tier;
+                }
+              } else {
+                symbolAgg.set(security.symbol, {
+                  mv,
+                  targetPct: intent?.targetAllocationPct ?? null,
+                  tier: intent?.tier || 'Untagged',
+                });
+              }
+            }
+
+            const rows: AllocRow[] = [];
+            for (const [symbol, agg] of symbolAgg) {
+              rows.push({
+                symbol,
+                currentPct: (agg.mv / totalPortfolioValue) * 100,
+                targetPct: agg.targetPct,
+                tier: agg.tier,
+                marketValue: agg.mv,
               });
             }
 
-            // Only show positions that have a target
-            const withTargets = Array.from(symbolAlloc.values()).filter(a => a.targetPct != null);
-            if (withTargets.length === 0) return null;
+            // Compute implied cash target: 100% minus all position targets
+            const assignedTargetPct = rows.reduce((s, r) => s + (r.targetPct || 0), 0);
+            const cashTargetPct = Math.max(0, 100 - assignedTargetPct);
 
-            // Sort by absolute drift descending
-            withTargets.sort((a, b) => Math.abs((b.currentPct - (b.targetPct || 0))) - Math.abs((a.currentPct - (a.targetPct || 0))));
+            // Add cash row (always show, even if $0)
+            rows.push({
+              symbol: 'Cash',
+              currentPct: (cashMV / totalPortfolioValue) * 100,
+              targetPct: cashTargetPct > 0 ? cashTargetPct : 0,
+              tier: 'Cash',
+              marketValue: cashMV,
+            });
+
+            // Sort: positions with targets by target desc, then without targets by current desc, then cash last
+            const withTargets = rows.filter(r => r.targetPct != null && r.targetPct > 0 && r.symbol !== 'Cash');
+            const zeroOrNoTarget = rows.filter(r => (r.targetPct == null || r.targetPct === 0) && r.symbol !== 'Cash');
+            const cashRow = rows.find(r => r.symbol === 'Cash');
+            withTargets.sort((a, b) => (b.targetPct || 0) - (a.targetPct || 0));
+            zeroOrNoTarget.sort((a, b) => b.currentPct - a.currentPct);
+            const sorted = [...withTargets, ...zeroOrNoTarget, ...(cashRow ? [cashRow] : [])];
+
+            const totalCurrentPct = sorted.reduce((s, r) => s + r.currentPct, 0);
+            const totalTargetPct = sorted.reduce((s, r) => s + (r.targetPct || 0), 0);
+            const totalMV = sorted.reduce((s, r) => s + r.marketValue, 0);
 
             return (
               <div className="card">
-                <h2 className="text-lg font-semibold text-gray-900 mb-3">Allocation Drift</h2>
-                <div className="space-y-2">
-                  {withTargets.map(a => {
-                    const drift = a.currentPct - (a.targetPct || 0);
-                    const absDrift = Math.abs(drift);
-                    const isOver = drift > 0;
-                    const driftDollars = (drift / 100) * totalPortfolioValue;
-                    const tierColor = TIER_COLORS[a.tier] || '#9ca3af';
-                    // Severity: >3% drift = red, >1% = amber, else green
-                    const severity = absDrift > 3 ? 'text-red-600' : absDrift > 1 ? 'text-amber-600' : 'text-gray-500';
-                    return (
-                      <div key={a.symbol} className="flex items-center gap-3 py-1.5 px-2 rounded hover:bg-gray-50">
-                        <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: tierColor }} title={a.tier} />
-                        <span className="text-sm font-medium w-14 text-gray-900">{a.symbol}</span>
-                        {/* Current vs Target bar */}
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2">
-                            <div className="flex-1 h-3 bg-gray-100 rounded-full relative overflow-hidden">
-                              {/* Target marker */}
-                              <div
-                                className="absolute top-0 h-full w-0.5 bg-gray-400 z-10"
-                                style={{ left: `${Math.min((a.targetPct || 0) / 30 * 100, 100)}%` }}
-                                title={`Target: ${(a.targetPct || 0).toFixed(1)}%`}
-                              />
-                              {/* Current fill */}
-                              <div
-                                className={`h-full rounded-full ${isOver ? 'bg-amber-400' : 'bg-blue-400'}`}
-                                style={{ width: `${Math.min(a.currentPct / 30 * 100, 100)}%` }}
-                              />
+                <h2 className="text-lg font-semibold text-gray-900 mb-3">Portfolio Allocation</h2>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-xs text-gray-500 border-b border-gray-200">
+                      <th className="text-left py-1.5 font-medium">Ticker</th>
+                      <th className="text-right py-1.5 font-medium">Current %</th>
+                      <th className="text-right py-1.5 font-medium">Target %</th>
+                      <th className="text-right py-1.5 font-medium">Current MV</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sorted.map(a => {
+                      const drift = a.targetPct != null ? a.currentPct - a.targetPct : 0;
+                      const absDrift = Math.abs(drift);
+                      const tierColor = a.symbol === 'Cash' ? '#6b7280' : (TIER_COLORS[a.tier] || '#9ca3af');
+                      const driftColor = a.targetPct == null ? 'text-gray-600'
+                        : absDrift > 3 ? 'text-red-600'
+                        : absDrift > 1 ? 'text-amber-600'
+                        : 'text-gray-600';
+                      return (
+                        <tr key={a.symbol} className="border-b border-gray-100 hover:bg-gray-50">
+                          <td className="py-1.5">
+                            <div className="flex items-center gap-2">
+                              <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: tierColor }} title={a.tier} />
+                              <span className="font-medium text-gray-900">{a.symbol}</span>
                             </div>
-                          </div>
-                        </div>
-                        <div className="text-right w-32 flex-shrink-0">
-                          <span className="text-xs text-gray-500">{a.currentPct.toFixed(1)}%</span>
-                          <span className="text-xs text-gray-400 mx-1">/</span>
-                          <span className="text-xs text-gray-600 font-medium">{(a.targetPct || 0).toFixed(1)}%</span>
-                        </div>
-                        <span className={`text-xs font-medium w-24 text-right ${severity}`}>
-                          {isOver ? 'Over' : 'Under'} {absDrift.toFixed(1)}%
-                          <span className="block text-[10px] text-gray-400">
-                            {isOver ? '+' : ''}{formatCurrency(driftDollars)}
-                          </span>
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
+                          </td>
+                          <td className={`text-right py-1.5 tabular-nums ${driftColor}`}>
+                            {a.currentPct.toFixed(1)}%
+                          </td>
+                          <td className="text-right py-1.5 tabular-nums text-gray-600">
+                            {a.targetPct != null ? `${a.targetPct.toFixed(1)}%` : '—'}
+                          </td>
+                          <td className="text-right py-1.5 tabular-nums text-gray-600">
+                            {formatCurrency(a.marketValue)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t-2 border-gray-300 font-semibold text-gray-900">
+                      <td className="py-2">Total</td>
+                      <td className="text-right py-2 tabular-nums">{totalCurrentPct.toFixed(1)}%</td>
+                      <td className="text-right py-2 tabular-nums text-gray-500">{totalTargetPct.toFixed(1)}%</td>
+                      <td className="text-right py-2 tabular-nums">{formatCurrency(totalMV)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
               </div>
             );
           })()}

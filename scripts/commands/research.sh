@@ -114,25 +114,30 @@ tier = tier_match.group(1).strip() if tier_match else "Unknown"
 last_updated_match = re.search(r'\*\*Last Updated:\*\*\s*(.+)', content)
 last_updated = last_updated_match.group(1).strip() if last_updated_match else "—"
 
-# Parse a criteria table section
+# Parse a criteria table section (supports subsection tables under ### headers)
 def parse_table(section_header, text):
-    """Parse a markdown table under a ## header. Returns list of dicts."""
-    pattern = r'## ' + re.escape(section_header) + r'\s*\n\s*\n?\s*\|[^\n]+\|\s*\n\s*\|[-| ]+\|\s*\n((?:\s*\|[^\n]+\|\s*\n?)*)'
-    match = re.search(pattern, text)
-    if not match:
+    """Parse all markdown tables under a ## header (including ### subsections). Returns list of dicts."""
+    # Extract the full section between ## header and next ## header
+    section_pattern = r'## ' + re.escape(section_header) + r'\s*\n(.*?)(?=\n## |\Z)'
+    section_match = re.search(section_pattern, text, re.DOTALL)
+    if not section_match:
         return []
+    section_text = section_match.group(1)
+    # Find all markdown tables (header row + separator + data rows) in the section
+    table_pattern = r'\|[^\n]+\|\s*\n\s*\|[-| ]+\|\s*\n((?:\s*\|[^\n]+\|\s*\n?)*)'
     rows = []
-    for line in match.group(1).strip().split('\n'):
-        cells = [c.strip() for c in line.strip().strip('|').split('|')]
-        if len(cells) >= 6:
-            rows.append({
-                'id': cells[0],
-                'criterion': cells[1],
-                'metric': cells[2],
-                'threshold': cells[3],
-                'status': cells[4].lower().strip(),
-                'last_checked': cells[5],
-            })
+    for table_match in re.finditer(table_pattern, section_text):
+        for line in table_match.group(1).strip().split('\n'):
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            if len(cells) >= 6:
+                rows.append({
+                    'id': cells[0],
+                    'criterion': cells[1],
+                    'metric': cells[2],
+                    'threshold': cells[3],
+                    'status': cells[4].lower().strip(),
+                    'last_checked': cells[5],
+                })
     return rows
 
 bulls = parse_table("Bull Criteria", content)
@@ -157,18 +162,9 @@ total_bulls = len(bulls)
 total_bears = len(bears)
 bull_pct = (bull_confirmed / total_bulls * 100) if total_bulls > 0 else 0
 
-# Suggested conviction
-# Watching bears and challenged bulls count as half-signals
-effective_bear = bear_triggered + bear_watching * 0.5
-effective_bull_pct = ((bull_confirmed - bull_challenged * 0.5) / total_bulls * 100) if total_bulls > 0 else 0
-if effective_bull_pct > 75 and effective_bear == 0:
-    suggested = "A"
-elif effective_bull_pct > 50 and effective_bear <= 1:
-    suggested = "B"
-elif effective_bull_pct >= 25 and effective_bear <= 1.5:
-    suggested = "C"
-else:
-    suggested = "D"
+# Read conviction from thesis doc (qualitative, not computed)
+conviction_match = re.search(r'\*\*Conviction:\*\*\s*(.+)', content)
+conviction = conviction_match.group(1).strip() if conviction_match else "—"
 
 # Display
 print(f"=== {symbol} Scorecard ===")
@@ -202,8 +198,7 @@ print(f"  Score Summary")
 print(f"  {'─' * 40}")
 print(f"  Bull: {bull_confirmed} confirmed, {bull_pending} pending, {bull_challenged} challenged")
 print(f"  Bear: {bear_triggered} triggered, {bear_watching} watching, {bear_not_triggered} clear")
-print(f"  Bull %: {bull_pct:.0f}%")
-print(f"  Suggested conviction: {suggested}")
+print(f"  Conviction: {conviction} (from thesis doc)")
 PYEOF
     ;;
 
@@ -216,21 +211,24 @@ import re, os, sys
 
 positions_dir = "$POSITIONS_DIR"
 
-# Parse a criteria table section
+# Parse a criteria table section (supports subsection tables under ### headers)
 def parse_table(section_header, text):
-    pattern = r'## ' + re.escape(section_header) + r'\s*\n\s*\n?\s*\|[^\n]+\|\s*\n\s*\|[-| ]+\|\s*\n((?:\s*\|[^\n]+\|\s*\n?)*)'
-    match = re.search(pattern, text)
-    if not match:
+    section_pattern = r'## ' + re.escape(section_header) + r'\s*\n(.*?)(?=\n## |\Z)'
+    section_match = re.search(section_pattern, text, re.DOTALL)
+    if not section_match:
         return []
+    section_text = section_match.group(1)
+    table_pattern = r'\|[^\n]+\|\s*\n\s*\|[-| ]+\|\s*\n((?:\s*\|[^\n]+\|\s*\n?)*)'
     rows = []
-    for line in match.group(1).strip().split('\n'):
-        cells = [c.strip() for c in line.strip().strip('|').split('|')]
-        if len(cells) >= 6:
-            rows.append({
-                'id': cells[0],
-                'criterion': cells[1],
-                'status': cells[4].lower().strip(),
-            })
+    for table_match in re.finditer(table_pattern, section_text):
+        for line in table_match.group(1).strip().split('\n'):
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            if len(cells) >= 6:
+                rows.append({
+                    'id': cells[0],
+                    'criterion': cells[1],
+                    'status': cells[4].lower().strip(),
+                })
     return rows
 
 tier_priority = {'Core': 0, 'Growth': 1, 'Starter': 2, 'Watchlist': 3, 'Exit': 4}
@@ -278,17 +276,10 @@ for symbol_dir in sorted(os.listdir(positions_dir)):
     bear_watching = sum(1 for b in bears if b['status'] == 'watching')
     total_bulls = len(bulls)
     total_bears = len(bears)
-    effective_bear = bear_triggered + bear_watching * 0.5
-    effective_bull_pct = ((bull_confirmed - bull_challenged * 0.5) / total_bulls * 100) if total_bulls > 0 else 0
 
-    if effective_bull_pct > 75 and effective_bear == 0:
-        conv = "A"
-    elif effective_bull_pct > 50 and effective_bear <= 1:
-        conv = "B"
-    elif effective_bull_pct >= 25 and effective_bear <= 1.5:
-        conv = "C"
-    else:
-        conv = "D"
+    # Read conviction from thesis doc (qualitative, not computed)
+    conv_match = re.search(r'\*\*Conviction:\*\*\s*(.+)', content)
+    conv = conv_match.group(1).strip() if conv_match else "—"
 
     bear_display = f"{bear_triggered}/{total_bears}"
     if bear_triggered > 0:
