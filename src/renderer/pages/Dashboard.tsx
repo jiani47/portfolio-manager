@@ -1,7 +1,8 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePortfolio, usePositions, useSecurities, useSettings, usePositionIntents, useDailyRituals, useNews, useEarnings } from '../hooks/useApi';
+import { usePortfolio, usePositions, useSecurities, useSettings, usePositionIntents, useDailyRituals, useNews, useEarnings, useAnalytics } from '../hooks/useApi';
 import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import type { StreamingQuote, NewsArticle, EarningsEvent } from '../../shared/types';
+import { calculateAllocationDrift, type AllocationRow } from '../../shared/analytics/allocation';
 import { format, addDays } from 'date-fns';
 
 const TIER_COLORS: Record<string, string> = {
@@ -20,6 +21,7 @@ export default function Dashboard() {
   const { rituals, fetchRituals } = useDailyRituals();
   const { articles: newsArticles, fetchRecentNews } = useNews();
   const { earnings, fetchPortfolioEarnings } = useEarnings();
+  const { positionBetas, fetchAnalytics } = useAnalytics();
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [rawSectorData, setRawSectorData] = useState<{ nyse: Record<string, number>; nasdaq: Record<string, number> } | null>(null);
   const [sectorDate, setSectorDate] = useState<string>('');
@@ -35,11 +37,12 @@ export default function Dashboard() {
     fetchIntents();
     fetchRituals(1);
     fetchRecentNews(24);
+    fetchAnalytics(90);
     const today = format(new Date(), 'yyyy-MM-dd');
     const twoWeeksOut = format(addDays(new Date(), 14), 'yyyy-MM-dd');
     fetchPortfolioEarnings(today, twoWeeksOut);
     window.electronAPI.getWatchlistSymbols().then(setWatchlistSymbols).catch(() => {});
-  }, [fetchSummary, fetchPositions, fetchSecurities, fetchSettings, fetchIntents, fetchRituals, fetchRecentNews, fetchPortfolioEarnings]);
+  }, [fetchSummary, fetchPositions, fetchSecurities, fetchSettings, fetchIntents, fetchRituals, fetchRecentNews, fetchAnalytics, fetchPortfolioEarnings]);
 
   // Listen for position sync events
   useEffect(() => {
@@ -498,69 +501,32 @@ export default function Dashboard() {
             const totalPortfolioValue = portfolioValue || summary?.totalValue || 0;
             if (totalPortfolioValue <= 0) return null;
 
-            type AllocRow = { symbol: string; currentPct: number; targetPct: number | null; tier: string; marketValue: number };
-            const symbolAgg = new Map<string, { mv: number; targetPct: number | null; tier: string }>();
-            let cashMV = 0;
+            const betaMap = new Map(positionBetas.map(b => [b.symbol, b]));
 
-            for (const pos of positions) {
+            // Build inputs for shared allocation function
+            const allocInputs = positions.map(pos => {
               const security = securityMap.get(pos.securityId);
-              if (!security || security.type === 'option') continue;
-              if (security.type === 'cash') {
-                cashMV += pos.quantity;
-                continue;
-              }
+              if (!security) return null;
               const intent = intents.get(pos.id);
               const quote = streamingQuotes.get(security.symbol);
               const price = quote?.last || (pos.marketValue && pos.quantity > 0 ? pos.marketValue / pos.quantity : 0);
-              const mv = price * pos.quantity;
-              const existing = symbolAgg.get(security.symbol);
-              if (existing) {
-                existing.mv += mv;
-                // Use intent from whichever position has one (prefer one with target set)
-                if (intent?.targetAllocationPct != null && existing.targetPct == null) {
-                  existing.targetPct = intent.targetAllocationPct;
-                  existing.tier = intent.tier || existing.tier;
-                }
-                if (intent?.tier && existing.tier === 'Untagged') {
-                  existing.tier = intent.tier;
-                }
-              } else {
-                symbolAgg.set(security.symbol, {
-                  mv,
-                  targetPct: intent?.targetAllocationPct ?? null,
-                  tier: intent?.tier || 'Untagged',
-                });
-              }
-            }
+              return {
+                symbol: security.symbol,
+                quantity: pos.quantity,
+                price,
+                securityType: security.type as 'stock' | 'etf' | 'mutual_fund' | 'bond' | 'option' | 'crypto' | 'cash' | 'other',
+                targetAllocationPct: intent?.targetAllocationPct ?? null,
+                tier: intent?.tier || 'Untagged',
+                accountId: pos.accountId,
+              };
+            }).filter((p): p is NonNullable<typeof p> => p !== null);
 
-            const rows: AllocRow[] = [];
-            for (const [symbol, agg] of symbolAgg) {
-              rows.push({
-                symbol,
-                currentPct: (agg.mv / totalPortfolioValue) * 100,
-                targetPct: agg.targetPct,
-                tier: agg.tier,
-                marketValue: agg.mv,
-              });
-            }
+            const allocRows = calculateAllocationDrift({ positions: allocInputs });
 
-            // Compute implied cash target: 100% minus all position targets
-            const assignedTargetPct = rows.reduce((s, r) => s + (r.targetPct || 0), 0);
-            const cashTargetPct = Math.max(0, 100 - assignedTargetPct);
-
-            // Add cash row (always show, even if $0)
-            rows.push({
-              symbol: 'Cash',
-              currentPct: (cashMV / totalPortfolioValue) * 100,
-              targetPct: cashTargetPct > 0 ? cashTargetPct : 0,
-              tier: 'Cash',
-              marketValue: cashMV,
-            });
-
-            // Sort: positions with targets by target desc, then without targets by current desc, then cash last
-            const withTargets = rows.filter(r => r.targetPct != null && r.targetPct > 0 && r.symbol !== 'Cash');
-            const zeroOrNoTarget = rows.filter(r => (r.targetPct == null || r.targetPct === 0) && r.symbol !== 'Cash');
-            const cashRow = rows.find(r => r.symbol === 'Cash');
+            // Re-sort for dashboard display: targets by target desc, then no-target by current desc, cash last
+            const withTargets = allocRows.filter(r => r.targetPct != null && r.targetPct > 0 && r.symbol !== 'Cash');
+            const zeroOrNoTarget = allocRows.filter(r => (r.targetPct == null || r.targetPct === 0) && r.symbol !== 'Cash');
+            const cashRow = allocRows.find(r => r.symbol === 'Cash');
             withTargets.sort((a, b) => (b.targetPct || 0) - (a.targetPct || 0));
             zeroOrNoTarget.sort((a, b) => b.currentPct - a.currentPct);
             const sorted = [...withTargets, ...zeroOrNoTarget, ...(cashRow ? [cashRow] : [])];
@@ -568,6 +534,14 @@ export default function Dashboard() {
             const totalCurrentPct = sorted.reduce((s, r) => s + r.currentPct, 0);
             const totalTargetPct = sorted.reduce((s, r) => s + (r.targetPct || 0), 0);
             const totalMV = sorted.reduce((s, r) => s + r.marketValue, 0);
+            const totalWeightedBeta = sorted.reduce((s, r) => {
+              const b = betaMap.get(r.symbol);
+              return s + (b ? b.beta * (r.currentPct / 100) : 0);
+            }, 0);
+            const totalTargetBeta = sorted.reduce((s, r) => {
+              const b = betaMap.get(r.symbol);
+              return s + (b && r.targetPct != null ? b.beta * (r.targetPct / 100) : 0);
+            }, 0);
 
             return (
               <div className="card">
@@ -579,12 +553,13 @@ export default function Dashboard() {
                       <th className="text-right py-1.5 font-medium">Current %</th>
                       <th className="text-right py-1.5 font-medium">Target %</th>
                       <th className="text-right py-1.5 font-medium">Current MV</th>
+                      <th className="text-right py-1.5 font-medium">Wtd Beta</th>
+                      <th className="text-right py-1.5 font-medium">Tgt Beta</th>
                     </tr>
                   </thead>
                   <tbody>
                     {sorted.map(a => {
-                      const drift = a.targetPct != null ? a.currentPct - a.targetPct : 0;
-                      const absDrift = Math.abs(drift);
+                      const absDrift = Math.abs(a.driftPct ?? 0);
                       const tierColor = a.symbol === 'Cash' ? '#6b7280' : (TIER_COLORS[a.tier] || '#9ca3af');
                       const driftColor = a.targetPct == null ? 'text-gray-600'
                         : absDrift > 3 ? 'text-red-600'
@@ -607,6 +582,22 @@ export default function Dashboard() {
                           <td className="text-right py-1.5 tabular-nums text-gray-600">
                             {formatCurrency(a.marketValue)}
                           </td>
+                          <td className="text-right py-1.5 tabular-nums text-gray-500">
+                            {(() => {
+                              const b = betaMap.get(a.symbol);
+                              if (!b || a.symbol === 'Cash') return '—';
+                              const wb = b.beta * (a.currentPct / 100);
+                              return wb.toFixed(2);
+                            })()}
+                          </td>
+                          <td className="text-right py-1.5 tabular-nums text-gray-500">
+                            {(() => {
+                              const b = betaMap.get(a.symbol);
+                              if (!b || a.symbol === 'Cash' || a.targetPct == null) return '—';
+                              const tb = b.beta * (a.targetPct / 100);
+                              return tb.toFixed(2);
+                            })()}
+                          </td>
                         </tr>
                       );
                     })}
@@ -617,6 +608,8 @@ export default function Dashboard() {
                       <td className="text-right py-2 tabular-nums">{totalCurrentPct.toFixed(1)}%</td>
                       <td className="text-right py-2 tabular-nums text-gray-500">{totalTargetPct.toFixed(1)}%</td>
                       <td className="text-right py-2 tabular-nums">{formatCurrency(totalMV)}</td>
+                      <td className="text-right py-2 tabular-nums">{totalWeightedBeta.toFixed(2)}</td>
+                      <td className="text-right py-2 tabular-nums">{totalTargetBeta.toFixed(2)}</td>
                     </tr>
                   </tfoot>
                 </table>
