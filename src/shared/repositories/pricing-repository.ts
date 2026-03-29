@@ -1,7 +1,8 @@
 /**
- * PricingRepository — latest prices, ATR, support/resistance levels.
+ * PricingRepository — latest prices, ATR, OHLCV, support/resistance levels.
  */
 import type Database from 'better-sqlite3';
+import type { OHLCVBar } from '../analytics/levels';
 
 export class PricingRepository {
   constructor(private db: Database.Database) {}
@@ -68,5 +69,45 @@ export class PricingRepository {
     `).all(symbol) as { price: number }[];
 
     return rows.map(r => r.price);
+  }
+
+  /** OHLCV bars for a symbol, ordered by date ascending. */
+  getOHLCV(symbol: string, days = 180): OHLCVBar[] {
+    const rows = this.db.prepare(`
+      SELECT ph.date, ph.open_price, ph.high_price, ph.low_price, ph.close_price, ph.volume
+      FROM price_history ph
+      JOIN securities s ON ph.security_id = s.id
+      WHERE s.symbol = ?
+        AND ph.high_price IS NOT NULL AND ph.low_price IS NOT NULL
+      ORDER BY ph.date DESC
+      LIMIT ?
+    `).all(symbol, days) as {
+      date: string; open_price: number; high_price: number;
+      low_price: number; close_price: number; volume: number;
+    }[];
+
+    // Reverse to ascending order
+    return rows.reverse().map(r => ({
+      date: r.date,
+      open: r.open_price,
+      high: r.high_price,
+      low: r.low_price,
+      close: r.close_price,
+      volume: r.volume || 0,
+    }));
+  }
+
+  /** Daily close prices for a symbol, ordered ascending. Returns {date, close}[]. */
+  getClosePrices(symbol: string, days = 90): { date: string; close: number }[] {
+    const rows = this.db.prepare(`
+      SELECT ph.date, ph.close_price
+      FROM price_history ph
+      JOIN securities s ON ph.security_id = s.id
+      WHERE s.symbol = ?
+      ORDER BY ph.date DESC
+      LIMIT ?
+    `).all(symbol, days) as { date: string; close_price: number }[];
+
+    return rows.reverse().map(r => ({ date: r.date, close: r.close_price }));
   }
 }

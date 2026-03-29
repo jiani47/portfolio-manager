@@ -21,6 +21,9 @@ const COMMANDS: Record<string, () => Promise<{ run: CommandFn }>> = {
   confluence: () => import('./commands/confluence'),
   screen: () => import('./commands/screen'),
   'trade-stats': () => import('./commands/trade-stats'),
+  scorecard: () => import('./commands/scorecard'),
+  'levels-refresh': () => import('./commands/levels-refresh'),
+  attribution: () => import('./commands/attribution'),
 };
 
 async function main() {
