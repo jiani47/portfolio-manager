@@ -18,6 +18,9 @@ const COMMANDS: Record<string, () => Promise<{ run: CommandFn }>> = {
   drift: () => import('./commands/drift'),
   size: () => import('./commands/size'),
   valuation: () => import('./commands/valuation'),
+  confluence: () => import('./commands/confluence'),
+  screen: () => import('./commands/screen'),
+  'trade-stats': () => import('./commands/trade-stats'),
 };
 
 async function main() {
