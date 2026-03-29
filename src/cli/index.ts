@@ -16,6 +16,7 @@ type CommandFn = (args: string[], db: Database.Database) => unknown;
 
 const COMMANDS: Record<string, () => Promise<{ run: CommandFn }>> = {
   drift: () => import('./commands/drift'),
+  size: () => import('./commands/size'),
 };
 
 async function main() {
