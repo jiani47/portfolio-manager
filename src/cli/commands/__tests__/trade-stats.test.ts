@@ -27,11 +27,11 @@ beforeEach(() => {
     ('ph-aapl', 'sec-aapl', '2026-03-27', 250.00, '${now}'),
     ('ph-tsla', 'sec-tsla', '2026-03-27', 180.00, '${now}');
 
-    INSERT INTO trading_positions (id, symbol, entry_date, entry_price, shares, thesis, stop_price, status, exit_date, exit_price, pnl) VALUES
-    ('tp-1', 'AAPL', '2026-03-01', 240, 10, 'bounce', 230, 'closed', '2026-03-10', 260, 200),
-    ('tp-2', 'TSLA', '2026-03-05', 200, 5, 'breakout', 190, 'closed', '2026-03-15', 180, -100),
-    ('tp-3', 'AAPL', '2026-03-10', 250, 10, 'gap fill', 240, 'closed', '2026-03-20', 270, 200),
-    ('tp-4', 'AAPL', '2026-03-20', 245, 8, 'retest', 235, 'open', NULL, NULL, NULL);
+    INSERT INTO trading_positions (id, symbol, entry_date, entry_price, shares, thesis, stop_price, status, exit_date, exit_price, exit_reason, pnl) VALUES
+    ('tp-1', 'AAPL', '2026-03-01', 240, 10, 'bounce', 230, 'closed', '2026-03-10', 260, 'target hit', 200),
+    ('tp-2', 'TSLA', '2026-03-05', 200, 5, 'breakout', 190, 'closed', '2026-03-15', 180, 'stop hit', -100),
+    ('tp-3', 'AAPL', '2026-03-10', 250, 10, 'gap fill', 240, 'closed', '2026-03-20', 270, 'target hit', 200),
+    ('tp-4', 'AAPL', '2026-03-20', 245, 8, 'retest', 235, 'open', NULL, NULL, NULL, NULL);
   `);
 });
 
@@ -52,12 +52,22 @@ describe('trade-stats CLI command', () => {
     expect(result.stats.profitFactor).toBeCloseTo(4.0, 1);
   });
 
-  it('returns open P&L', () => {
+  it('returns open trades with unrealized gain', () => {
     const result = run([], db);
 
-    expect(result.openPnl).toHaveLength(1);
+    expect(result.openTrades).toHaveLength(1);
+    expect(result.openTrades[0].symbol).toBe('AAPL');
     // 8 shares × (250 - 245) = $40
-    expect(result.openPnl[0].unrealizedGain).toBe(40);
+    expect(result.openTrades[0].unrealizedGain).toBe(40);
+  });
+
+  it('returns closed trades with exit reason', () => {
+    const result = run([], db);
+
+    expect(result.closedTrades).toHaveLength(3);
+    // most recent first (exit_date DESC)
+    expect(result.closedTrades[0].exitReason).toBe('target hit');
+    expect(result.closedTrades[1].exitReason).toBe('stop hit');
   });
 
   it('handles no trades', () => {
@@ -65,6 +75,7 @@ describe('trade-stats CLI command', () => {
     const result = run([], db);
 
     expect(result.stats.totalTrades).toBe(0);
-    expect(result.openPnl).toHaveLength(0);
+    expect(result.openTrades).toHaveLength(0);
+    expect(result.closedTrades).toHaveLength(0);
   });
 });

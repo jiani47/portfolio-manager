@@ -11,6 +11,8 @@ export interface ClosedTradeRecord extends ClosedTradeInput {
   entryPrice: number;
   exitPrice: number;
   shares: number;
+  exitReason: string;
+  stopPrice: number | null;
 }
 
 export interface OpenTradeRecord {
@@ -30,6 +32,7 @@ export class TradeRepository {
   getClosedTrades(): ClosedTradeRecord[] {
     const rows = this.db.prepare(`
       SELECT symbol, shares, entry_price, exit_price, entry_date, exit_date, pnl,
+        exit_reason, stop_price,
         CAST(julianday(exit_date) - julianday(entry_date) AS INTEGER) as hold_days
       FROM trading_positions
       WHERE status = 'closed'
@@ -37,6 +40,7 @@ export class TradeRepository {
     `).all() as {
       symbol: string; shares: number; entry_price: number; exit_price: number;
       entry_date: string; exit_date: string; pnl: number; hold_days: number;
+      exit_reason: string | null; stop_price: number | null;
     }[];
 
     return rows.map(r => ({
@@ -50,6 +54,8 @@ export class TradeRepository {
       realizedGainPct: r.entry_price > 0 ? ((r.exit_price - r.entry_price) / r.entry_price) * 100 : 0,
       holdDays: r.hold_days,
       isWin: r.pnl > 0,
+      exitReason: r.exit_reason || '',
+      stopPrice: r.stop_price,
     }));
   }
 
