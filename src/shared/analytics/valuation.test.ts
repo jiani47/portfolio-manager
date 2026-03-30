@@ -53,9 +53,9 @@ describe('calculateFairPriceRange', () => {
         isAdr: false,
       });
 
-      expect(result.fairLow).toBeCloseTo(150, 0);   // 200 * 0.75
-      expect(result.fairMid).toBeCloseTo(180, 0);    // 200 * 0.90
-      expect(result.fairHigh).toBeCloseTo(220, 0);   // 200 * 1.10
+      expect(result!.fairLow).toBeCloseTo(150, 0);   // 200 * 0.75
+      expect(result!.fairMid).toBeCloseTo(180, 0);    // 200 * 0.90
+      expect(result!.fairHigh).toBeCloseTo(220, 0);   // 200 * 1.10
     });
   });
 
@@ -69,9 +69,9 @@ describe('calculateFairPriceRange', () => {
         isAdr: false,
       });
 
-      expect(result.fairLow).toBeCloseTo(170, 0);   // 200 * 0.85
-      expect(result.fairMid).toBeCloseTo(200, 0);    // 200 * 1.0
-      expect(result.fairHigh).toBeCloseTo(230, 0);   // 200 * 1.15
+      expect(result!.fairLow).toBeCloseTo(170, 0);   // 200 * 0.85
+      expect(result!.fairMid).toBeCloseTo(200, 0);    // 200 * 1.0
+      expect(result!.fairHigh).toBeCloseTo(230, 0);   // 200 * 1.15
     });
   });
 
@@ -87,7 +87,7 @@ describe('calculateFairPriceRange', () => {
         isAdr: false,
       });
 
-      expect(result.fairHigh).toBeCloseTo(250, 0);
+      expect(result!.fairHigh).toBeCloseTo(250, 0);
     });
 
     it('does not lower fairHigh when PEG=1 price is below it', () => {
@@ -101,7 +101,7 @@ describe('calculateFairPriceRange', () => {
         isAdr: false,
       });
 
-      expect(result.fairHigh).toBeCloseTo(220, 0);
+      expect(result!.fairHigh).toBeCloseTo(220, 0);
     });
 
     it('skips PEG=1 adjustment when growth is negative', () => {
@@ -113,7 +113,7 @@ describe('calculateFairPriceRange', () => {
       });
 
       // Value: base=200, high=230. Negative growth → no PEG=1 adjust
-      expect(result.fairHigh).toBeCloseTo(230, 0);
+      expect(result!.fairHigh).toBeCloseTo(230, 0);
     });
   });
 
@@ -128,9 +128,9 @@ describe('calculateFairPriceRange', () => {
         isAdr: true,
       });
 
-      expect(result.fairLow).toBeCloseTo(102, 0);
-      expect(result.fairMid).toBeCloseTo(120, 0);
-      expect(result.fairHigh).toBeCloseTo(138, 0);
+      expect(result!.fairLow).toBeCloseTo(102, 0);
+      expect(result!.fairMid).toBeCloseTo(120, 0);
+      expect(result!.fairHigh).toBeCloseTo(138, 0);
     });
 
     it('does NOT apply PEG=1 ceiling for ADRs', () => {
@@ -143,7 +143,7 @@ describe('calculateFairPriceRange', () => {
       });
 
       // Value: base=120, high=138. Should NOT be raised to 8*100=800
-      expect(result.fairHigh).toBeCloseTo(138, 0);
+      expect(result!.fairHigh).toBeCloseTo(138, 0);
     });
   });
 
