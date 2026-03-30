@@ -1,36 +1,22 @@
-# Alibaba Group (BABA)
+# BABA — Thesis Snapshot
+*Exported 2026-03-19 15:25 from portfolio-manager DB*
 
-**Tier:** Starter
-**Conviction:** C
-**Target Allocation:** 2.0%
-**Last Scored:** 2026-03-16
-**Accounts:** Schwab 8819 (300 shares)
-**Cost Basis:** $45,577 (~$151.92/share)
-**Last Updated:** 2026-03-16
+## Position
+- **Tier**: Starter
+- **Target Allocation**: 2.0%
+- **Shares**: 20 @ $224.23 avg → $125.16 (-44.2%)
+- **Market Value**: $2,503
+- **Hold Period**: years
 
 ## Thesis
+China e-commerce/cloud, Qwen AI, low valuation (18x). Best diversification (0.24 corr). Trim to 2%.
 
-China's dominant e-commerce/cloud platform with a genuine AI option via Qwen. The core bet has two parts: (1) the e-commerce business is mature but generates enormous cash flow at a cheap valuation, and (2) Qwen + Alibaba Cloud could be China's AI infrastructure winner, providing a re-rating catalyst.
+## Invalidation Conditions
+Regulatory crackdown resumes, cloud negative, LLM monetization fails
 
-**What's working (Q3 FY2026 / Dec 2025 data):**
-- **Qwen AI momentum is real.** 600M+ downloads, 180,000+ derivative models on Hugging Face. Qwen app hit 10M downloads in first week. SAP partnership for global enterprise AI deployment. AI-related cloud revenue at triple-digit growth for 6 consecutive quarters.
-- **Cloud is growing.** Cloud Intelligence Group grew 13% in Dec quarter. Earlier in FY2026: Q1 +26%, Q2 +34%. AI is driving real workload growth.
-- **Valuation is genuinely cheap.** P/E (TTM): 18.6x vs AMZN ~60x, GOOG ~22x. 32% below its own 10-year median P/E of 27x.
-- **Aggressive buybacks.** Share count down 3.2% in one year, 5%+ in latest fiscal year. Real capital return.
-- **E-commerce still #1.** Taobao + Tmall: ~44% China e-commerce market share. Still the dominant platform despite PDD and Douyin growth.
-- **$53B capex committed over 3 years** for cloud/AI — signals management conviction.
+## Scorecard
 
-**What's not working / missing from original thesis:**
-- **Cloud growth is decelerating, not accelerating.** Q2: +34% → Q3: +13%. The AI revenue is strong but the base cloud business is cooling. The thesis implied an inflection story — the inflection may have already peaked.
-- **Total revenue growth is only 8% YoY.** For a "Growth" tier position, this is value-stock territory. The e-commerce core is growing at GDP-like rates. BABA is a value stock with an AI call option, not a growth compounder.
-- **Douyin is the real competitive threat, not just PDD.** Douyin (TikTok China) generated ~$200B GMV in 2024 through social commerce. This isn't in the original invalidation framework. Short-video → shopping is disrupting the traditional marketplace model more than PDD's price competition.
-- **Cost basis $151.92, stock at $135.34 (-11%).** Underwater. The "re-rating on sentiment shift" has partially played out (stock rallied from $70s in 2023) but hasn't reached entry price.
-- **$53B AI capex is a risk, not just a signal.** If Qwen monetization stalls or chip export restrictions tighten, this spend becomes a drag on earnings.
-- **AI revenue is growing fast but from a small base.** "Triple-digit growth" on cloud AI sounds great, but total Cloud revenue is ~$5B/quarter with AI as a fraction. The denominator matters.
-
-**The honest framing:** BABA is a value stock (18x P/E, 8% revenue growth, mature e-commerce) with a call option on Qwen/Cloud AI monetization. The AI story is genuine — Qwen is one of the best non-US models — but it hasn't yet moved the needle on total company growth. The e-commerce business throws off cash and buybacks provide a floor. Consider whether "Growth" is the right tier or whether "Value + AI Optionality" better describes what you own.
-
-## Bull Criteria
+### Bull Criteria
 
 | # | Criterion | Metric | Threshold | Status | Last Checked |
 |---|-----------|--------|-----------|--------|--------------|
@@ -41,7 +27,7 @@ China's dominant e-commerce/cloud platform with a genuine AI option via Qwen. Th
 | B5 | E-commerce dominance | Taobao + Tmall market share | >40% | confirmed | 2026-03-16 |
 | B6 | AI capex commitment | Multi-year AI/cloud investment | Sustained and growing | confirmed | 2026-03-16 |
 
-## Bear Criteria
+### Bear Criteria
 
 | # | Criterion | Metric | Threshold | Status | Last Checked |
 |---|-----------|--------|-----------|--------|--------------|
@@ -52,49 +38,51 @@ China's dominant e-commerce/cloud platform with a genuine AI option via Qwen. Th
 | R5 | ADR/delisting risk | HFCAA compliance | Non-compliance or political action | not_triggered | 2026-03-16 |
 | R6 | Chip export restrictions tighten | GPU access for AI training | Cannot access advanced chips | watching | 2026-03-16 |
 
-## Score Summary
+### Recent Score Changes
+- **2026-03-19** B1: confirmed → challenged — Dec Q: Net income -66%, EPS $0.74 vs $2.55. Operating margin 4% vs 15%. PE denominator halved — cheap valuation thesis broken on trailing basis.
+- **2026-03-19** B3: challenged → confirmed — Cloud Intelligence +36% YoY, AI revenue triple-digit growth 10th consecutive Q. #1 China cloud 6 yrs. Reacceleration confirmed.
+- **2026-03-19** B5: confirmed → challenged — Revenue +2% YoY headline, missed estimates. Customer mgmt revenue +1%. Like-for-like +9% ex disposals but core e-commerce stagnating.
+- **2026-03-19** R2: watching → triggered — Revenue +2% YoY, missed estimates. FCF -71%. China macro drag confirmed — not just watching anymore.
 
-Bull: 5/6 confirmed (1 challenged — cloud decelerated from 34% to 13%) | Bear: 0/6 triggered (3 watching)
-Suggested conviction: C (cheap valuation with real AI optionality, but 8% total revenue growth is value-stock territory, not Growth)
+## Valuation
+- T12 PE: 17.5x
+- Forward PE: N/A (ADR)
+- PEG (forward): 0.39
+- Rating: **CHEAP**
+- EPS Growth: +43.9%
+- Fair Range: $106 – $125 – $143
+- *As of 2026-03-19*
 
-## Invalidation Framework
+## Support / Resistance
+- S $128.55 (strength 5/10)
+- R $139.22 (strength 5/10)
+- R $156.65 (strength 4/10)
+- R $160.74 (strength 3/10)
+- R $167.31 (strength 6/10)
+- R $181.80 (strength 6/10)
 
-### Early Warning (watch quarterly)
-- Cloud revenue growth below 10% (currently 13%, was 34% two quarters ago — watch trajectory)
-- AI-related revenue growth drops below 50% (currently triple-digit — track when they start disclosing the actual number)
-- E-commerce market share below 40% (currently ~44%)
-- Douyin e-commerce GMV exceeds $300B/yr (currently ~$200B — the inflection point)
-- Qwen model releases stall (no new major release for 6+ months)
-- Buyback pace slows below 2% annualized share reduction
+## Research Notes
 
-### Invalidation Conditions
-- **Regulatory crackdown resumes** — new fines exceeding $1B, forced restructuring, or government board seats
-- **Cloud growth turns negative** — would signal enterprise customers leaving, not just deceleration
-- **E-commerce margin collapse** — price war with PDD/Douyin that destroys unit economics for 2+ quarters
-- **Qwen monetization fails after 12+ months** — AI capex continues but cloud revenue growth doesn't reaccelerate above 20%
-- **ADR/delisting risk materializes** — HFCAA non-compliance or political action threatening US listing
-- **Chip export restrictions tighten** — if BABA can't access advanced GPUs, the AI capex becomes stranded
+### Business Model
+- *2026-03-19*: E-commerce (Taobao/Tmall) + Cloud Intelligence (Alibaba Cloud) + International (AliExpress/Lazada) + Quick Commerce (Ele.me). Revenue split: 56% China e-comm, 15% cloud, 14% international, 24% others. [6-K Dec 2025]
 
-### What Would Make Me Add
-- Cloud revenue growth reaccelerates above 25% for 2+ consecutive quarters (AI driving real enterprise adoption)
-- Qwen enterprise revenue disclosed separately and showing $1B+ run rate
-- Stock below $120 on macro fear (not regulatory or competitive deterioration)
-- China stimulus drives measurable consumer spending recovery in Taobao/Tmall GMV
-- NOT: "Ant Group IPO gets approved" — remove, this is speculative and outside BABA's control
+### Catalyst
+- *2026-03-19*: Cloud +36% YoY, AI triple-digit growth 10th consecutive Q. Qwen 300M MAU, 1B downloads. T-Head proprietary GPU in production. S&M normalization in 2-3Q could double EBITA. [6-K Dec 2025]
 
-## Risk Notes
+### Risks
+- *2026-03-19*: S&M went from 15% to 25% of revenue in Dec Q. Quick commerce subsidies burning cash. FCF -71% YoY. All Others segment losing RMB 9.8B/Q. [6-K Dec 2025]
 
-- **Beta 0.88** — one of the lower-risk positions in the portfolio. Low correlation to SPY (0.27) provides genuine diversification.
-- **China regulatory risk** — de-escalating since 2023 but ever-present. Impossible to model, impossible to hedge.
-- **ADR structure risk** — you own a Cayman Islands VIE, not direct equity in Alibaba. In an extreme scenario (geopolitical crisis, delisting), liquidity evaporates.
-- **Currency risk** — RMB weakness hurts USD-denominated returns.
-- **Geopolitical tail risk** — a Taiwan scenario would crater all China holdings simultaneously. This is low-probability but catastrophic.
-- **Position size: $40K (7.6% of portfolio) while -11% underwater.** Third largest equity position by weight. Sizing is appropriate IF the AI option thesis plays out, but oversized for a pure value hold.
-- **The $53B AI capex gamble.** Management is betting the company on AI. If it works, cloud becomes a $30B+ business. If it doesn't, you're paying for capex that generates no incremental return.
+## Observations (recent)
+- **2026-03-19** [-] Q3 FY25 earnings: revenue missed estimates, net income -66% YoY. Massive AI capex drag — CEO took over new AI business group. Market punishing -5%. Thesis 'low valuation' challenged: E in PE just dropped. Rebalance trim (207 shares) triggers Mar 24.
+- **2026-03-19** [~] Post-earnings deep dive from 6-K: Thesis shifted from value play to AI/Cloud transition bet. Cloud 15% of rev now, projected 24% in 3yr at +35% growth. Total rev growth accelerates from +2% to +10-12% as cloud compounds. Cloud EBITA +25% with expanding margins (9% now). Quick commerce +56% but burning cash. All Others bleeding RMB 9.8B/Q. E-commerce stagnant at +1-5%. Key: cloud margin expansion to 15-20% would match e-commerce EBITA contribution in 3yr. Position: trim to 2% correct — transition bet sizing, not value play.
+- **2026-03-19** [+] Opex deep dive: profit collapse is almost entirely S&M — went from 15% to 25% of revenue (+RMB 29.8B incremental). Quick commerce customer acquisition is the driver, not structural margin erosion. COGS only +1.5%, R&D flat, G&A improved. If S&M normalizes to 18%, quarterly EBITA nearly doubles (RMB 23B→43B). CFO says unit economics 'improving steadily' but no signal spending will stop. Management committed to sustained investment. Implication: profit depression likely transient (2-3Q), not permanent. Supports 2% hold over exit — normalization optionality is real.
+- **2026-03-17** [+] Launched agentic AI tool for businesses with Slack/Teams integration. Second AI catalyst in 2 days (after CEO taking helm of AI group).
+- **2026-03-16** [+] CEO takes helm of new AI-focused business group — direct support for Qwen/AI thesis
+- **2026-03-16** [~] Partial trim 80 of 207 @ 137.75. Reducing from 6.4% to ~3.5%. 127 more to sell to reach 2% target.
 
-## Decision Log
-
-| Date | Action | Notes |
-|------|--------|-------|
-| 2026-03-06 | Thesis documented | Growth tier — pricing power limited by PDD/JD competition and regulatory overhang. Qwen AI angle is the upside catalyst |
-| 2026-03-15 | Thesis deep review | Key findings: Qwen AI is genuine (600M downloads, SAP partnership, triple-digit cloud AI growth), but total revenue only +8% (value-stock growth rate). Cloud decelerating from 34%→13% (inflection may have peaked). Douyin at $200B GMV is the real competitive threat — not in original framework. Valuation cheap at 18x P/E with aggressive buybacks. Consider reclassifying from Growth to Value + AI Optionality. |
+## Earnings Reviews
+### Q3 FY25 (2026-03-19)
+- Rev: 284843.0 vs 290700.0
+- Trajectory: decelerating | Impact: **challenged**
+- Decision: hold
+- Notes: Trim to 2% per plan. AI/Cloud transition thesis, not value play. S&M normalization in 2-3Q.

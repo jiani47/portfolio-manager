@@ -220,7 +220,7 @@ Ordered by value (lines of Python replaced × bug risk):
 | 1 | `drift` | Position loading + drift calc | positions, intents, prices | `allocation` | ~60 |
 | 2 | `size` | Position loading + sizing + tranches | positions, intents, prices, price_levels, price_history (ATR) | `sizing` | ~120 |
 | 3 | `valuation` | Metric loading + fair range | valuation_metrics | `valuation` | ~80 |
-| 4 | `confluence` | Signal detection + data loading | valuation_metrics, price_levels, prices | `confluence` | ~70 |
+| 4 | `confluence` | Signal detection + data loading | valuation_metrics, price_levels, prices | `confluence` | thi~70 |
 | 5 | `screen` | Composite scoring + data loading | watchlist_items, valuation_metrics, price_levels | `confluence` | ~60 |
 | 6 | `trade-stats` | Trade aggregation + stats | closed trades (FIFO derivation) | `trading` | ~80 |
 | 7 | `scorecard` | Thesis file reading + parsing | filesystem (thesis.md) | `scorecard` | ~60 |
