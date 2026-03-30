@@ -799,10 +799,10 @@ for sd in symbols_data:
         if rating in ('CHEAP', 'FAIR') and fwd_peg and fwd_peg > 0 and fwd_peg < 1.2:
             signals.append(f"{rating} PEG:{fwd_peg:.2f}")
 
-    # Signal 2: Near support
+    # Signal 2: Near support (must be meaningfully below price, not just barely)
     nearest_s = conn.execute("""
         SELECT price, strength FROM price_levels
-        WHERE symbol = ? AND level_type = 'support' AND price < ?
+        WHERE symbol = ? AND level_type = 'support' AND price < ? * 0.99
         ORDER BY price DESC LIMIT 1
     """, (symbol, price)).fetchone()
     if nearest_s:
@@ -817,10 +817,10 @@ for sd in symbols_data:
     if len(signals) < 2:
         continue
 
-    # Get S/R levels for R:R
+    # Get S/R levels for R:R (support must be at least 1% below price to be meaningful)
     supports = conn.execute("""
         SELECT price, strength FROM price_levels
-        WHERE symbol = ? AND level_type = 'support' AND price < ?
+        WHERE symbol = ? AND level_type = 'support' AND price < ? * 0.99
         ORDER BY price DESC LIMIT 3
     """, (symbol, price)).fetchall()
     resistances = conn.execute("""
@@ -835,7 +835,11 @@ for sd in symbols_data:
     if s1 and r1:
         downside = price - s1['price']
         upside = r1['price'] - price
-        rr = upside / downside if downside > 0 else 0
+        # Require at least 2% downside to compute meaningful R:R
+        if downside > price * 0.02:
+            rr = upside / downside
+        else:
+            rr = None  # too close to call
 
     confluence.append({
         'symbol': symbol, 'price': price, 'signals': signals,
