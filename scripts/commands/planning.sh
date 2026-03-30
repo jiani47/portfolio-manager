@@ -1364,176 +1364,81 @@ PYEOF
     ;;
 
   confluence)
-    # Entry confluence detection: find symbols with multiple aligned signals
-    python3 - "$DB" << 'PYEOF'
-import sqlite3, sys
+    RESULT=$("$SCRIPT_DIR/run-ts.sh" confluence 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$RESULT" ]; then
+      echo "Error computing confluence." >&2
+      exit 1
+    fi
+    echo "$RESULT" | python3 -c "
+import sys, json, sqlite3, os
 from datetime import date
 
-db_path = sys.argv[1]
-conn = sqlite3.connect(db_path)
-conn.row_factory = sqlite3.Row
+results = json.load(sys.stdin)
 
-# Regime filter
+# Regime filter (safety mechanism — sorting day gate)
 SECTOR_ALIASES = {
     'tech': 'Technology', 'technology': 'Technology',
-    'comms': 'Communication Services', 'comm services': 'Communication Services',
-    'communication': 'Communication Services', 'communication services': 'Communication Services',
+    'comms': 'Communication Services', 'communication services': 'Communication Services',
     'consumer cyclical': 'Consumer Cyclical', 'cyclical': 'Consumer Cyclical',
-    'consumer defensive': 'Consumer Defensive', 'defensive': 'Consumer Defensive',
-    'defensives': 'Consumer Defensive',
-    'financial': 'Financial Services', 'financial services': 'Financial Services',
-    'financials': 'Financial Services',
-    'healthcare': 'Healthcare', 'health': 'Healthcare',
-    'industrials': 'Industrials', 'industrial': 'Industrials',
-    'energy': 'Energy', 'oil': 'Energy',
-    'utilities': 'Utilities', 'utility': 'Utilities',
-    'basic materials': 'Basic Materials', 'materials': 'Basic Materials',
-    'real estate': 'Real Estate',
+    'financial': 'Financial Services', 'financials': 'Financial Services',
+    'healthcare': 'Healthcare', 'industrials': 'Industrials',
+    'energy': 'Energy', 'utilities': 'Utilities',
+    'basic materials': 'Basic Materials', 'real estate': 'Real Estate',
 }
 
-def get_punished_sectors(conn):
+db_path = os.path.expanduser('~/Library/Application Support/portfolio-manager/portfolio.db')
+punished_sectors = set()
+regime_type = None
+try:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     today = date.today().isoformat()
-    ritual = conn.execute(
-        "SELECT regime_punishing, regime_type FROM daily_rituals WHERE date = ?", (today,)
-    ).fetchone()
-    if not ritual or not ritual['regime_punishing']:
-        return set(), None
-    text = ritual['regime_punishing'].lower()
-    punished = set()
-    for alias, canonical in SECTOR_ALIASES.items():
-        if alias in text:
-            punished.add(canonical)
-    return punished, ritual['regime_type']
+    ritual = conn.execute('SELECT regime_punishing, regime_type FROM daily_rituals WHERE date = ?', (today,)).fetchone()
+    if ritual and ritual['regime_punishing']:
+        text = ritual['regime_punishing'].lower()
+        for alias, canonical in SECTOR_ALIASES.items():
+            if alias in text:
+                punished_sectors.add(canonical)
+        regime_type = ritual['regime_type']
 
-punished_sectors, regime_type = get_punished_sectors(conn)
+    # Look up sectors for each symbol
+    for r in results:
+        row = conn.execute('SELECT sector FROM securities WHERE symbol = ?', (r['symbol'],)).fetchone()
+        r['sector'] = row['sector'] if row and row['sector'] else None
+        r['regime_blocked'] = r['sector'] in punished_sectors if r['sector'] else False
 
-# Get all watchlist + portfolio symbols with valuation data
-symbols_data = conn.execute("""
-    SELECT DISTINCT symbol, 'watchlist' as source FROM (
-        SELECT wi.symbol FROM watchlist_items wi
-        UNION
-        SELECT s.symbol FROM positions p
-        JOIN securities s ON p.security_id = s.id
-        WHERE s.type = 'stock' AND p.quantity > 0
-    )
-""").fetchall()
+        # Look up watchlist
+        wl = conn.execute('SELECT w.name FROM watchlist_items wi JOIN watchlists w ON wi.watchlist_id = w.id WHERE wi.symbol = ?', (r['symbol'],)).fetchone()
+        r['watchlist'] = wl['name'] if wl else '—'
+    conn.close()
+except:
+    for r in results:
+        r['regime_blocked'] = False
+        r['watchlist'] = '—'
 
-if not symbols_data:
-    print("  No symbols found.")
+if not results:
+    print()
+    print('=== Entry Confluence Detection ===')
+    print('  No symbols with 2+ aligned signals found.')
+    print()
     sys.exit(0)
 
-results = []
-for sd in symbols_data:
-    symbol = sd['symbol']
-    signals = []
-
-    # Get valuation
-    vm = conn.execute("""
-        SELECT peg_rating, forward_peg, forward_pe, eps_growth_pct,
-               fair_low, fair_mid, fair_high
-        FROM valuation_metrics WHERE symbol = ?
-        ORDER BY date DESC LIMIT 1
-    """, (symbol,)).fetchone()
-
-    # Get current price
-    price_row = conn.execute("""
-        SELECT ph.close_price FROM price_history ph
-        JOIN securities s ON ph.security_id = s.id
-        WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
-    """, (symbol,)).fetchone()
-    price = price_row['close_price'] if price_row else 0
-
-    if not price or price <= 0:
-        continue
-
-    # Signal 1: Valuation — CHEAP or FAIR with PEG < 1.2
-    if vm:
-        fwd_peg = vm['forward_peg']
-        rating = vm['peg_rating']
-        if rating in ('CHEAP', 'FAIR') and fwd_peg and fwd_peg > 0 and fwd_peg < 1.2:
-            signals.append(f"Valuation: {rating} (PEG {fwd_peg:.2f})")
-
-    # Signal 2: Technical — within 5% of support
-    nearest_s = conn.execute("""
-        SELECT price, strength FROM price_levels
-        WHERE symbol = ? AND level_type = 'support' AND price < ?
-        ORDER BY price DESC LIMIT 1
-    """, (symbol, price)).fetchone()
-    if nearest_s:
-        pct_from_s = (price - nearest_s['price']) / price * 100
-        if pct_from_s <= 5:
-            signals.append(f"Technical: near support ${nearest_s['price']:.2f} ({pct_from_s:.1f}% away)")
-
-    # Signal 3: Growth — EPS growth > 20%
-    if vm and vm['eps_growth_pct'] and vm['eps_growth_pct'] > 20:
-        signals.append(f"Growth: EPS +{vm['eps_growth_pct']:.0f}%")
-
-    if len(signals) < 2:
-        continue
-
-    # Which watchlist?
-    wl = conn.execute("""
-        SELECT w.name FROM watchlist_items wi
-        JOIN watchlists w ON wi.watchlist_id = w.id
-        WHERE wi.symbol = ?
-    """, (symbol,)).fetchone()
-    wl_name = wl['name'] if wl else '—'
-
-    results.append({
-        'symbol': symbol,
-        'price': price,
-        'signals': signals,
-        'watchlist': wl_name,
-        'signal_count': len(signals),
-    })
-
-# Sort by signal count descending
-results.sort(key=lambda x: x['signal_count'], reverse=True)
-
-# Regime filter
-active = []
-blocked = []
+print()
+print('=== Entry Confluence Detection ===')
 if punished_sectors:
-    for r in results:
-        sector = conn.execute("SELECT sector FROM securities WHERE symbol = ?", (r['symbol'],)).fetchone()
-        sec_name = sector['sector'] if sector and sector['sector'] else None
-        if sec_name and sec_name in punished_sectors:
-            r['sector'] = sec_name
-            blocked.append(r)
-        else:
-            active.append(r)
-else:
-    active = results
-
-print()
-print("=== Entry Confluence Detection ===")
-print("  (Symbols with 2+ aligned entry signals)")
-if punished_sectors:
-    print(f"  Regime: {regime_type} — filtering out: {', '.join(sorted(punished_sectors))}")
+    print(f'  Regime: {regime_type} — caution: {\", \".join(sorted(punished_sectors))}')
+print(f'  Found {len(results)} symbols with entry confluence:')
 print()
 
-if not active and not blocked:
-    print("  No confluences found. Criteria: CHEAP/FAIR PEG<1.2, within 5% of support, EPS growth >20%")
-else:
-    if active:
-        for r in active:
-            print(f"  {r['symbol']:<7} ${r['price']:>8.2f}  [{r['watchlist']}]  ({r['signal_count']} signals)")
-            for s in r['signals']:
-                print(f"    + {s}")
-            print()
-    else:
-        print("  No actionable confluences (all in punished sectors).")
-        print()
-
-    if blocked:
-        print(f"  --- Regime-blocked ({len(blocked)} in punished sectors) ---")
-        for r in blocked:
-            print(f"  {r['symbol']:<7} ${r['price']:>8.2f}  [{r['watchlist']}]  ({r['signal_count']} signals)  ⊘ {r['sector']}")
-        print()
-
-print()
-conn.close()
-PYEOF
+for r in results:
+    sym = r['symbol']
+    count = r['signalCount']
+    marker = ' ⊘ REGIME-BLOCKED' if r.get('regime_blocked') else ''
+    print(f'  {sym} — {count} signals ({r[\"watchlist\"]}){marker}:')
+    for s in r['signals']:
+        print(f'    • {s[\"label\"]}')
+    print()
+"
     ;;
 
   valuations)
