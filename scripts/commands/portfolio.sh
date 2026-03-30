@@ -121,81 +121,42 @@ case "$1" in
     "
     ;;
   drift)
+    RESULT=$("$SCRIPT_DIR/run-ts.sh" drift 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$RESULT" ]; then
+      echo "Error computing drift. Check run-ts.sh drift for details." >&2
+      exit 1
+    fi
     echo "=== Allocation Drift ==="
     echo ""
-    # Compute portfolio total first
-    PORTFOLIO_TOTAL=$(sqlite3 "$DB" "
-      SELECT SUM(p.quantity * COALESCE(
-        (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
-        0
-      )) FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type NOT IN ('cash','option') AND p.quantity > 0;
-    ")
     printf "  %-6s  %7s  %7s  %10s  %10s  %7s  %s\n" "Symbol" "Current" "Target" "Current MV" "Target MV" "Drift" "Tier"
     printf "  %-6s  %7s  %7s  %10s  %10s  %7s  %s\n" "──────" "───────" "──────" "──────────" "─────────" "──────" "────────"
-    sqlite3 "$DB" "
-      SELECT s.symbol,
-        printf('%.1f', pi.target_allocation_pct) as target_pct,
-        printf('%.1f',
-          SUM(p.quantity * COALESCE(
-            (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
-            0
-          )) * 100.0 / NULLIF($PORTFOLIO_TOTAL, 0)
-        ) as current_pct,
-        printf('%.0f',
-          SUM(p.quantity * COALESCE(
-            (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
-            0
-          ))
-        ) as current_mv,
-        printf('%.0f', pi.target_allocation_pct * $PORTFOLIO_TOTAL / 100.0) as target_mv,
-        printf('%.1f',
-          SUM(p.quantity * COALESCE(
-            (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
-            0
-          )) * 100.0 / NULLIF($PORTFOLIO_TOTAL, 0)
-          - pi.target_allocation_pct
-        ) as drift_pct,
-        pi.tier
-      FROM positions p
-      JOIN securities s ON p.security_id = s.id
-      JOIN position_intents pi ON pi.position_id = p.id
-      WHERE s.type NOT IN ('cash','option') AND p.quantity > 0 AND pi.target_allocation_pct IS NOT NULL
-      GROUP BY s.symbol
-      ORDER BY ABS(
-        SUM(p.quantity * COALESCE(
-          (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1),
-          0
-        )) * 100.0 / NULLIF($PORTFOLIO_TOTAL, 0)
-        - pi.target_allocation_pct
-      ) DESC;
-    " | while IFS='|' read -r SYMBOL TARGET CURRENT CURRENT_MV TARGET_MV DRIFT TIER; do
-      if [ -z "$SYMBOL" ]; then continue; fi
-      ABS_DRIFT=$(echo "$DRIFT" | tr -d '-')
-      if (( $(echo "$ABS_DRIFT > 3" | bc -l 2>/dev/null || echo 0) )); then
-        COLOR="\033[31m"
-      elif (( $(echo "$ABS_DRIFT > 1" | bc -l 2>/dev/null || echo 0) )); then
-        COLOR="\033[33m"
-      else
-        COLOR="\033[32m"
-      fi
-      RESET="\033[0m"
-      SIGN=""
-      if (( $(echo "$DRIFT > 0" | bc -l 2>/dev/null || echo 0) )); then SIGN="+"; fi
-      printf "  %-6s  %6s%%  %5s%%  \$%'9d  \$%'9d  ${COLOR}%s%s%%${RESET}  %s\n" "$SYMBOL" "$CURRENT" "$TARGET" "$CURRENT_MV" "$TARGET_MV" "$SIGN" "$DRIFT" "$TIER"
-    done
+    echo "$RESULT" | python3 -c "
+import sys, json
 
-    # Show positions WITHOUT a target (for awareness)
-    NO_TARGET=$(sqlite3 "$DB" "
-      SELECT s.symbol FROM positions p
-      JOIN securities s ON p.security_id = s.id
-      LEFT JOIN position_intents pi ON pi.position_id = p.id
-      WHERE s.type NOT IN ('cash','option') AND p.quantity > 0
-        AND (pi.target_allocation_pct IS NULL)
-      GROUP BY s.symbol ORDER BY s.symbol;
-    ")
-    if [ -n "$NO_TARGET" ]; then
-      echo ""
-      echo "No target set: $(echo $NO_TARGET | tr '\n' ' ')"
-    fi
+rows = json.load(sys.stdin)
+with_target = [r for r in rows if r['targetPct'] is not None and r['driftPct'] is not None]
+no_target = [r for r in rows if r['targetPct'] is None]
+
+with_target.sort(key=lambda r: abs(r['driftPct']), reverse=True)
+
+for r in with_target:
+    drift = r['driftPct']
+    abs_drift = abs(drift)
+    if abs_drift > 3:
+        color = '\033[31m'
+    elif abs_drift > 1:
+        color = '\033[33m'
+    else:
+        color = '\033[32m'
+    reset = '\033[0m'
+    sign = '+' if drift > 0 else ''
+    print(f'  {r[\"symbol\"]:<6}  {r[\"currentPct\"]:>6.1f}%  {r[\"targetPct\"]:>5.1f}%  \${r[\"marketValue\"]:>9,.0f}  \${r[\"targetMarketValue\"]:>9,.0f}  {color}{sign}{drift:.1f}%{reset}  {r[\"tier\"]}')
+
+if no_target:
+    symbols = ' '.join(r['symbol'] for r in no_target if r['symbol'] != 'Cash')
+    if symbols:
+        print()
+        print(f'No target set: {symbols}')
+"
     ;;
 esac
