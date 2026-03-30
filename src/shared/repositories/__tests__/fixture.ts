@@ -109,6 +109,25 @@ export function createTestDb(): Database.Database {
       fetched_at TEXT NOT NULL,
       UNIQUE(symbol, date)
     );
+
+    CREATE TABLE watchlists (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      description TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE watchlist_items (
+      id TEXT PRIMARY KEY,
+      watchlist_id TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      target_price REAL,
+      thesis TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (watchlist_id) REFERENCES watchlists(id),
+      UNIQUE(watchlist_id, symbol)
+    );
   `);
 
   return db;

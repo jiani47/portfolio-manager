@@ -862,169 +862,37 @@ PYEOF
     ;;
 
   screen)
-    # Watchlist screening: rank by composite valuation + technical + growth score
-    python3 - "$DB" << 'PYEOF'
-import sqlite3, sys
-from datetime import date
+    RESULT=$("$SCRIPT_DIR/run-ts.sh" screen 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$RESULT" ]; then
+      echo "Error computing screen." >&2
+      exit 1
+    fi
+    echo "$RESULT" | python3 -c "
+import sys, json
 
-db_path = sys.argv[1]
-conn = sqlite3.connect(db_path)
-conn.row_factory = sqlite3.Row
-
-# Regime filter
-SECTOR_ALIASES = {
-    'tech': 'Technology', 'technology': 'Technology',
-    'comms': 'Communication Services', 'comm services': 'Communication Services',
-    'communication': 'Communication Services', 'communication services': 'Communication Services',
-    'consumer cyclical': 'Consumer Cyclical', 'cyclical': 'Consumer Cyclical',
-    'consumer defensive': 'Consumer Defensive', 'defensive': 'Consumer Defensive',
-    'defensives': 'Consumer Defensive',
-    'financial': 'Financial Services', 'financial services': 'Financial Services',
-    'financials': 'Financial Services',
-    'healthcare': 'Healthcare', 'health': 'Healthcare',
-    'industrials': 'Industrials', 'industrial': 'Industrials',
-    'energy': 'Energy', 'oil': 'Energy',
-    'utilities': 'Utilities', 'utility': 'Utilities',
-    'basic materials': 'Basic Materials', 'materials': 'Basic Materials',
-    'real estate': 'Real Estate',
-}
-
-def get_punished_sectors(conn):
-    today = date.today().isoformat()
-    ritual = conn.execute(
-        "SELECT regime_punishing, regime_type FROM daily_rituals WHERE date = ?", (today,)
-    ).fetchone()
-    if not ritual or not ritual['regime_punishing']:
-        return set(), None
-    text = ritual['regime_punishing'].lower()
-    punished = set()
-    for alias, canonical in SECTOR_ALIASES.items():
-        if alias in text:
-            punished.add(canonical)
-    return punished, ritual['regime_type']
-
-punished_sectors, regime_type = get_punished_sectors(conn)
-
-# Get all watchlist symbols with latest valuation data
-rows = conn.execute("""
-    SELECT wi.symbol, w.name as watchlist,
-           vm.peg_rating, vm.forward_peg, vm.forward_pe, vm.eps_growth_pct,
-           vm.fair_low, vm.fair_mid, vm.fair_high
-    FROM watchlist_items wi
-    JOIN watchlists w ON wi.watchlist_id = w.id
-    LEFT JOIN valuation_metrics vm ON vm.symbol = wi.symbol
-      AND vm.date = (SELECT MAX(date) FROM valuation_metrics WHERE symbol = wi.symbol)
-    ORDER BY wi.symbol
-""").fetchall()
-
-if not rows:
-    print("  No watchlist items found.")
+results = json.load(sys.stdin)
+if not results:
+    print('  No watchlist items found.')
     sys.exit(0)
 
-results = []
-for r in rows:
-    symbol = r['symbol']
-
-    # Current price
-    price_row = conn.execute("""
-        SELECT ph.close_price FROM price_history ph
-        JOIN securities s ON ph.security_id = s.id
-        WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
-    """, (symbol,)).fetchone()
-    price = price_row['close_price'] if price_row else 0
-
-    # Valuation score: CHEAP=3, FAIR=2, RICH=1, PRICEY=0
-    rating = r['peg_rating'] or ''
-    val_scores = {'CHEAP': 3, 'FAIR': 2, 'RICH': 1, 'PRICEY': 0}
-    val_score = val_scores.get(rating, 1)
-
-    # Technical score: near support +1, near resistance -1
-    tech_score = 0
-    tech_pos = "—"
-    if price > 0:
-        nearest_s = conn.execute("""
-            SELECT price, strength FROM price_levels
-            WHERE symbol = ? AND level_type = 'support' AND price < ?
-            ORDER BY price DESC LIMIT 1
-        """, (symbol, price)).fetchone()
-        nearest_r = conn.execute("""
-            SELECT price, strength FROM price_levels
-            WHERE symbol = ? AND level_type = 'resistance' AND price > ?
-            ORDER BY price ASC LIMIT 1
-        """, (symbol, price)).fetchone()
-
-        if nearest_s:
-            pct_from_s = (price - nearest_s['price']) / price * 100
-            if pct_from_s <= 5:
-                tech_score = 1
-                tech_pos = f"near S (${nearest_s['price']:.0f})"
-        if nearest_r:
-            pct_from_r = (nearest_r['price'] - price) / price * 100
-            if pct_from_r <= 5:
-                tech_score = -1
-                tech_pos = f"near R (${nearest_r['price']:.0f})"
-
-    # EPS growth score
-    growth_score = 0
-    eps_g = r['eps_growth_pct']
-    if eps_g:
-        if eps_g > 50:
-            growth_score = 2
-        elif eps_g > 30:
-            growth_score = 1
-
-    composite = val_score + tech_score + growth_score
-
-    fwd_pe = r['forward_pe']
-    fwd_peg = r['forward_peg']
-    growth_str = f"{eps_g:+.0f}%" if eps_g else "—"
-    pe_str = f"{fwd_pe:.1f}x" if fwd_pe and fwd_pe > 0 else "—"
-    peg_str = f"{fwd_peg:.2f}" if fwd_peg and fwd_peg > 0 else "—"
-
-    results.append({
-        'symbol': symbol,
-        'watchlist': r['watchlist'],
-        'price': price,
-        'rating': rating or '—',
-        'peg': peg_str,
-        'fwd_pe': pe_str,
-        'growth': growth_str,
-        'tech_pos': tech_pos,
-        'composite': composite,
-    })
-
-# Sort by composite score descending
-results.sort(key=lambda x: x['composite'], reverse=True)
-
-# Tag regime-blocked symbols
-if punished_sectors:
-    for r in results:
-        sector = conn.execute("SELECT sector FROM securities WHERE symbol = ?", (r['symbol'],)).fetchone()
-        sec_name = sector['sector'] if sector and sector['sector'] else None
-        r['regime_blocked'] = sec_name in punished_sectors if sec_name else False
-else:
-    for r in results:
-        r['regime_blocked'] = False
-
 print()
-print("=== Watchlist Screening ===")
-if punished_sectors:
-    print(f"  Regime: {regime_type} — dimming: {', '.join(sorted(punished_sectors))}")
+print('=== Watchlist Screening ===')
 print()
-print(f"  {'Symbol':<7} {'Price':>8} {'Rating':>8} {'PEG':>6} {'Fwd PE':>8} {'Growth':>8} {'Technical':>16} {'Score':>6}  Watchlist")
-print(f"  {'─'*7} {'─'*8} {'─'*8} {'─'*6} {'─'*8} {'─'*8} {'─'*16} {'─'*6}  {'─'*12}")
+print(f'  {\"Symbol\":<7} {\"Price\":>8} {\"Rating\":>8} {\"PEG\":>6} {\"Fwd PE\":>8} {\"Growth\":>8} {\"Score\":>6}  Watchlist')
+print(f'  {\"─\"*7} {\"─\"*8} {\"─\"*8} {\"─\"*6} {\"─\"*8} {\"─\"*8} {\"─\"*6}  {\"─\"*12}')
 
 for r in results:
-    marker = '  ⊘' if r['regime_blocked'] else ''
-    print(f"  {r['symbol']:<7} ${r['price']:>7.2f} {r['rating']:>8} {r['peg']:>6} {r['fwd_pe']:>8} {r['growth']:>8} {r['tech_pos']:>16} {r['composite']:>6}  {r['watchlist']}{marker}")
+    rating = r['pegRating'] or '—'
+    peg = f\"{r['forwardPeg']:.2f}\" if r['forwardPeg'] and r['forwardPeg'] > 0 else '—'
+    fwd_pe = f\"{r['forwardPe']:.1f}x\" if r['forwardPe'] and r['forwardPe'] > 0 else '—'
+    growth = f\"{r['epsGrowthPct']:+.0f}%\" if r['epsGrowthPct'] else '—'
+    wl = r['watchlist'] or '—'
+    print(f'  {r[\"symbol\"]:<7} \${r[\"price\"]:>7.2f} {rating:>8} {peg:>6} {fwd_pe:>8} {growth:>8} {r[\"compositeScore\"]:>6}  {wl}')
 
 print()
-print("  Scoring: Valuation (CHEAP=3,FAIR=2,RICH=1,PRICEY=0) + Technical (support=+1,resistance=-1) + Growth (>50%=+2,>30%=+1)")
-if punished_sectors:
-    print("  ⊘ = in regime-punished sector (caution)")
+print('  Scoring: Valuation (CHEAP=3,FAIR=2,RICH=1,PRICEY=0) + Technical (support=+1,resistance=-1) + Growth (>50%=+2,>30%=+1)')
 print()
-conn.close()
-PYEOF
+"
     ;;
 
   scan-trades)
