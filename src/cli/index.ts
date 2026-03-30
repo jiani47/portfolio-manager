@@ -8,10 +8,6 @@ import Database from 'better-sqlite3';
 const DB_PATH = process.env.PM_DB ||
   `${process.env.HOME}/Library/Application Support/portfolio-manager/portfolio.db`;
 
-function openDb(): Database.Database {
-  return new Database(DB_PATH, { readonly: true });
-}
-
 type CommandFn = (args: string[], db: Database.Database) => unknown;
 
 const COMMANDS: Record<string, () => Promise<{ run: CommandFn }>> = {
@@ -27,11 +23,15 @@ const COMMANDS: Record<string, () => Promise<{ run: CommandFn }>> = {
 };
 
 async function main() {
-  const command = process.argv[2];
-  const args = process.argv.slice(3);
+  const rawArgs = process.argv.slice(2);
+  const rwFlag = rawArgs.includes('--rw');
+  const filteredArgs = rawArgs.filter(a => a !== '--rw');
+
+  const command = filteredArgs[0];
+  const args = filteredArgs.slice(1);
 
   if (!command || command === '--help') {
-    console.error(`Usage: tsx src/cli/index.ts <command> [args...]`);
+    console.error(`Usage: tsx src/cli/index.ts [--rw] <command> [args...]`);
     console.error(`Commands: ${Object.keys(COMMANDS).join(', ')}`);
     process.exit(1);
   }
@@ -42,7 +42,7 @@ async function main() {
     process.exit(1);
   }
 
-  const db = openDb();
+  const db = new Database(DB_PATH, { readonly: !rwFlag });
   try {
     const mod = await loader();
     const result = mod.run(args, db);
