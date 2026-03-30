@@ -35,7 +35,18 @@ export interface AttributionCommandResult {
 }
 
 export function run(args: string[], db: Database.Database): AttributionCommandResult {
-  const days = args[0] ? parseInt(args[0], 10) : 90;
+  let days: number;
+  if (args[0]?.toUpperCase() === 'YTD') {
+    const latest = db.prepare('SELECT MAX(date) as d FROM price_history').get() as { d: string } | undefined;
+    if (!latest?.d) return emptyResult(0);
+    const latestDate = new Date(latest.d);
+    const jan1 = new Date(latestDate.getFullYear(), 0, 1);
+    days = Math.floor((latestDate.getTime() - jan1.getTime()) / (1000 * 60 * 60 * 24));
+    if (days < 2) return emptyResult(days);
+  } else {
+    days = args[0] ? parseInt(args[0], 10) : 90;
+    if (isNaN(days)) days = 90;
+  }
 
   const posRepo = new PositionRepository(db);
   const priceRepo = new PricingRepository(db);
