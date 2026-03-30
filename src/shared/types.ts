@@ -508,35 +508,6 @@ export interface SecurityTagAssignment {
   createdAt: string;
 }
 
-// Trading rule types
-export type RuleType = 'add' | 'trim' | 'exit' | 'hold';
-export type ConditionType = 'price_drop_pct' | 'position_size_pct' | 'loss_pct' | 'holding_period_days';
-export type ConditionOperator = 'gte' | 'lte' | 'eq' | 'gt' | 'lt';
-export type ActionType = 'buy' | 'sell' | 'alert';
-
-export interface TradingRule {
-  id: string;
-  name: string;
-  description?: string;
-  securityId?: string;
-  ruleType: RuleType;
-  conditionType: ConditionType;
-  conditionOperator: ConditionOperator;
-  conditionValue: number;
-  actionType: ActionType;
-  actionValue?: number;
-  isEnabled: boolean;
-  priority: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface TradingRuleFilters {
-  securityId?: string | null;
-  ruleType?: RuleType;
-  isEnabled?: boolean;
-}
-
 // Decision log types
 export type DecisionType = 'buy' | 'sell' | 'hold' | 'research';
 

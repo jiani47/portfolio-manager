@@ -82,13 +82,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   removeTagFromSecurity: (securityId: string, tagId: string) => ipcRenderer.invoke('db:security-tag-assignments:remove', securityId, tagId),
   getTagsForSecurity: (securityId: string) => ipcRenderer.invoke('db:security-tag-assignments:get-tags-for-security', securityId),
 
-  // Trading rule operations
-  getTradingRules: (filters?: unknown) => ipcRenderer.invoke('db:trading-rules:list', filters),
-  createTradingRule: (rule: unknown) => ipcRenderer.invoke('db:trading-rules:create', rule),
-  getTradingRule: (id: string) => ipcRenderer.invoke('db:trading-rules:get', id),
-  updateTradingRule: (id: string, rule: unknown) => ipcRenderer.invoke('db:trading-rules:update', id, rule),
-  deleteTradingRule: (id: string) => ipcRenderer.invoke('db:trading-rules:delete', id),
-
   // Position intent operations
   getPositionIntent: (positionId: string) => ipcRenderer.invoke('db:position-intents:get', positionId),
   upsertPositionIntent: (positionId: string, data: unknown) => ipcRenderer.invoke('db:position-intents:upsert', positionId, data),

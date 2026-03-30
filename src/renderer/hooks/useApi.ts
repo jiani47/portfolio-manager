@@ -23,8 +23,6 @@ import type {
   LotDetailsParseResult,
   SecurityTag,
   SecurityTagAssignment,
-  TradingRule,
-  TradingRuleFilters,
   DecisionLog,
   DecisionLogFilters,
   CompanyProfile,
@@ -152,13 +150,6 @@ declare global {
       assignTagToSecurity: (securityId: string, tagId: string) => Promise<SecurityTagAssignment>;
       removeTagFromSecurity: (securityId: string, tagId: string) => Promise<void>;
       getTagsForSecurity: (securityId: string) => Promise<SecurityTag[]>;
-
-      // Trading rule operations
-      getTradingRules: (filters?: TradingRuleFilters) => Promise<TradingRule[]>;
-      createTradingRule: (rule: Omit<TradingRule, 'id' | 'createdAt' | 'updatedAt'>) => Promise<TradingRule>;
-      getTradingRule: (id: string) => Promise<TradingRule | null>;
-      updateTradingRule: (id: string, rule: Partial<TradingRule>) => Promise<TradingRule>;
-      deleteTradingRule: (id: string) => Promise<void>;
 
       // Position intent operations
       getPositionIntent: (positionId: string) => Promise<PositionIntent | null>;
@@ -996,57 +987,6 @@ export function useSecurityTags() {
     assignTag,
     removeTag,
     getTagsForSecurity,
-  };
-}
-
-export function useTradingRules() {
-  const [rules, setRules] = useState<TradingRule[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchRules = useCallback(async (filters?: TradingRuleFilters) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await window.electronAPI.getTradingRules(filters);
-      setRules(data);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const createRule = useCallback(async (rule: Omit<TradingRule, 'id' | 'createdAt' | 'updatedAt'>) => {
-    const newRule = await window.electronAPI.createTradingRule(rule);
-    setRules(prev => [newRule, ...prev]);
-    return newRule;
-  }, []);
-
-  const updateRule = useCallback(async (id: string, rule: Partial<TradingRule>) => {
-    const updated = await window.electronAPI.updateTradingRule(id, rule);
-    setRules(prev => prev.map(r => r.id === id ? updated : r));
-    return updated;
-  }, []);
-
-  const deleteRule = useCallback(async (id: string) => {
-    await window.electronAPI.deleteTradingRule(id);
-    setRules(prev => prev.filter(r => r.id !== id));
-  }, []);
-
-  const toggleRule = useCallback(async (id: string, isEnabled: boolean) => {
-    return updateRule(id, { isEnabled });
-  }, [updateRule]);
-
-  return {
-    rules,
-    loading,
-    error,
-    fetchRules,
-    createRule,
-    updateRule,
-    deleteRule,
-    toggleRule,
   };
 }
 

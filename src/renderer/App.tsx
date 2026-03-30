@@ -3,7 +3,6 @@ import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import Holdings from './pages/Holdings';
 import TaxLots from './pages/TaxLots';
-import TradingRules from './pages/TradingRules';
 import Orders from './pages/Orders';
 import DailyRitual from './pages/DailyRitual';
 import Settings from './pages/Settings';
@@ -24,7 +23,6 @@ function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/holdings" element={<Holdings />} />
         <Route path="/tax-lots" element={<TaxLots />} />
-        <Route path="/trading-rules" element={<TradingRules />} />
         <Route path="/daily-ritual" element={<DailyRitual />} />
         <Route path="/orders" element={<Orders />} />
         <Route path="/watchlists" element={<Watchlists />} />

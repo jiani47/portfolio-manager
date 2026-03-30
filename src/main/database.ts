@@ -12,9 +12,7 @@ import {
   AssetAllocation,
   SecurityTag,
   SecurityTagAssignment,
-  TradingRule,
   DecisionLog,
-  TradingRuleFilters,
   DecisionLogFilters,
   PriceHistory,
   PositionIntent,
@@ -1720,99 +1718,6 @@ export class Database {
     return stmt.all(securityId).map(this.mapRowToSecurityTag);
   }
 
-  // Trading rule operations
-  listTradingRules(filters?: TradingRuleFilters): TradingRule[] {
-    if (!this.db) throw new Error('Database not initialized');
-    let sql = 'SELECT * FROM trading_rules WHERE 1=1';
-    const params: unknown[] = [];
-
-    if (filters?.securityId !== undefined) {
-      if (filters.securityId === null) {
-        sql += ' AND security_id IS NULL';
-      } else {
-        sql += ' AND security_id = ?';
-        params.push(filters.securityId);
-      }
-    }
-    if (filters?.ruleType) {
-      sql += ' AND rule_type = ?';
-      params.push(filters.ruleType);
-    }
-    if (filters?.isEnabled !== undefined) {
-      sql += ' AND is_enabled = ?';
-      params.push(filters.isEnabled ? 1 : 0);
-    }
-
-    sql += ' ORDER BY priority DESC, created_at DESC';
-
-    const stmt = this.db.prepare(sql);
-    return stmt.all(...params).map(this.mapRowToTradingRule);
-  }
-
-  createTradingRule(rule: Omit<TradingRule, 'id' | 'createdAt' | 'updatedAt'>): TradingRule {
-    if (!this.db) throw new Error('Database not initialized');
-    const id = uuidv4();
-    const now = new Date().toISOString();
-    const stmt = this.db.prepare(`
-      INSERT INTO trading_rules (id, name, description, security_id, rule_type, condition_type, condition_operator, condition_value, action_type, action_value, is_enabled, priority, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    stmt.run(
-      id,
-      rule.name,
-      rule.description || null,
-      rule.securityId || null,
-      rule.ruleType,
-      rule.conditionType,
-      rule.conditionOperator,
-      rule.conditionValue,
-      rule.actionType,
-      rule.actionValue || null,
-      rule.isEnabled ? 1 : 0,
-      rule.priority,
-      now,
-      now
-    );
-    return this.getTradingRuleById(id)!;
-  }
-
-  getTradingRuleById(id: string): TradingRule | null {
-    if (!this.db) throw new Error('Database not initialized');
-    const stmt = this.db.prepare('SELECT * FROM trading_rules WHERE id = ?');
-    const row = stmt.get(id);
-    return row ? this.mapRowToTradingRule(row) : null;
-  }
-
-  updateTradingRule(id: string, rule: Partial<TradingRule>): TradingRule {
-    if (!this.db) throw new Error('Database not initialized');
-    const now = new Date().toISOString();
-    const fields: string[] = ['updated_at = ?'];
-    const values: unknown[] = [now];
-
-    if (rule.name !== undefined) { fields.push('name = ?'); values.push(rule.name); }
-    if (rule.description !== undefined) { fields.push('description = ?'); values.push(rule.description); }
-    if (rule.securityId !== undefined) { fields.push('security_id = ?'); values.push(rule.securityId); }
-    if (rule.ruleType !== undefined) { fields.push('rule_type = ?'); values.push(rule.ruleType); }
-    if (rule.conditionType !== undefined) { fields.push('condition_type = ?'); values.push(rule.conditionType); }
-    if (rule.conditionOperator !== undefined) { fields.push('condition_operator = ?'); values.push(rule.conditionOperator); }
-    if (rule.conditionValue !== undefined) { fields.push('condition_value = ?'); values.push(rule.conditionValue); }
-    if (rule.actionType !== undefined) { fields.push('action_type = ?'); values.push(rule.actionType); }
-    if (rule.actionValue !== undefined) { fields.push('action_value = ?'); values.push(rule.actionValue); }
-    if (rule.isEnabled !== undefined) { fields.push('is_enabled = ?'); values.push(rule.isEnabled ? 1 : 0); }
-    if (rule.priority !== undefined) { fields.push('priority = ?'); values.push(rule.priority); }
-
-    values.push(id);
-    const stmt = this.db.prepare(`UPDATE trading_rules SET ${fields.join(', ')} WHERE id = ?`);
-    stmt.run(...values);
-    return this.getTradingRuleById(id)!;
-  }
-
-  deleteTradingRule(id: string): void {
-    if (!this.db) throw new Error('Database not initialized');
-    const stmt = this.db.prepare('DELETE FROM trading_rules WHERE id = ?');
-    stmt.run(id);
-  }
-
   // Decision log operations
   listDecisionLogs(filters?: DecisionLogFilters): DecisionLog[] {
     if (!this.db) throw new Error('Database not initialized');
@@ -3152,26 +3057,6 @@ export class Database {
       securityId: r.security_id as string,
       tagId: r.tag_id as string,
       createdAt: r.created_at as string,
-    };
-  };
-
-  private mapRowToTradingRule = (row: unknown): TradingRule => {
-    const r = row as Record<string, unknown>;
-    return {
-      id: r.id as string,
-      name: r.name as string,
-      description: r.description as string | undefined,
-      securityId: r.security_id as string | undefined,
-      ruleType: r.rule_type as TradingRule['ruleType'],
-      conditionType: r.condition_type as TradingRule['conditionType'],
-      conditionOperator: r.condition_operator as TradingRule['conditionOperator'],
-      conditionValue: r.condition_value as number,
-      actionType: r.action_type as TradingRule['actionType'],
-      actionValue: r.action_value as number | undefined,
-      isEnabled: Boolean(r.is_enabled),
-      priority: r.priority as number,
-      createdAt: r.created_at as string,
-      updatedAt: r.updated_at as string,
     };
   };
 

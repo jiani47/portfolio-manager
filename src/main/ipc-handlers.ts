@@ -331,12 +331,6 @@ export function setupIpcHandlers(
   ipcMain.handle('db:security-tag-assignments:remove', (_, securityId, tagId) => db.removeTagFromSecurity(securityId, tagId));
   ipcMain.handle('db:security-tag-assignments:get-tags-for-security', (_, securityId) => db.getTagsForSecurity(securityId));
 
-  // Trading rule handlers
-  ipcMain.handle('db:trading-rules:list', (_, filters) => db.listTradingRules(filters));
-  ipcMain.handle('db:trading-rules:create', (_, rule) => db.createTradingRule(rule));
-  ipcMain.handle('db:trading-rules:get', (_, id) => db.getTradingRuleById(id));
-  ipcMain.handle('db:trading-rules:update', (_, id, rule) => db.updateTradingRule(id, rule));
-  ipcMain.handle('db:trading-rules:delete', (_, id) => db.deleteTradingRule(id));
 
   // Position intent handlers
   ipcMain.handle('db:position-intents:get', (_, positionId) => db.getPositionIntent(positionId));
