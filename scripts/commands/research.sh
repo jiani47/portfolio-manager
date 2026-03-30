@@ -91,115 +91,72 @@ case "$1" in
       echo "Usage: pm-cli.sh scorecard <symbol>"
       exit 1
     fi
-    PROJ_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-    THESIS_PATH="$PROJ_ROOT/docs/positions/$SYMBOL/thesis.md"
-    if [ ! -f "$THESIS_PATH" ]; then
-      echo "ERROR: No thesis doc found at $THESIS_PATH"
+
+    # run-ts.sh reads thesis.md relative to CWD — ensure we're in project root
+    PROJ_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+    RESULT=$(cd "$PROJ_ROOT" && "$SCRIPT_DIR/run-ts.sh" scorecard "$SYMBOL" 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$RESULT" ]; then
+      echo "Error: Could not parse scorecard for $SYMBOL" >&2
+      echo "  Check that docs/positions/$SYMBOL/thesis.md exists with Bull/Bear Criteria tables." >&2
       exit 1
     fi
+    echo "$RESULT" | python3 -c "
+import sys, json, re, os
 
-    python3 <<PYEOF
-import re, sys
+d = json.load(sys.stdin)
+symbol = d['symbol']
+bc = d['bullCounts']
+brc = d['bearCounts']
 
-thesis_path = "$THESIS_PATH"
-symbol = "$SYMBOL"
+# Read tier and conviction from thesis file (header fields not in TS output)
+thesis_path = os.path.join('docs', 'positions', symbol, 'thesis.md')
+tier = 'Unknown'
+last_updated = '—'
+conviction = '—'
+if os.path.isfile(thesis_path):
+    with open(thesis_path) as f:
+        content = f.read()
+    m = re.search(r'\*\*Tier:\*\*\s*(.+)', content)
+    if m: tier = m.group(1).strip()
+    m = re.search(r'\*\*Last Updated:\*\*\s*(.+)', content)
+    if m: last_updated = m.group(1).strip()
+    m = re.search(r'\*\*Conviction:\*\*\s*(.+)', content)
+    if m: conviction = m.group(1).strip()
 
-with open(thesis_path, "r") as f:
-    content = f.read()
-
-# Extract header fields
-tier_match = re.search(r'\*\*Tier:\*\*\s*(.+)', content)
-tier = tier_match.group(1).strip() if tier_match else "Unknown"
-
-last_updated_match = re.search(r'\*\*Last Updated:\*\*\s*(.+)', content)
-last_updated = last_updated_match.group(1).strip() if last_updated_match else "—"
-
-# Parse a criteria table section (supports subsection tables under ### headers)
-def parse_table(section_header, text):
-    """Parse all markdown tables under a ## header (including ### subsections). Returns list of dicts."""
-    # Extract the full section between ## header and next ## header
-    section_pattern = r'## ' + re.escape(section_header) + r'\s*\n(.*?)(?=\n## |\Z)'
-    section_match = re.search(section_pattern, text, re.DOTALL)
-    if not section_match:
-        return []
-    section_text = section_match.group(1)
-    # Find all markdown tables (header row + separator + data rows) in the section
-    table_pattern = r'\|[^\n]+\|\s*\n\s*\|[-| ]+\|\s*\n((?:\s*\|[^\n]+\|\s*\n?)*)'
-    rows = []
-    for table_match in re.finditer(table_pattern, section_text):
-        for line in table_match.group(1).strip().split('\n'):
-            cells = [c.strip() for c in line.strip().strip('|').split('|')]
-            if len(cells) >= 6:
-                rows.append({
-                    'id': cells[0],
-                    'criterion': cells[1],
-                    'metric': cells[2],
-                    'threshold': cells[3],
-                    'status': cells[4].lower().strip(),
-                    'last_checked': cells[5],
-                })
-    return rows
-
-bulls = parse_table("Bull Criteria", content)
-bears = parse_table("Bear Criteria", content)
-
-if not bulls and not bears:
-    print(f"=== {symbol} Scorecard ===")
-    print(f"  Tier: {tier}")
-    print(f"  Status: UNSCORED — no Bull/Bear criteria tables found")
-    print(f"  Add ## Bull Criteria and ## Bear Criteria tables to thesis.md")
-    sys.exit(0)
-
-# Count statuses
-bull_confirmed = sum(1 for b in bulls if b['status'] == 'confirmed')
-bull_pending = sum(1 for b in bulls if b['status'] == 'pending')
-bull_challenged = sum(1 for b in bulls if b['status'] == 'challenged')
-bear_triggered = sum(1 for b in bears if b['status'] == 'triggered')
-bear_watching = sum(1 for b in bears if b['status'] == 'watching')
-bear_not_triggered = sum(1 for b in bears if b['status'] == 'not_triggered')
-
-total_bulls = len(bulls)
-total_bears = len(bears)
-bull_pct = (bull_confirmed / total_bulls * 100) if total_bulls > 0 else 0
-
-# Read conviction from thesis doc (qualitative, not computed)
-conviction_match = re.search(r'\*\*Conviction:\*\*\s*(.+)', content)
-conviction = conviction_match.group(1).strip() if conviction_match else "—"
-
-# Display
-print(f"=== {symbol} Scorecard ===")
-print(f"  Tier: {tier}")
-print(f"  Last Updated: {last_updated}")
+print(f'=== {symbol} Scorecard ===')
+print(f'  Tier: {tier}')
+print(f'  Last Updated: {last_updated}')
 print()
 
 # Bull criteria
-print(f"  Bull Criteria ({bull_confirmed}/{total_bulls} confirmed)")
-print(f"  {'─' * 70}")
-for b in bulls:
-    status_icon = {'confirmed': '✓', 'pending': '?', 'challenged': '✗'}.get(b['status'], ' ')
-    status_color = {'confirmed': 'confirmed', 'pending': 'pending', 'challenged': 'CHALLENGED'}.get(b['status'], b['status'])
-    print(f"  {status_icon} {b['id']}  {b['criterion']:<30s} {b['metric']:<25s} {status_color:<12s} {b['last_checked']}")
+print(f'  Bull Criteria ({bc[\"confirmed\"]}/{bc[\"total\"]} confirmed)')
+print(f'  {\"─\" * 70}')
+for b in d['bulls']:
+    icon = {'confirmed': '✓', 'pending': '?', 'challenged': '✗'}.get(b['status'], ' ')
+    display = {'confirmed': 'confirmed', 'pending': 'pending', 'challenged': 'CHALLENGED'}.get(b['status'], b['status'])
+    print(f'  {icon} {b[\"id\"]}  {b[\"criterion\"]:<30s} {b[\"metric\"]:<25s} {display:<12s} {b[\"lastChecked\"]}')
 print()
 
 # Bear criteria
-bear_label = f"{bear_triggered}/{total_bears} triggered"
-if bear_triggered > 0:
-    bear_label += " ⚠" * bear_triggered
-print(f"  Bear Criteria ({bear_label})")
-print(f"  {'─' * 70}")
-for b in bears:
-    status_icon = {'triggered': '⚠', 'watching': '◉', 'not_triggered': '·'}.get(b['status'], ' ')
-    status_display = {'triggered': 'TRIGGERED', 'watching': 'watching', 'not_triggered': 'clear'}.get(b['status'], b['status'])
-    print(f"  {status_icon} {b['id']}  {b['criterion']:<30s} {b['metric']:<25s} {status_display:<12s} {b['last_checked']}")
+triggered = brc['triggered']
+bear_label = f'{triggered}/{brc[\"total\"]} triggered'
+if triggered > 0:
+    bear_label += ' ⚠' * triggered
+print(f'  Bear Criteria ({bear_label})')
+print(f'  {\"─\" * 70}')
+for b in d['bears']:
+    icon = {'triggered': '⚠', 'watching': '◉', 'not_triggered': '·'}.get(b['status'], ' ')
+    display = {'triggered': 'TRIGGERED', 'watching': 'watching', 'not_triggered': 'clear'}.get(b['status'], b['status'])
+    print(f'  {icon} {b[\"id\"]}  {b[\"criterion\"]:<30s} {b[\"metric\"]:<25s} {display:<12s} {b[\"lastChecked\"]}')
 print()
 
-# Score summary
-print(f"  Score Summary")
-print(f"  {'─' * 40}")
-print(f"  Bull: {bull_confirmed} confirmed, {bull_pending} pending, {bull_challenged} challenged")
-print(f"  Bear: {bear_triggered} triggered, {bear_watching} watching, {bear_not_triggered} clear")
-print(f"  Conviction: {conviction} (from thesis doc)")
-PYEOF
+# Summary
+print(f'  Score Summary')
+print(f'  {\"─\" * 40}')
+print(f'  Bull: {bc[\"confirmed\"]} confirmed, {bc[\"pending\"]} pending, {bc[\"challenged\"]} challenged')
+print(f'  Bear: {brc[\"triggered\"]} triggered, {brc[\"watching\"]} watching, {brc[\"notTriggered\"]} clear')
+print(f'  Conviction: {conviction} (from thesis doc)')
+"
     ;;
 
   scorecards)
