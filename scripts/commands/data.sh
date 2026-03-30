@@ -915,9 +915,7 @@ PYEOF
     ;;
 
   levels-refresh)
-    # Recompute support/resistance levels from price_history swing highs/lows
     SYMBOL="$2"
-    NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
     # Create table if not exists
     sqlite3 "$DB" "
@@ -935,195 +933,36 @@ PYEOF
       CREATE INDEX IF NOT EXISTS idx_price_levels_symbol ON price_levels(symbol);
     "
 
+    echo "=== Refreshing Support/Resistance Levels ==="
+
     if [ -n "$SYMBOL" ]; then
       SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
-      SYMBOLS="$SYMBOL"
+      RESULT=$("$SCRIPT_DIR/run-ts.sh" --rw levels-refresh "$SYMBOL" 2>/dev/null)
     else
-      SYMBOLS=$(sqlite3 "$DB" "
-        SELECT DISTINCT symbol FROM (
-          SELECT s.symbol FROM positions p
-          JOIN securities s ON p.security_id = s.id
-          WHERE s.type != 'cash' AND s.symbol != ''
-          UNION
-          SELECT wi.symbol FROM watchlist_items wi
-          WHERE wi.symbol != ''
-        )
-        ORDER BY symbol;
-      ")
+      RESULT=$("$SCRIPT_DIR/run-ts.sh" --rw levels-refresh 2>/dev/null)
     fi
 
-    echo "=== Refreshing Support/Resistance Levels ==="
-    python3 - "$DB" "$NOW" "$SYMBOLS" <<'PYEOF'
-import sqlite3, uuid, sys, math
+    if [ $? -ne 0 ] || [ -z "$RESULT" ]; then
+      echo "Error refreshing levels." >&2
+      exit 1
+    fi
+    echo "$RESULT" | python3 -c "
+import sys, json
 
-db = sys.argv[1]
-now = sys.argv[2]
-symbols = [s.strip() for s in sys.argv[3].strip().split('\n') if s.strip()]
+data = json.load(sys.stdin)
+# Handle single result or array
+if isinstance(data, dict):
+    data = [data]
 
-conn = sqlite3.connect(db)
-cur = conn.cursor()
+for r in data:
+    sym = r['symbol']
+    price = r['currentPrice']
+    n_s = len(r['support'])
+    n_r = len(r['resistance'])
+    print(f'  {sym:<6} \${price:>8,.2f}  {n_s}S / {n_r}R levels')
 
-for symbol in symbols:
-    # Get 6 months of OHLCV data
-    cur.execute('''
-        SELECT ph.date, ph.open_price, ph.high_price, ph.low_price, ph.close_price, ph.volume
-        FROM price_history ph
-        JOIN securities s ON ph.security_id = s.id
-        WHERE s.symbol = ? AND ph.date >= date('now', '-6 months')
-        ORDER BY ph.date ASC
-    ''', (symbol,))
-    rows = cur.fetchall()
-
-    if len(rows) < 15:
-        print(f'  {symbol}: insufficient data ({len(rows)} days)')
-        continue
-
-    dates = [r[0] for r in rows]
-    opens = [r[1] for r in rows]
-    highs = [r[2] for r in rows]
-    lows = [r[3] for r in rows]
-    closes = [r[4] for r in rows]
-    volumes = [r[5] or 0 for r in rows]
-    current_price = closes[-1]
-    if current_price is None:
-        print(f'  {symbol}: no current price')
-        continue
-
-    total_days = len(rows)
-    avg_volume = sum(v for v in volumes if v > 0) / max(1, sum(1 for v in volumes if v > 0))
-
-    # Find swing highs/lows with metadata: (index, price, volume, rejection_pct)
-    swing_highs = []
-    swing_lows = []
-    window = 5
-
-    for i in range(window, len(rows) - window):
-        h = highs[i]
-        if h is None:
-            continue
-        neighborhood_h = [highs[j] for j in range(i - window, i + window + 1) if j != i]
-        if any(v is None for v in neighborhood_h):
-            continue
-        if all(h >= v for v in neighborhood_h):
-            # Rejection: upper wick as % of high (how far price rejected from level)
-            c, o = closes[i], opens[i]
-            if c is not None and o is not None and h > 0:
-                body_top = max(c, o)
-                rejection = (h - body_top) / h
-            else:
-                rejection = 0
-            swing_highs.append((i, h, volumes[i], rejection))
-
-        l = lows[i]
-        if l is None:
-            continue
-        neighborhood_l = [lows[j] for j in range(i - window, i + window + 1) if j != i]
-        if any(v is None for v in neighborhood_l):
-            continue
-        if all(l <= v for v in neighborhood_l):
-            # Rejection: lower wick as % of low (how far price bounced off level)
-            c, o = closes[i], opens[i]
-            if c is not None and o is not None and l > 0:
-                body_bottom = min(c, o)
-                rejection = (body_bottom - l) / l
-            else:
-                rejection = 0
-            swing_lows.append((i, l, volumes[i], rejection))
-
-    # Cluster nearby swing points within 2%, preserving metadata
-    def cluster_with_meta(points, threshold=0.02):
-        if not points:
-            return []
-        points = sorted(points, key=lambda p: p[1])
-        clusters = []
-        current = [points[0]]
-        for pt in points[1:]:
-            if (pt[1] - current[0][1]) / current[0][1] <= threshold:
-                current.append(pt)
-            else:
-                avg_price = sum(p[1] for p in current) / len(current)
-                clusters.append((round(avg_price, 2), current))
-                current = [pt]
-        avg_price = sum(p[1] for p in current) / len(current)
-        clusters.append((round(avg_price, 2), current))
-        return clusters
-
-    def score_cluster(points):
-        """
-        Composite strength score (1-10):
-          - Touches (30%): more swing points clustered here = stronger
-          - Volume (25%): high volume at reversal vs symbol avg = stronger
-          - Recency (25%): recent tests weighted more (60-day half-life)
-          - Rejection (20%): clean bounces with long wicks = stronger
-        """
-        n = len(points)
-
-        # Touches: 1→0.2, 2→0.5, 3→0.75, 4+→1.0
-        touch_score = min(1.0, 0.2 + (n - 1) * 0.27) if n >= 1 else 0
-
-        # Volume: ratio of avg volume at swing points vs symbol avg
-        vol_vals = [p[2] for p in points if p[2] > 0]
-        if vol_vals and avg_volume > 0:
-            vol_ratio = (sum(vol_vals) / len(vol_vals)) / avg_volume
-            vol_score = min(1.0, vol_ratio / 2.0)
-        else:
-            vol_score = 0.3
-
-        # Recency: exponential decay, half-life 60 trading days, take best
-        half_life = 60
-        recency_vals = []
-        for p in points:
-            days_ago = total_days - 1 - p[0]
-            recency_vals.append(math.exp(-0.693 * days_ago / half_life))
-        recency_score = max(recency_vals)
-
-        # Rejection: avg wick size (3%+ wick = max score)
-        rej_vals = [p[3] for p in points]
-        avg_rej = sum(rej_vals) / len(rej_vals) if rej_vals else 0
-        rej_score = min(1.0, avg_rej / 0.03) if avg_rej > 0 else 0.1
-
-        composite = (
-            touch_score * 0.30 +
-            vol_score * 0.25 +
-            recency_score * 0.25 +
-            rej_score * 0.20
-        )
-        return max(1, min(10, round(composite * 10)))
-
-    resistance_clusters = cluster_with_meta(swing_highs)
-    support_clusters = cluster_with_meta(swing_lows)
-
-    resistance = [(p, score_cluster(pts), len(pts)) for p, pts in resistance_clusters if p > current_price]
-    support = [(p, score_cluster(pts), len(pts)) for p, pts in support_clusters if p < current_price]
-
-    resistance.sort(key=lambda x: x[0])
-    support.sort(key=lambda x: -x[0])
-
-    resistance = resistance[:5]
-    support = support[:5]
-
-    cur.execute("DELETE FROM price_levels WHERE symbol = ? AND source = 'swing'", (symbol,))
-
-    for price, strength, touches in resistance:
-        row_id = str(uuid.uuid4())
-        cur.execute('''
-            INSERT OR REPLACE INTO price_levels (id, symbol, level_type, price, strength, source, created_at, updated_at)
-            VALUES (?, ?, 'resistance', ?, ?, 'swing', ?, ?)
-        ''', (row_id, symbol, price, strength, now, now))
-
-    for price, strength, touches in support:
-        row_id = str(uuid.uuid4())
-        cur.execute('''
-            INSERT OR REPLACE INTO price_levels (id, symbol, level_type, price, strength, source, created_at, updated_at)
-            VALUES (?, ?, 'support', ?, ?, 'swing', ?, ?)
-        ''', (row_id, symbol, price, strength, now, now))
-
-    print(f'  {symbol:<6} ${current_price:>8,.2f}  {len(support)}S / {len(resistance)}R levels')
-
-conn.commit()
-conn.close()
 print('Done.')
-PYEOF
+"
     ;;
 
   levels)
