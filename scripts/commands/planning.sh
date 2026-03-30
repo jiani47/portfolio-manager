@@ -765,6 +765,20 @@ symbols_data = conn.execute("""
     )
 """).fetchall()
 
+def get_atr_pct(conn, symbol, price):
+    """ATR(14) as % of price — measures typical daily range for this ticker."""
+    row = conn.execute("""
+        SELECT AVG(high_price - low_price) as atr FROM (
+            SELECT high_price, low_price FROM price_history ph
+            JOIN securities s ON ph.security_id = s.id
+            WHERE s.symbol = ? AND high_price > 0 AND low_price > 0
+            ORDER BY ph.date DESC LIMIT 14
+        )
+    """, (symbol,)).fetchone()
+    if row and row['atr'] and price > 0:
+        return row['atr'] / price * 100
+    return 3.0  # default if no data
+
 confluence = []
 for sd in symbols_data:
     symbol = sd['symbol']
@@ -786,6 +800,10 @@ for sd in symbols_data:
     if not price or price <= 0:
         continue
 
+    # ATR% sets the noise floor — support/R:R must clear this to be meaningful
+    atr_pct = get_atr_pct(conn, symbol, price)
+    noise_floor = atr_pct / 100  # as decimal (e.g. 0.09 for 9% ATR)
+
     # Signal 1: Valuation
     fwd_peg = None
     rating = None
@@ -799,12 +817,13 @@ for sd in symbols_data:
         if rating in ('CHEAP', 'FAIR') and fwd_peg and fwd_peg > 0 and fwd_peg < 1.2:
             signals.append(f"{rating} PEG:{fwd_peg:.2f}")
 
-    # Signal 2: Near support (must be meaningfully below price, not just barely)
+    # Signal 2: Near support (must be at least 1x ATR below price to filter noise)
+    support_floor = price * (1 - noise_floor)
     nearest_s = conn.execute("""
         SELECT price, strength FROM price_levels
-        WHERE symbol = ? AND level_type = 'support' AND price < ? * 0.99
+        WHERE symbol = ? AND level_type = 'support' AND price < ?
         ORDER BY price DESC LIMIT 1
-    """, (symbol, price)).fetchone()
+    """, (symbol, support_floor)).fetchone()
     if nearest_s:
         pct_from_s = (price - nearest_s['price']) / price * 100
         if pct_from_s <= 5:
@@ -817,12 +836,12 @@ for sd in symbols_data:
     if len(signals) < 2:
         continue
 
-    # Get S/R levels for R:R (support must be at least 1% below price to be meaningful)
+    # Get S/R levels for R:R (support must clear ATR noise floor)
     supports = conn.execute("""
         SELECT price, strength FROM price_levels
-        WHERE symbol = ? AND level_type = 'support' AND price < ? * 0.99
+        WHERE symbol = ? AND level_type = 'support' AND price < ?
         ORDER BY price DESC LIMIT 3
-    """, (symbol, price)).fetchall()
+    """, (symbol, support_floor)).fetchall()
     resistances = conn.execute("""
         SELECT price, strength FROM price_levels
         WHERE symbol = ? AND level_type = 'resistance' AND price > ?
@@ -835,11 +854,11 @@ for sd in symbols_data:
     if s1 and r1:
         downside = price - s1['price']
         upside = r1['price'] - price
-        # Require at least 2% downside to compute meaningful R:R
-        if downside > price * 0.02:
+        # Downside must exceed 1x ATR to be a meaningful level, not intraday noise
+        if downside > price * noise_floor:
             rr = upside / downside
         else:
-            rr = None  # too close to call
+            rr = None
 
     confluence.append({
         'symbol': symbol, 'price': price, 'signals': signals,
