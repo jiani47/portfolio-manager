@@ -15,6 +15,8 @@ import { TransactionAnalyticsService } from './transaction-analytics-service';
 import { SchedulerService } from './scheduler-service';
 import { PreTradeValidator } from './pre-trade-validator';
 import { AppSettings, ExcelImportResult, RefreshPricesResult } from '../shared/types';
+import { run as runBasketResize } from '../cli/commands/basket-resize';
+import { classifyRegime, computeDailyReturns } from '../shared/analytics/regime';
 
 export function setupIpcHandlers(
   ipcMain: IpcMain,
@@ -905,6 +907,31 @@ export function setupIpcHandlers(
       }
     }
 
+    // Also include watchlist symbols (parity with CLI refresh)
+    const symbolByName = new Map(securities.map(s => [s.symbol, s.id]));
+    for (const sym of db.getWatchlistSymbols()) {
+      if (!symbolSecurityMap.has(sym) && symbolByName.has(sym)) {
+        symbolSecurityMap.set(sym, symbolByName.get(sym)!);
+      }
+    }
+
+    // Include sector ETFs for sector heatmap (parity with CLI refresh)
+    const SECTOR_ETFS = ['XLK', 'XLF', 'XLV', 'XLE', 'XLI', 'XLY', 'XLP', 'XLU', 'XLRE', 'XLB', 'XLC', 'SPY'];
+    const sectorEtfsAdded: string[] = [];
+    const sectorEtfsMissing: string[] = [];
+    for (const sym of SECTOR_ETFS) {
+      if (!symbolSecurityMap.has(sym)) {
+        if (symbolByName.has(sym)) {
+          symbolSecurityMap.set(sym, symbolByName.get(sym)!);
+          sectorEtfsAdded.push(sym);
+        } else {
+          sectorEtfsMissing.push(sym);
+        }
+      }
+    }
+    console.log(`[refresh] Symbols: ${symbolSecurityMap.size} total (${sectorEtfsAdded.length} sector ETFs added: ${sectorEtfsAdded.join(',')}${sectorEtfsMissing.length ? `, missing from securities: ${sectorEtfsMissing.join(',')}` : ''})`);
+    console.log(`[refresh] All symbols: ${Array.from(symbolSecurityMap.keys()).sort().join(', ')}`);
+
     if (symbolSecurityMap.size === 0) {
       return { success: true, updated: 0, failed: 0, errors: [], prices: {} };
     }
@@ -1172,45 +1199,179 @@ export function setupIpcHandlers(
 
   // Sector performance (fetched from main process to avoid CORS)
   // Returns per-exchange data so frontend can toggle
-  ipcMain.handle('fmp:sector-performance', async () => {
-    try {
-      const homedir = require('os').homedir();
-      const confPath = require('path').join(homedir, '.pm-cli.conf');
-      const content = fs.readFileSync(confPath, 'utf-8');
-      const match = content.match(/^FMP_API_KEY=(.+)$/m);
-      const apiKey = match ? match[1].trim() : null;
-      if (!apiKey) return null;
+  // Sector performance from local ETF prices (replaces FMP API)
+  const SECTOR_ETF_MAP: Record<string, string> = {
+    XLK: 'Technology', XLF: 'Financials', XLV: 'Health Care', XLE: 'Energy',
+    XLI: 'Industrials', XLY: 'Consumer Cyclical', XLP: 'Consumer Defensive',
+    XLU: 'Utilities', XLRE: 'Real Estate', XLB: 'Basic Materials', XLC: 'Communication Svcs',
+  };
 
-      const today = new Date();
-      for (let i = 0; i < 4; i++) {
-        const d = new Date(today);
-        d.setDate(d.getDate() - i);
-        const dateStr = d.toISOString().split('T')[0];
-        const [nyseResp, nasdaqResp] = await Promise.all([
-          fetch(`https://financialmodelingprep.com/stable/sector-performance-snapshot?date=${dateStr}&exchange=NYSE&apikey=${apiKey}`),
-          fetch(`https://financialmodelingprep.com/stable/sector-performance-snapshot?date=${dateStr}&exchange=NASDAQ&apikey=${apiKey}`),
-        ]);
-        const nyseData = await nyseResp.json();
-        const nasdaqData = await nasdaqResp.json();
-        const nyseArr = Array.isArray(nyseData) ? nyseData : [];
-        const nasdaqArr = Array.isArray(nasdaqData) ? nasdaqData : [];
-        if (nyseArr.length > 0 || nasdaqArr.length > 0) {
-          const toMap = (rows: any[]) => {
-            const m: Record<string, number> = {};
-            for (const r of rows) m[r.sector] = r.averageChange;
-            return m;
-          };
-          const isToday = dateStr === today.toISOString().split('T')[0];
-          return {
-            nyse: toMap(nyseArr),
-            nasdaq: toMap(nasdaqArr),
-            date: isToday ? 'Today' : dateStr,
-          };
+  ipcMain.handle('data:sector-performance', () => {
+    try {
+      const rawDb = db.getDb();
+      const today = new Date().toISOString().split('T')[0];
+      const etfSymbols = Object.keys(SECTOR_ETF_MAP);
+      const placeholders = etfSymbols.map(() => '?').join(',');
+      const allSymbols = [...etfSymbols, 'SPY'];
+      const allPlaceholders = allSymbols.map(() => '?').join(',');
+
+      // Find last 2 dates where ALL symbols (ETFs + SPY) have data
+      const recentDates = rawDb.prepare(`
+        SELECT ph.date, COUNT(DISTINCT s.symbol) as cnt
+        FROM price_history ph
+        JOIN securities s ON s.id = ph.security_id
+        WHERE s.symbol IN (${allPlaceholders}) AND ph.date <= ?
+        GROUP BY ph.date
+        HAVING cnt = ?
+        ORDER BY ph.date DESC
+        LIMIT 2
+      `).all([...allSymbols, today, allSymbols.length]) as { date: string }[];
+
+      if (recentDates.length === 0) return null;
+      const dataDate = recentDates[0].date;
+      const prevRow = recentDates.length >= 2 ? recentDates[1] : undefined;
+
+      // Fetch today's prices (sector ETFs + SPY)
+      const todayPrices = rawDb.prepare(`
+        SELECT s.symbol, ph.close_price, ph.open_price
+        FROM price_history ph
+        JOIN securities s ON s.id = ph.security_id
+        WHERE s.symbol IN (${allPlaceholders}) AND ph.date = ?
+      `).all([...allSymbols, dataDate]) as { symbol: string; close_price: number; open_price: number | null }[];
+
+      const todayMap = new Map(todayPrices.map(r => [r.symbol, { close: r.close_price, open: r.open_price }]));
+
+      // Fetch previous close
+      const prevCloseMap = new Map<string, number>();
+      if (prevRow) {
+        const prevPrices = rawDb.prepare(`
+          SELECT s.symbol, ph.close_price
+          FROM price_history ph
+          JOIN securities s ON s.id = ph.security_id
+          WHERE s.symbol IN (${allPlaceholders}) AND ph.date = ?
+        `).all([...allSymbols, prevRow.date]) as { symbol: string; close_price: number }[];
+        for (const r of prevPrices) prevCloseMap.set(r.symbol, r.close_price);
+      }
+
+      // Compute changes
+      const sectors: Array<{ symbol: string; name: string; changePct: number; price: number }> = [];
+      for (const [etf, sectorName] of Object.entries(SECTOR_ETF_MAP)) {
+        const t = todayMap.get(etf);
+        if (!t) continue;
+        const prevClose = prevCloseMap.get(etf);
+        let changePct: number;
+        if (prevClose && prevClose > 0) {
+          changePct = ((t.close - prevClose) / prevClose) * 100;
+        } else if (t.open && t.open > 0) {
+          changePct = ((t.close - t.open) / t.open) * 100;
+        } else {
+          continue;
+        }
+        sectors.push({ symbol: etf, name: sectorName, changePct, price: t.close });
+      }
+
+      // SPY benchmark
+      let benchmark: { symbol: string; changePct: number; price: number } | null = null;
+      const spyToday = todayMap.get('SPY');
+      const spyPrev = prevCloseMap.get('SPY');
+      if (spyToday && spyPrev && spyPrev > 0) {
+        benchmark = {
+          symbol: 'SPY',
+          changePct: ((spyToday.close - spyPrev) / spyPrev) * 100,
+          price: spyToday.close,
+        };
+      }
+
+      sectors.sort((a, b) => b.changePct - a.changePct);
+
+      return {
+        sectors,
+        benchmark,
+        date: dataDate === today ? 'Today' : dataDate,
+      };
+    } catch (err) {
+      console.error('[sector-performance] Error:', err);
+      return null;
+    }
+  });
+
+  // Read regime: compute rewarding/punishing sectors + quantitative classification
+  ipcMain.handle('ritual:read-regime', () => {
+    try {
+      // classifyRegime and computeDailyReturns imported at top of file
+      const rawDb = db.getDb();
+      const today = new Date().toISOString().split('T')[0];
+      const etfSymbols = Object.keys(SECTOR_ETF_MAP);
+      const allSymbols = [...etfSymbols, 'SPY'];
+      const allPlaceholders = allSymbols.map(() => '?').join(',');
+
+      // Find the last 11 dates where ALL symbols have data (date-aligned)
+      const dateCountRows = rawDb.prepare(`
+        SELECT ph.date, COUNT(DISTINCT s.symbol) as cnt
+        FROM price_history ph
+        JOIN securities s ON s.id = ph.security_id
+        WHERE s.symbol IN (${allPlaceholders}) AND ph.date <= ?
+        GROUP BY ph.date
+        HAVING cnt = ?
+        ORDER BY ph.date DESC
+        LIMIT 11
+      `).all([...allSymbols, today, allSymbols.length]) as { date: string; cnt: number }[];
+
+      if (dateCountRows.length < 3) return { error: 'Not enough aligned price data. Run refresh + backfill.' };
+
+      const alignedDates = dateCountRows.map(r => r.date).reverse(); // oldest first
+      const datePlaceholders = alignedDates.map(() => '?').join(',');
+
+      // Fetch prices only for aligned dates
+      const rows = rawDb.prepare(`
+        SELECT s.symbol, ph.date, ph.close_price
+        FROM price_history ph
+        JOIN securities s ON s.id = ph.security_id
+        WHERE s.symbol IN (${allPlaceholders}) AND ph.date IN (${datePlaceholders})
+        ORDER BY s.symbol, ph.date ASC
+      `).all([...allSymbols, ...alignedDates]) as { symbol: string; date: string; close_price: number }[];
+
+      // Group by symbol — all will have the same dates now
+      const bySymbol = new Map<string, number[]>();
+      for (const row of rows) {
+        if (!bySymbol.has(row.symbol)) bySymbol.set(row.symbol, []);
+        bySymbol.get(row.symbol)!.push(row.close_price);
+      }
+
+      // Compute daily returns per symbol
+      const sectorReturns: Record<string, number[]> = {};
+      for (const etf of etfSymbols) {
+        const prices = bySymbol.get(etf);
+        if (prices && prices.length >= 3) {
+          sectorReturns[etf] = computeDailyReturns(prices);
         }
       }
-      return null;
-    } catch {
-      return null;
+      const spyPrices = bySymbol.get('SPY');
+      const spyReturns = spyPrices && spyPrices.length >= 3 ? computeDailyReturns(spyPrices) : [];
+
+      // Classify regime
+      const regime = classifyRegime(sectorReturns, spyReturns, SECTOR_ETF_MAP);
+
+      // Build rewarding/punishing strings from regime signals
+      const sorted = [...regime.sectorSignals].sort((a, b) => b.changePct - a.changePct);
+      const top3 = sorted.slice(0, 3).map((r: { sector: string; symbol: string; changePct: number }) =>
+        `${r.sector} (${r.symbol} ${r.changePct >= 0 ? '+' : ''}${r.changePct.toFixed(2)}%)`
+      ).join(', ');
+      const bottom3 = sorted.slice(-3).map((r: { sector: string; symbol: string; changePct: number }) =>
+        `${r.sector} (${r.symbol} ${r.changePct >= 0 ? '+' : ''}${r.changePct.toFixed(2)}%)`
+      ).join(', ');
+
+      // Write to today's ritual (auto-set regimeType + notes)
+      db.upsertDailyRitual(today, {
+        regimeRewarding: top3,
+        regimePunishing: bottom3,
+        regimeType: regime.type,
+        regimeNotes: regime.summary,
+      });
+
+      return { rewarding: top3, punishing: bottom3, date: today, regime };
+    } catch (err) {
+      return { error: (err as Error).message };
     }
   });
 
@@ -1264,6 +1425,38 @@ export function setupIpcHandlers(
 
   ipcMain.handle('ems:baskets:get', (_event, name: string) => {
     return db.getRebalanceBasketByName(name);
+  });
+
+  ipcMain.handle('ems:baskets:resize', async (_event, name: string) => {
+    const rawDb = db.getDb();
+
+    // Pre-step: cancel any submitted/triggered brokerage orders before resizing
+    const basket = rawDb.prepare('SELECT id FROM rebalance_baskets WHERE name = ?').get(name) as { id: string } | undefined;
+    if (basket) {
+      const activeTranches = rawDb.prepare(`
+        SELECT ept.id, ept.brokerage_order_id, ept.status, ept.account_id
+        FROM entry_plan_tranches ept
+        JOIN entry_plans ep ON ept.plan_id = ep.id
+        WHERE ep.basket_id = ? AND ept.status IN ('triggered', 'submitted', 'confirmed')
+      `).all(basket.id) as { id: string; brokerage_order_id: string | null; status: string; account_id: string | null }[];
+
+      for (const t of activeTranches) {
+        // Cancel brokerage order if one exists
+        if (t.brokerage_order_id && t.account_id && schwabService.isConnected()) {
+          try {
+            await schwabService.cancelOrder(t.account_id, t.brokerage_order_id);
+          } catch {
+            // Non-fatal — order may already be filled/expired
+          }
+        }
+        // Reset to pending for resize
+        rawDb.prepare(
+          `UPDATE entry_plan_tranches SET status = 'pending', brokerage_order_id = NULL, brokerage_order_status = NULL WHERE id = ?`
+        ).run(t.id);
+      }
+    }
+
+    return runBasketResize([name], rawDb);
   });
 
   // Entry plan handlers

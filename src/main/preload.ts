@@ -130,7 +130,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getConcentrationAnalysis: () => ipcRenderer.invoke('analytics:concentration'),
 
   // Sector performance
-  getSectorPerformance: () => ipcRenderer.invoke('fmp:sector-performance'),
+  getSectorPerformance: () => ipcRenderer.invoke('data:sector-performance'),
+  readRegime: () => ipcRenderer.invoke('ritual:read-regime'),
 
   // Trend indicators (computed from price_history)
   getTrendIndicators: (symbols?: string[]) => ipcRenderer.invoke('db:trend-indicators', symbols),
@@ -226,6 +227,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // EMS Basket operations
   emsListBaskets: () => ipcRenderer.invoke('ems:baskets:list'),
   emsGetBasket: (name: string) => ipcRenderer.invoke('ems:baskets:get', name),
+  emsResizeBasket: (name: string) => ipcRenderer.invoke('ems:baskets:resize', name),
 
   // Entry plan operations
   getEntryPlanBySymbol: (symbol: string) => ipcRenderer.invoke('db:entry-plans:get-by-symbol', symbol),

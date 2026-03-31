@@ -330,9 +330,13 @@ export class SchwabStreamService {
       // Watchlist query may fail if table doesn't exist yet
     }
 
-    // Market indices
-    for (const idx of ['SPY', 'QQQ']) {
+    // Market indices + sector ETFs (parity with CLI refresh)
+    const symbolByName = new Map(securities.map(s => [s.symbol, s.id]));
+    for (const idx of ['SPY', 'QQQ', 'XLK', 'XLF', 'XLV', 'XLE', 'XLI', 'XLY', 'XLP', 'XLU', 'XLRE', 'XLB', 'XLC']) {
       if (!symbols.includes(idx)) symbols.push(idx);
+      if (!this.symbolSecurityMap.has(idx) && symbolByName.has(idx)) {
+        this.symbolSecurityMap.set(idx, symbolByName.get(idx)!);
+      }
     }
 
     return symbols;
@@ -393,6 +397,26 @@ export class SchwabStreamService {
 
             this.latestQuotes.set(sym.toUpperCase(), quote);
             logger.info(`[quotes:poll:resolved] ${sym.toUpperCase()} last=$${quote.last.toFixed(2)} netChange=${quote.netChange?.toFixed(2)} netChangePct=${quote.netChangePct?.toFixed(2)}% close=$${quote.close?.toFixed(2) ?? 'null'} open=$${quote.open?.toFixed(2) ?? 'null'}`);
+
+            // Save to price_history (close_price = last traded price)
+            const securityId = this.symbolSecurityMap.get(sym.toUpperCase());
+            if (securityId && this.db) {
+              const today = new Date().toISOString().split('T')[0];
+              try {
+                this.db.savePriceHistory({
+                  securityId,
+                  date: today,
+                  openPrice: regularQuote?.openPrice || null,
+                  highPrice: regularQuote?.highPrice || null,
+                  lowPrice: regularQuote?.lowPrice || null,
+                  closePrice: last,
+                  volume: regularQuote?.totalVolume || null,
+                  fetchedAt: new Date().toISOString(),
+                });
+              } catch (e) {
+                // Non-fatal: don't break polling if DB write fails
+              }
+            }
 
             // Check monitors
             if (this.db && quote.last > 0) {

@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePortfolio, usePositions, useSecurities, useSettings, usePositionIntents, useDailyRituals, useNews, useEarnings, useAnalytics } from '../hooks/useApi';
+import { usePortfolio, usePositions, useSecurities, useSettings, usePositionIntents, useDailyRituals, useNews, useEarnings, useAnalytics, useEmsBaskets } from '../hooks/useApi';
 import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import type { StreamingQuote, NewsArticle, EarningsEvent } from '../../shared/types';
 import { calculateAllocationDrift, type AllocationRow } from '../../shared/analytics/allocation';
@@ -22,10 +22,24 @@ export default function Dashboard() {
   const { articles: newsArticles, fetchRecentNews } = useNews();
   const { earnings, fetchPortfolioEarnings } = useEarnings();
   const { positionBetas, fetchAnalytics } = useAnalytics();
+  const { baskets, activeBasket, fetchBaskets, fetchBasket } = useEmsBaskets();
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
-  const [rawSectorData, setRawSectorData] = useState<{ nyse: Record<string, number>; nasdaq: Record<string, number> } | null>(null);
+  const [expandedTranches, setExpandedTranches] = useState<Set<string>>(new Set());
+  const [expandAllTranches, setExpandAllTranches] = useState(false);
+  const [sectorData, setSectorData] = useState<Array<{ symbol: string; name: string; changePct: number; price: number }>>([]);
+  const [sectorBenchmark, setSectorBenchmark] = useState<{ symbol: string; changePct: number; price: number } | null>(null);
   const [sectorDate, setSectorDate] = useState<string>('');
-  const [sectorView, setSectorView] = useState<'all' | 'nyse' | 'nasdaq'>('all');
+  const [regimeLoading, setRegimeLoading] = useState(false);
+  const [regimeSignals, setRegimeSignals] = useState<{
+    type: 'trend' | 'sorting';
+    confidence: number;
+    summary: string;
+    sectorSignals: Array<{
+      symbol: string; sector: string; changePct: number;
+      indexCorrelation: number; autocorrelation: number; quadrant: string;
+    }>;
+  } | null>(null);
+  const [showRegimeDetail, setShowRegimeDetail] = useState(false);
   const [newsTab, setNewsTab] = useState<'all' | 'positions' | 'watchlist'>('all');
   const [watchlistSymbols, setWatchlistSymbols] = useState<string[]>([]);
 
@@ -42,7 +56,16 @@ export default function Dashboard() {
     const twoWeeksOut = format(addDays(new Date(), 14), 'yyyy-MM-dd');
     fetchPortfolioEarnings(today, twoWeeksOut);
     window.electronAPI.getWatchlistSymbols().then(setWatchlistSymbols).catch(() => {});
-  }, [fetchSummary, fetchPositions, fetchSecurities, fetchSettings, fetchIntents, fetchRituals, fetchRecentNews, fetchAnalytics, fetchPortfolioEarnings]);
+    fetchBaskets();
+  }, [fetchSummary, fetchPositions, fetchSecurities, fetchSettings, fetchIntents, fetchRituals, fetchRecentNews, fetchAnalytics, fetchPortfolioEarnings, fetchBaskets]);
+
+  // Auto-load first active basket
+  useEffect(() => {
+    const active = baskets.find(b => b.status === 'active');
+    if (active && (!activeBasket || activeBasket.name !== active.name)) {
+      fetchBasket(active.name);
+    }
+  }, [baskets, activeBasket, fetchBasket]);
 
   // Listen for position sync events
   useEffect(() => {
@@ -54,74 +77,40 @@ export default function Dashboard() {
     return () => removeListener();
   }, [fetchPositions, fetchSummary]);
 
-  // Fetch sector data via main process (avoids CORS)
-  useEffect(() => {
+  // Fetch sector data from local ETF prices
+  const fetchSectorData = useCallback(() => {
     window.electronAPI.getSectorPerformance().then((result) => {
       if (result) {
-        setRawSectorData({ nyse: result.nyse, nasdaq: result.nasdaq });
+        setSectorData(result.sectors);
+        setSectorBenchmark(result.benchmark);
         setSectorDate(result.date);
       }
     }).catch(() => {});
   }, []);
 
-  // SPY (S&P 500) sector weights — source: stockanalysis.com
-  const SPY_SECTOR_WEIGHTS: Record<string, number> = useMemo(() => ({
-    'Technology': 34.24,
-    'Financial Services': 12.05,
-    'Healthcare': 11.18,
-    'Consumer Cyclical': 10.26,
-    'Communication Services': 8.98,
-    'Industrials': 7.62,
-    'Consumer Defensive': 5.95,
-    'Energy': 3.40,
-    'Utilities': 2.66,
-    'Real Estate': 2.10,
-    'Basic Materials': 1.56,
-  }), []);
+  useEffect(() => {
+    fetchSectorData();
+    // Refresh sector data every 60s to match polling interval
+    const interval = setInterval(fetchSectorData, 60000);
+    return () => clearInterval(interval);
+  }, [fetchSectorData]);
 
-  // QQQ (Nasdaq-100) sector weights — source: stockanalysis.com
-  const QQQ_SECTOR_WEIGHTS: Record<string, number> = useMemo(() => ({
-    'Technology': 53.60,
-    'Consumer Cyclical': 13.04,
-    'Communication Services': 12.48,
-    'Healthcare': 6.31,
-    'Consumer Defensive': 4.64,
-    'Industrials': 4.40,
-    'Financial Services': 2.37,
-    'Utilities': 2.07,
-    'Energy': 0.56,
-    'Basic Materials': 0.39,
-    'Real Estate': 0.15,
-  }), []);
-
-  // Compute sector data based on selected view
-  const sectorData = useMemo(() => {
-    if (!rawSectorData) return [];
-    let data: Record<string, number>;
-    if (sectorView === 'nyse') {
-      data = rawSectorData.nyse;
-    } else if (sectorView === 'nasdaq') {
-      data = rawSectorData.nasdaq;
-    } else {
-      // Merge: average where both exist, otherwise take whichever has it
-      data = {};
-      const allSectors = new Set([...Object.keys(rawSectorData.nyse), ...Object.keys(rawSectorData.nasdaq)]);
-      for (const sector of allSectors) {
-        const nyseVal = rawSectorData.nyse[sector];
-        const nasdaqVal = rawSectorData.nasdaq[sector];
-        if (nyseVal !== undefined && nasdaqVal !== undefined) {
-          data[sector] = (nyseVal + nasdaqVal) / 2;
-        } else {
-          data[sector] = nyseVal ?? nasdaqVal;
-        }
+  const handleReadRegime = useCallback(async () => {
+    setRegimeLoading(true);
+    try {
+      const result = await window.electronAPI.readRegime();
+      if (result.error) {
+        console.error('Read regime error:', result.error);
+      } else {
+        if (result.regime) setRegimeSignals(result.regime);
+        fetchRituals(1);
       }
+    } catch (err) {
+      console.error('Read regime failed:', err);
+    } finally {
+      setRegimeLoading(false);
     }
-    return Object.entries(data)
-      .map(([sector, change]) => ({ sector, change }))
-      .sort((a, b) => b.change - a.change);
-  }, [rawSectorData, sectorView]);
-
-  const indexWeights = sectorView === 'nyse' ? SPY_SECTOR_WEIGHTS : sectorView === 'nasdaq' ? QQQ_SECTOR_WEIGHTS : null;
+  }, [fetchRituals]);
 
   const loading = portfolioLoading || positionsLoading;
   const securityMap = useMemo(() => new Map(securities.map(s => [s.id, s])), [securities]);
@@ -335,7 +324,17 @@ export default function Dashboard() {
 
           {/* Today's Regime */}
           <div className="card">
-            <h2 className="text-lg font-semibold text-gray-900 mb-3">Today's Regime</h2>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold text-gray-900">Today's Regime</h2>
+              <button
+                onClick={handleReadRegime}
+                disabled={regimeLoading}
+                className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs hover:bg-blue-700 disabled:opacity-50"
+                title="Auto-detect rewarding/punishing sectors from ETF price data"
+              >
+                {regimeLoading ? 'Reading...' : 'Read Regime'}
+              </button>
+            </div>
             {todayRitual && (todayRitual.regimeRewarding || todayRitual.regimePunishing) ? (
               <div className="space-y-3">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -343,9 +342,13 @@ export default function Dashboard() {
                     <span className="text-xs font-medium text-gray-500 uppercase">Type</span>
                     <div className="mt-1">
                       {todayRitual.regimeType === 'trend' ? (
-                        <span className="inline-flex items-center px-2.5 py-1 rounded-md text-sm font-medium bg-blue-100 text-blue-800">Trend Day</span>
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-md text-sm font-medium bg-blue-100 text-blue-800">
+                          Trend Day{regimeSignals ? ` (${Math.round(regimeSignals.confidence * 100)}%)` : ''}
+                        </span>
                       ) : todayRitual.regimeType === 'sorting' ? (
-                        <span className="inline-flex items-center px-2.5 py-1 rounded-md text-sm font-medium bg-amber-100 text-amber-800">Sorting Day</span>
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-md text-sm font-medium bg-amber-100 text-amber-800">
+                          Sorting Day{regimeSignals ? ` (${Math.round(regimeSignals.confidence * 100)}%)` : ''}
+                        </span>
                       ) : (
                         <span className="text-gray-400 text-sm">Not set</span>
                       )}
@@ -360,6 +363,56 @@ export default function Dashboard() {
                     <p className="mt-1 text-sm text-red-700">{todayRitual.regimePunishing || '-'}</p>
                   </div>
                 </div>
+                {regimeSignals && (
+                  <div className="border-t border-gray-100 pt-2">
+                    <p className="text-xs text-gray-500">{regimeSignals.summary}</p>
+                    <button
+                      onClick={() => setShowRegimeDetail(!showRegimeDetail)}
+                      className="text-xs text-blue-600 hover:underline mt-1"
+                    >
+                      {showRegimeDetail ? 'Hide details' : 'Show sector details'}
+                    </button>
+                    {showRegimeDetail && (
+                      <div className="mt-2 overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-gray-200">
+                              <th className="text-left py-1 pr-2 font-medium text-gray-500">Sector</th>
+                              <th className="text-right py-1 px-2 font-medium text-gray-500">ETF</th>
+                              <th className="text-right py-1 px-2 font-medium text-gray-500">Chg%</th>
+                              <th className="text-right py-1 px-2 font-medium text-gray-500">SPY Corr</th>
+                              <th className="text-right py-1 px-2 font-medium text-gray-500">AutoCorr</th>
+                              <th className="text-left py-1 pl-2 font-medium text-gray-500">Signal</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {regimeSignals.sectorSignals.map(s => (
+                              <tr key={s.symbol} className="border-b border-gray-50">
+                                <td className="py-1 pr-2 text-gray-700">{s.sector}</td>
+                                <td className="py-1 px-2 text-right text-gray-500">{s.symbol}</td>
+                                <td className={`py-1 px-2 text-right font-medium ${s.changePct >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                  {s.changePct >= 0 ? '+' : ''}{s.changePct.toFixed(2)}%
+                                </td>
+                                <td className="py-1 px-2 text-right text-gray-600">{s.indexCorrelation.toFixed(2)}</td>
+                                <td className="py-1 px-2 text-right text-gray-600">{s.autocorrelation.toFixed(2)}</td>
+                                <td className="py-1 pl-2">
+                                  <span className={`px-1.5 py-0.5 rounded text-xs ${
+                                    s.quadrant === 'trend-momentum' ? 'bg-green-100 text-green-700' :
+                                    s.quadrant === 'risk-toggle' ? 'bg-blue-100 text-blue-700' :
+                                    s.quadrant === 'sector-rotation' ? 'bg-amber-100 text-amber-700' :
+                                    'bg-gray-100 text-gray-600'
+                                  }`}>
+                                    {s.quadrant}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {todayRitual.actionChosen && (
                   <div className="border-t border-gray-100 pt-2">
                     <span className="text-xs font-medium text-gray-500 uppercase">Action</span>
@@ -407,39 +460,29 @@ export default function Dashboard() {
               )}
             </div>
 
-            {/* Market Sector Heatmap */}
+            {/* Market Sector Heatmap — from local ETF prices */}
             <div className="card">
               <div className="flex items-center justify-between mb-1">
                 <h2 className="text-lg font-semibold text-gray-900">Market Sectors</h2>
-                <div className="flex rounded-md overflow-hidden border border-gray-200">
-                  {(['all', 'nyse', 'nasdaq'] as const).map(view => (
-                    <button
-                      key={view}
-                      onClick={() => setSectorView(view)}
-                      className={`px-2 py-0.5 text-xs font-medium ${
-                        sectorView === view
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-white text-gray-600 hover:bg-gray-50'
-                      } ${view !== 'all' ? 'border-l border-gray-200' : ''}`}
-                    >
-                      {view === 'all' ? 'All' : view === 'nyse' ? 'NYSE (SPY)' : 'NASDAQ (QQQ)'}
-                    </button>
-                  ))}
-                </div>
+                {sectorDate && <span className="text-xs text-gray-400">{sectorDate}</span>}
               </div>
-              {sectorDate && <p className="text-xs text-gray-400 mb-3">{sectorDate}</p>}
+              {sectorBenchmark && (
+                <p className="text-xs text-gray-500 mb-3">
+                  SPY ${sectorBenchmark.price.toFixed(2)}{' '}
+                  <span className={sectorBenchmark.changePct >= 0 ? 'text-green-600' : 'text-red-600'}>
+                    {sectorBenchmark.changePct >= 0 ? '+' : ''}{sectorBenchmark.changePct.toFixed(2)}%
+                  </span>
+                </p>
+              )}
               {sectorData.length > 0 ? (
                 <div className="space-y-1.5">
                   {sectorData.map(s => {
-                    const isPositive = s.change >= 0;
-                    const barWidth = Math.min(Math.abs(s.change) * 15, 100);
-                    const weight = indexWeights?.[s.sector];
+                    const isPositive = s.changePct >= 0;
+                    const barWidth = Math.min(Math.abs(s.changePct) * 15, 100);
                     return (
-                      <div key={s.sector} className="flex items-center gap-2">
-                        <span className="text-xs w-36 truncate text-gray-600">{s.sector}</span>
-                        {indexWeights && (
-                          <span className="text-xs w-10 text-right text-gray-400">{weight ? `${weight.toFixed(1)}%` : '-'}</span>
-                        )}
+                      <div key={s.symbol} className="flex items-center gap-2">
+                        <span className="text-xs w-36 truncate text-gray-600">{s.name}</span>
+                        <span className="text-xs w-10 text-right text-gray-400">{s.symbol}</span>
                         <div className="flex-1 flex items-center">
                           <div className="w-full h-4 bg-gray-50 rounded relative overflow-hidden">
                             <div
@@ -449,14 +492,14 @@ export default function Dashboard() {
                           </div>
                         </div>
                         <span className={`text-xs font-medium w-14 text-right ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                          {isPositive ? '+' : ''}{s.change.toFixed(2)}%
+                          {isPositive ? '+' : ''}{s.changePct.toFixed(2)}%
                         </span>
                       </div>
                     );
                   })}
                 </div>
               ) : (
-                <p className="text-sm text-gray-400">No sector data available</p>
+                <p className="text-sm text-gray-400">No sector data — run refresh first</p>
               )}
             </div>
           </div>
@@ -503,6 +546,35 @@ export default function Dashboard() {
 
             const betaMap = new Map(positionBetas.map(b => [b.symbol, b]));
 
+            // Build tranche map: symbol → pending/triggered tranches from active basket
+            const tranchesBySymbol = new Map<string, Array<{
+              side: string; shares: number; status: string;
+              triggerType?: string; triggerDate?: string | null; triggerPrice?: number;
+            }>>();
+            if (activeBasket?.plans) {
+              for (const plan of activeBasket.plans) {
+                const sym = plan.symbol || '?';
+                for (const t of (plan.tranches || [])) {
+                  if (t.status === 'filled' || t.status === 'cancelled') continue;
+                  if (!tranchesBySymbol.has(sym)) tranchesBySymbol.set(sym, []);
+                  tranchesBySymbol.get(sym)!.push({
+                    side: plan.side || 'buy',
+                    shares: t.shares,
+                    status: t.status,
+                    triggerType: t.triggerType,
+                    triggerDate: t.triggerDate,
+                    triggerPrice: t.triggerPrice,
+                  });
+                }
+              }
+              for (const [, tranches] of tranchesBySymbol) {
+                tranches.sort((a, b) => {
+                  if (a.triggerDate && b.triggerDate) return a.triggerDate.localeCompare(b.triggerDate);
+                  return 0;
+                });
+              }
+            }
+
             // Build inputs for shared allocation function
             const allocInputs = positions.map(pos => {
               const security = securityMap.get(pos.securityId);
@@ -545,7 +617,24 @@ export default function Dashboard() {
 
             return (
               <div className="card">
-                <h2 className="text-lg font-semibold text-gray-900 mb-3">Portfolio Allocation</h2>
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="text-lg font-semibold text-gray-900">Portfolio Allocation</h2>
+                  {tranchesBySymbol.size > 0 && (
+                    <button
+                      onClick={() => {
+                        setExpandAllTranches(!expandAllTranches);
+                        if (!expandAllTranches) {
+                          setExpandedTranches(new Set(Array.from(tranchesBySymbol.keys())));
+                        } else {
+                          setExpandedTranches(new Set());
+                        }
+                      }}
+                      className="text-xs text-blue-600 hover:underline"
+                    >
+                      {expandAllTranches ? 'Collapse tranches' : 'Show scheduled tranches'}
+                    </button>
+                  )}
+                </div>
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-xs text-gray-500 border-b border-gray-200">
@@ -558,19 +647,38 @@ export default function Dashboard() {
                     </tr>
                   </thead>
                   <tbody>
-                    {sorted.map(a => {
+                    {sorted.flatMap(a => {
                       const absDrift = Math.abs(a.driftPct ?? 0);
                       const tierColor = a.symbol === 'Cash' ? '#6b7280' : (TIER_COLORS[a.tier] || '#9ca3af');
                       const driftColor = a.targetPct == null ? 'text-gray-600'
                         : absDrift > 3 ? 'text-red-600'
                         : absDrift > 1 ? 'text-amber-600'
                         : 'text-gray-600';
-                      return (
-                        <tr key={a.symbol} className="border-b border-gray-100 hover:bg-gray-50">
+                      const symbolTranches = tranchesBySymbol.get(a.symbol);
+                      const isExpanded = expandedTranches.has(a.symbol);
+                      const hasTranches = symbolTranches && symbolTranches.length > 0;
+                      const totalScheduled = symbolTranches?.reduce((s, t) => s + t.shares, 0) || 0;
+
+                      const rows = [(
+                        <tr
+                          key={a.symbol}
+                          className={`border-b border-gray-100 hover:bg-gray-50 ${hasTranches ? 'cursor-pointer' : ''}`}
+                          onClick={() => {
+                            if (!hasTranches) return;
+                            const next = new Set(expandedTranches);
+                            if (isExpanded) next.delete(a.symbol); else next.add(a.symbol);
+                            setExpandedTranches(next);
+                          }}
+                        >
                           <td className="py-1.5">
                             <div className="flex items-center gap-2">
                               <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: tierColor }} title={a.tier} />
                               <span className="font-medium text-gray-900">{a.symbol}</span>
+                              {hasTranches && (
+                                <span className="text-xs text-blue-500" title={`${totalScheduled} shares scheduled`}>
+                                  {isExpanded ? '▾' : '▸'} +{totalScheduled}
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td className={`text-right py-1.5 tabular-nums ${driftColor}`}>
@@ -599,7 +707,31 @@ export default function Dashboard() {
                             })()}
                           </td>
                         </tr>
-                      );
+                      )];
+
+                      if (isExpanded && symbolTranches) {
+                        for (let ti = 0; ti < symbolTranches.length; ti++) {
+                          const t = symbolTranches[ti];
+                          rows.push(
+                            <tr key={`${a.symbol}-t-${ti}`} className="bg-blue-50/50 border-b border-blue-100/50">
+                              <td className="py-1 pl-8 text-xs text-gray-500" colSpan={2}>
+                                <span className={t.side === 'sell' ? 'text-red-500' : 'text-green-600'}>{t.side.toUpperCase()}</span>
+                                {' '}{t.shares} shares
+                                {' · '}
+                                {t.triggerType === 'date' ? (t.triggerDate || 'date TBD') : `@ $${t.triggerPrice?.toFixed(2) || '?'}`}
+                              </td>
+                              <td className="py-1 text-xs text-right text-gray-400" colSpan={4}>
+                                <span className={`px-1.5 py-0.5 rounded ${
+                                  t.status === 'triggered' ? 'bg-yellow-100 text-yellow-700' :
+                                  t.status === 'submitted' ? 'bg-blue-100 text-blue-700' :
+                                  'bg-gray-100 text-gray-500'
+                                }`}>{t.status}</span>
+                              </td>
+                            </tr>
+                          );
+                        }
+                      }
+                      return rows;
                     })}
                   </tbody>
                   <tfoot>

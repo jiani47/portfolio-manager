@@ -893,6 +893,170 @@ PYEOF
       echo "Regime set: $REGIME | Action chosen: $ACTION | Journal written: $JOURNAL"
     fi
     ;;
+  regime-track)
+    # Show regime history with re-risk phase assessment
+    python3 - "$DB" <<'PYEOF'
+import sqlite3, sys, math
+
+db = sys.argv[1]
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+
+# --- Regime History (last 15 trading days) ---
+cur.execute("""
+    SELECT date, regime_type, regime_notes, regime_rewarding, regime_punishing
+    FROM daily_rituals
+    WHERE regime_type IS NOT NULL
+    ORDER BY date DESC LIMIT 15
+""")
+rituals = cur.fetchall()
+
+if not rituals:
+    print("  No regime history. Run: pm-cli.sh sectors (or click Read Regime in app)")
+    sys.exit(0)
+
+print("=== Regime Tracking ===")
+print()
+
+# Compute streak
+streak_type = rituals[0][1]
+streak_count = 0
+for r in rituals:
+    if r[1] == streak_type:
+        streak_count += 1
+    else:
+        break
+
+# Count trend vs sorting over window
+trend_count = sum(1 for r in rituals if r[1] == 'trend')
+sorting_count = sum(1 for r in rituals if r[1] == 'sorting')
+total = len(rituals)
+
+print(f"  Current streak: {streak_count} consecutive {streak_type.upper()} day{'s' if streak_count > 1 else ''}")
+print(f"  Last {total} days: {trend_count} trend, {sorting_count} sorting ({trend_count/total*100:.0f}% trend)")
+print()
+
+# Show recent history
+print(f"  {'Date':<12} {'Type':<10} {'Notes'}")
+print(f"  {'-'*12} {'-'*10} {'-'*40}")
+for date, rtype, notes, rewarding, punishing in rituals[:10]:
+    badge = 'TREND' if rtype == 'trend' else 'SORT'
+    note_str = notes or ''
+    print(f"  {date:<12} {badge:<10} {note_str[:50]}")
+
+print()
+
+# --- Compute current regime signals from price_history ---
+ETFS = ['XLK','XLF','XLV','XLE','XLI','XLY','XLP','XLU','XLRE','XLB','XLC']
+ALL_SYMS = ETFS + ['SPY']
+placeholders = ','.join('?' * len(ALL_SYMS))
+
+# Find aligned dates
+cur.execute(f"""
+    SELECT ph.date, COUNT(DISTINCT s.symbol) as cnt
+    FROM price_history ph
+    JOIN securities s ON s.id = ph.security_id
+    WHERE s.symbol IN ({placeholders})
+    GROUP BY ph.date
+    HAVING cnt = ?
+    ORDER BY ph.date DESC
+    LIMIT 11
+""", ALL_SYMS + [len(ALL_SYMS)])
+aligned_dates = [r[0] for r in reversed(cur.fetchall())]
+
+if len(aligned_dates) >= 3:
+    date_ph = ','.join('?' * len(aligned_dates))
+    cur.execute(f"""
+        SELECT s.symbol, ph.date, ph.close_price
+        FROM price_history ph
+        JOIN securities s ON s.id = ph.security_id
+        WHERE s.symbol IN ({placeholders}) AND ph.date IN ({date_ph})
+        ORDER BY s.symbol, ph.date ASC
+    """, ALL_SYMS + aligned_dates)
+    rows = cur.fetchall()
+
+    by_sym = {}
+    for sym, dt, price in rows:
+        by_sym.setdefault(sym, []).append(price)
+
+    def daily_returns(prices):
+        return [(prices[i]-prices[i-1])/prices[i-1] for i in range(1, len(prices)) if prices[i-1] > 0]
+
+    def pearson(a, b):
+        n = min(len(a), len(b))
+        if n < 2: return 0
+        ma = sum(a[:n])/n; mb = sum(b[:n])/n
+        cov = sum((a[i]-ma)*(b[i]-mb) for i in range(n))
+        va = sum((a[i]-ma)**2 for i in range(n))
+        vb = sum((b[i]-mb)**2 for i in range(n))
+        d = math.sqrt(va*vb)
+        return cov/d if d > 0 else 0
+
+    def autocorr(returns, lag=1):
+        if len(returns) < lag + 2: return 0
+        return pearson(returns[:-lag], returns[lag:])
+
+    spy_ret = daily_returns(by_sym.get('SPY', []))
+    corrs = []
+    auto_corrs = []
+    for etf in ETFS:
+        prices = by_sym.get(etf, [])
+        if len(prices) < 3: continue
+        ret = daily_returns(prices)
+        c = pearson(ret, spy_ret[:len(ret)])
+        a = autocorr(ret)
+        corrs.append(c)
+        auto_corrs.append(a)
+
+    if corrs:
+        avg_corr = sum(corrs) / len(corrs)
+        avg_auto = sum(auto_corrs) / len(auto_corrs)
+        correlated = sum(1 for c in corrs if abs(c) >= 0.6)
+        positive_auto = sum(1 for a in auto_corrs if a >= 0.3)
+
+        print("  --- Current Signals ---")
+        print(f"  Avg SPY correlation: {avg_corr:.2f} (need >0.6 for trend)")
+        print(f"  Correlated sectors:  {correlated}/11 (need 7+ for trend)")
+        print(f"  Avg autocorrelation: {avg_auto:.2f} (need >0.2 for momentum)")
+        print(f"  Sectors with momentum: {positive_auto}/11")
+        print()
+
+# --- Re-Risk Phase Assessment ---
+print("  --- Re-Risk Phase ---")
+
+# Phase rules:
+# Phase 0: sorting dominant, hold
+# Phase 1: 3+ consecutive trend days + avg autocorr > 0.2 → deploy first tranches
+# Phase 2: 5+ trend days sustained + vol compressing → deploy next wave
+# Phase 3: 7+ sectors autocorrelating positive → full execution
+
+phase = 0
+phase_reason = "SORTING dominant — hold cash, execute only date-triggered EMS tranches"
+
+if streak_type == 'trend' and streak_count >= 3:
+    phase = 1
+    phase_reason = "3+ consecutive TREND days — deploy first EMS tranches (AMZN, GOOG)"
+    if streak_count >= 5 and trend_count / total >= 0.6:
+        phase = 2
+        phase_reason = "5+ TREND days sustained — deploy next wave (NVDA, PLTR), reduce SGOV 25%"
+        if 'positive_auto' in dir() and positive_auto >= 7:
+            phase = 3
+            phase_reason = "Broad momentum confirmed — full EMS execution, SGOV to tactical reserve"
+
+phase_colors = {0: 'HOLD', 1: 'PHASE 1', 2: 'PHASE 2', 3: 'PHASE 3'}
+target_betas = {0: '0.79', 1: '~0.85', 2: '~0.95', 3: '~1.1'}
+
+print(f"  Status: {phase_colors[phase]} — target beta {target_betas[phase]}")
+print(f"  {phase_reason}")
+print()
+print("  Phase triggers:")
+print(f"    → Phase 1: 3 consec. trend days + avg autocorr >0.2   {'✓ MET' if phase >= 1 else '✗ not met'}")
+print(f"    → Phase 2: 5+ trend sustained, 60%+ trend ratio       {'✓ MET' if phase >= 2 else '✗ not met'}")
+print(f"    → Phase 3: 7+ sectors with positive autocorrelation    {'✓ MET' if phase >= 3 else '✗ not met'}")
+
+conn.close()
+PYEOF
+    ;;
   intent-history)
     POS_ID="${2:-}"
     if [ -n "$POS_ID" ]; then

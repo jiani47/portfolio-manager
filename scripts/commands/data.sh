@@ -8,7 +8,7 @@ case "$1" in
     # Refresh prices via Schwab API using tokens from Electron app config
     schwab_ensure_token
 
-    # Get all non-cash symbols from positions + watchlist items
+    # Get all non-cash symbols from positions + watchlist items + sector ETFs
     SYMBOLS=$(sqlite3 "$DB" "
       SELECT DISTINCT symbol FROM (
         SELECT s.symbol FROM positions p
@@ -16,6 +16,8 @@ case "$1" in
         WHERE s.type != 'cash' AND s.symbol != ''
         UNION
         SELECT symbol FROM watchlist_items
+        UNION
+        VALUES ('XLK'),('XLF'),('XLV'),('XLE'),('XLI'),('XLY'),('XLP'),('XLU'),('XLRE'),('XLB'),('XLC'),('SPY')
       )
       ORDER BY symbol;
     ")
@@ -836,81 +838,157 @@ PYEOF
     ;;
 
   sectors)
-    # Show sector performance heatmap via FMP API
-    FMP_KEY=$(get_fmp_key)
-    if [ -z "$FMP_KEY" ]; then
-      echo "ERROR: FMP API key not configured in ~/.pm-cli.conf"
-      exit 1
-    fi
-
+    # Show sector performance heatmap with regime classification
     DATE="${2:-$(date +%Y-%m-%d)}"
     echo "=== Sector Performance: $DATE ==="
 
-    python3 - "$FMP_KEY" "$DATE" <<'PYEOF'
-import json, urllib.request, sys
+    python3 - "$DB" "$DATE" <<'PYEOF'
+import sqlite3, sys, math
 
-key, date = sys.argv[1], sys.argv[2]
+db, date = sys.argv[1], sys.argv[2]
 
-from datetime import datetime, timedelta
+ETFS = {
+    'XLK':  'Technology',
+    'XLF':  'Financials',
+    'XLV':  'Health Care',
+    'XLE':  'Energy',
+    'XLI':  'Industrials',
+    'XLY':  'Consumer Cyclical',
+    'XLP':  'Consumer Defensive',
+    'XLU':  'Utilities',
+    'XLRE': 'Real Estate',
+    'XLB':  'Basic Materials',
+    'XLC':  'Communication Svcs',
+}
+ALL_SYMS = list(ETFS.keys()) + ['SPY']
+INDEX_CORR_THRESHOLD = 0.6
+AUTO_CORR_THRESHOLD = 0.3
+TREND_SECTOR_MIN = 7
 
-def fetch_sectors(date_str, api_key):
-    """Fetch both NYSE and NASDAQ sector data for a given date."""
-    all_data = []
-    for exchange in ['NYSE', 'NASDAQ']:
-        url = f'https://financialmodelingprep.com/stable/sector-performance-snapshot?date={date_str}&exchange={exchange}&apikey={api_key}'
-        try:
-            result = json.loads(urllib.request.urlopen(url).read())
-            if isinstance(result, list):
-                all_data.extend(result)
-        except:
-            pass
-    return all_data
+def pearson(a, b):
+    n = min(len(a), len(b))
+    if n < 2: return 0
+    ma = sum(a[:n])/n; mb = sum(b[:n])/n
+    cov = sum((a[i]-ma)*(b[i]-mb) for i in range(n))
+    va = sum((a[i]-ma)**2 for i in range(n))
+    vb = sum((b[i]-mb)**2 for i in range(n))
+    d = math.sqrt(va*vb)
+    return cov/d if d > 0 else 0
 
-data = fetch_sectors(date, key)
+def autocorr(returns, lag=1):
+    if len(returns) < lag + 2: return 0
+    return pearson(returns[:-lag], returns[lag:])
 
-if not data:
-    # Try previous trading days
-    dt = datetime.strptime(date, '%Y-%m-%d')
-    for i in range(1, 4):
-        prev = (dt - timedelta(days=i)).strftime('%Y-%m-%d')
-        data = fetch_sectors(prev, key)
-        if data:
-            print(f'  (Using {prev} — today not yet available)')
-            break
+def daily_returns(prices):
+    return [(prices[i]-prices[i-1])/prices[i-1] for i in range(1, len(prices)) if prices[i-1] > 0]
 
-if not data:
-    print("  No sector data available")
+conn = sqlite3.connect(db)
+cur = conn.cursor()
+
+placeholders = ','.join('?' * len(ALL_SYMS))
+
+# Find last 11 dates where ALL symbols have data (date-aligned)
+cur.execute(f"""
+    SELECT ph.date, COUNT(DISTINCT s.symbol) as cnt
+    FROM price_history ph
+    JOIN securities s ON s.id = ph.security_id
+    WHERE s.symbol IN ({placeholders}) AND ph.date <= ?
+    GROUP BY ph.date
+    HAVING cnt = ?
+    ORDER BY ph.date DESC
+    LIMIT 11
+""", ALL_SYMS + [date, len(ALL_SYMS)])
+aligned_dates = [r[0] for r in reversed(cur.fetchall())]  # oldest first
+
+if len(aligned_dates) < 3:
+    print("  Not enough aligned price data. Run: pm-cli.sh refresh + backfill")
     sys.exit(0)
 
-# Aggregate across exchanges (NYSE + NASDAQ)
-sectors = {}
-for row in data:
-    sector = row['sector']
-    chg = row['averageChange']
-    if sector not in sectors:
-        sectors[sector] = []
-    sectors[sector].append(chg)
+date_placeholders = ','.join('?' * len(aligned_dates))
+cur.execute(f"""
+    SELECT s.symbol, ph.date, ph.close_price
+    FROM price_history ph
+    JOIN securities s ON s.id = ph.security_id
+    WHERE s.symbol IN ({placeholders}) AND ph.date IN ({date_placeholders})
+    ORDER BY s.symbol, ph.date ASC
+""", ALL_SYMS + aligned_dates)
+rows = cur.fetchall()
+conn.close()
 
-# Average across exchanges
-sector_avg = {s: sum(v)/len(v) for s, v in sectors.items()}
+# Group by symbol — all will have same dates now
+by_sym = {}
+for sym, dt, price in rows:
+    by_sym.setdefault(sym, []).append(price)
 
-# Sort by performance (best to worst)
-ranked = sorted(sector_avg.items(), key=lambda x: -x[1])
+# Compute returns
+sym_returns = {}
+for sym in ALL_SYMS:
+    prices = by_sym.get(sym, [])
+    if len(prices) >= 3:
+        sym_returns[sym] = daily_returns(prices)
 
-print(f'  {"Sector":<25} {"Change":>8}')
-print(f'  {"-"*25} {"-"*8}')
-for sector, chg in ranked:
+spy_ret = sym_returns.get('SPY', [])
+
+if not spy_ret:
+    print("  No sector ETF data. Run: pm-cli.sh refresh")
+    sys.exit(0)
+
+# Compute per-sector metrics
+results = []
+for etf, sector in ETFS.items():
+    ret = sym_returns.get(etf)
+    if not ret or len(ret) < 2: continue
+    prices = by_sym.get(etf, [])
+    price = prices[-1] if prices else 0
+    chg = ret[-1] * 100  # today's return as %
+
+    corr = pearson(ret, spy_ret[:len(ret)])
+    ac = autocorr(ret)
+
+    high_corr = abs(corr) >= INDEX_CORR_THRESHOLD
+    high_auto = ac >= AUTO_CORR_THRESHOLD
+    if high_corr and high_auto: quad = 'trend'
+    elif high_corr: quad = 'toggle'
+    elif high_auto: quad = 'rotate'
+    else: quad = 'noise'
+
+    results.append((sector, etf, chg, price, corr, ac, quad))
+
+if not results:
+    print("  No sector ETF data. Run: pm-cli.sh refresh")
+    sys.exit(0)
+
+# SPY benchmark
+spy_prices = by_sym.get('SPY', [])
+spy_chg = spy_ret[-1] * 100 if spy_ret else None
+
+ranked = sorted(results, key=lambda x: -x[2])
+
+# Regime classification
+correlated = sum(1 for _,_,_,_,c,_,_ in results if abs(c) >= INDEX_CORR_THRESHOLD)
+total = len(results)
+regime = 'TREND' if correlated >= TREND_SECTOR_MIN else 'SORTING'
+confidence = (correlated / total if regime == 'TREND' else (total - correlated) / total) * 100
+changes = [r[2] for r in results]
+mean_chg = sum(changes) / len(changes)
+dispersion = math.sqrt(sum((c - mean_chg)**2 for c in changes) / (len(changes) - 1)) if len(changes) > 1 else 0
+
+print(f'  {"Sector":<22} {"ETF":>5} {"Price":>8} {"Change":>8} {"Corr":>6} {"AutoC":>6}  Signal')
+print(f'  {"-"*22} {"-"*5} {"-"*8} {"-"*8} {"-"*6} {"-"*6}  {"-"*6}')
+for sector, etf, chg, price, corr, ac, quad in ranked:
     bar = '█' * int(abs(chg) * 2)
-    if chg >= 0:
-        print(f'  {sector:<25} {chg:>+7.2f}%  \033[32m{bar}\033[0m')
-    else:
-        print(f'  {sector:<25} {chg:>+7.2f}%  \033[31m{bar}\033[0m')
+    color = '\033[32m' if chg >= 0 else '\033[31m'
+    print(f'  {sector:<22} {etf:>5} {price:>8.2f} {chg:>+7.2f}% {corr:>6.2f} {ac:>6.2f}  {quad:<6} {color}{bar}\033[0m')
 
+if spy_chg is not None:
+    print(f'\n  SPY benchmark: {spy_prices[-1]:.2f} ({spy_chg:>+.2f}%)')
+
+print(f'\n  Regime: {regime} ({confidence:.0f}%) — {correlated}/{total} correlated, dispersion {dispersion:.2f}%')
 print()
 top = ranked[:3]
 bottom = ranked[-3:]
-print(f'  Rewarded: {", ".join(s for s,_ in top)}')
-print(f'  Punished: {", ".join(s for s,_ in bottom)}')
+print(f'  Rewarded: {", ".join(f"{s} ({e})" for s,e,_,_,_,_,_ in top)}')
+print(f'  Punished: {", ".join(f"{s} ({e})" for s,e,_,_,_,_,_ in bottom)}')
 PYEOF
     ;;
 

@@ -15,7 +15,7 @@ Portfolio:
 
 Ritual:
   morning, portfolio, briefing, ritual-today, ritual-set, ritual-history
-  ritual-status, intent-history, intent-changes-today
+  ritual-status, regime-track, intent-history, intent-changes-today
 
 Trading:
   buy, sell, orders, cancel-order, trade-enter, trade-setup, trade-open
@@ -67,7 +67,7 @@ case "$CMD" in
     source "$SCRIPT_DIR/commands/portfolio.sh" ;;
 
   # Ritual
-  morning|portfolio|briefing|triage|ritual-today|ritual-set|ritual-history|ritual-status|intent-history|intent-changes-today)
+  morning|portfolio|briefing|triage|ritual-today|ritual-set|ritual-history|ritual-status|regime-track|intent-history|intent-changes-today)
     source "$SCRIPT_DIR/commands/ritual.sh" ;;
 
   # Trading

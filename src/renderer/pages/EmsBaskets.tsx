@@ -3,7 +3,7 @@ import { useEmsBaskets, useValuationMetrics } from '../hooks/useApi';
 import type { EntryPlanTranche } from '../../shared/types';
 
 export default function EmsBaskets() {
-  const { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket } = useEmsBaskets();
+  const { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket, resizeBasket } = useEmsBaskets();
   const { valuations } = useValuationMetrics();
   const [selectedBasket, setSelectedBasket] = useState<string | null>(null);
   const [showCompleted, setShowCompleted] = useState(false);
@@ -137,6 +137,14 @@ export default function EmsBaskets() {
             />
             Show filled/cancelled
           </label>
+          <button
+            onClick={() => { if (selectedBasket) resizeBasket(selectedBasket); }}
+            disabled={loading || !selectedBasket}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+            title="Recalculate tranche quantities from target allocations at current close prices"
+          >
+            {loading ? 'Resizing...' : 'Resize Tranches'}
+          </button>
           <button
             onClick={() => { fetchBaskets(); if (selectedBasket) fetchBasket(selectedBasket); }}
             disabled={loading}

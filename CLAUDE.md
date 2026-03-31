@@ -43,6 +43,7 @@ Electron desktop app for portfolio management. TypeScript + React + SQLite (bett
 ./scripts/pm-cli.sh ritual-set <field> <value>  # Set a field on today's ritual
 ./scripts/pm-cli.sh ritual-history [n]     # Last n rituals (default 5)
 ./scripts/pm-cli.sh ritual-status          # Quick: regime set? action chosen? journal written?
+./scripts/pm-cli.sh regime-track           # Regime history, streak, re-risk phase assessment
 ./scripts/pm-cli.sh intent-history [positionId]  # Show change log for a position (or all)
 ./scripts/pm-cli.sh intent-changes-today   # Show all intent changes made today
 ./scripts/pm-cli.sh watchlists               # List all watchlists
@@ -137,11 +138,12 @@ Run with the user in conversation. Three phases across the day.
 4. No regime read yet — pre-market liquidity is thin, can't determine what's being rewarded/punished
 
 ### Mid-Morning (~10 min, after 10:30am)
-1. Run `pm-cli.sh sectors` to pull sector performance heatmap from FMP
-2. Regime read — based on actual price action, sector rotation, breadth:
-   - "What's being rewarded? What's being punished?" (informed by sector data)
-   - "Trend day or sorting day?"
-3. Record via: `pm-cli.sh ritual-set regime_rewarding "..."`, `ritual-set regime_punishing "..."`, `ritual-set regime_type trend|sorting`
+1. Run `pm-cli.sh sectors` — sector heatmap with correlation, autocorrelation, and regime classification
+2. Click **Read Regime** in app (or run `sectors` which shows the same data) — auto-populates:
+   - Rewarding/punishing sectors
+   - Regime type (trend/sorting) with confidence %
+   - Per-sector correlation with SPY + autocorrelation signals
+3. Run `pm-cli.sh regime-track` — shows streak, re-risk phase, and phase triggers
 4. If sorting day: adds are disabled (exception: pre-planned EMS basket orders — governance already applied at plan time)
 5. Decision gate (now informed by regime):
    - "One action today: reduce, re-tier, add, or nothing?"
@@ -175,6 +177,7 @@ Research notes and observations appear for both buy and sell sides. They provide
 - Risk shape views are client-side computed (no extra DB queries)
 - DB column names use snake_case, TypeScript uses camelCase
 - Row mappers convert between the two (e.g., `mapRowToAccount`)
+- **better-sqlite3 parameterization**: Do NOT use spread args — `.get(...array, extraArg)` silently fails. Always pass params as a single array: `.get([...array, extraArg])`. Same applies to `.all()` and `.run()`.
 
 ## Data Providers
 Supports FMP, Massive API, and Schwab (with WebSocket streaming for real-time quotes).

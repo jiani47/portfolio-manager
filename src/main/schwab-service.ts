@@ -804,6 +804,7 @@ export class SchwabService {
   }
 
   async getMarketQuotes(symbols: string[]): Promise<{ quotes: Map<string, StockQuote>; delayed: boolean }> {
+    const SECTOR_ETF_SYMBOLS = new Set(['XLK', 'XLF', 'XLV', 'XLE', 'XLI', 'XLY', 'XLP', 'XLU', 'XLRE', 'XLB', 'XLC', 'SPY']);
     const quotes = new Map<string, StockQuote>();
     let anyDelayed = false;
 
@@ -818,6 +819,11 @@ export class SchwabService {
         if (!response.ok) continue;
 
         const data = await response.json();
+        console.log(`[quotes] Batch ${Math.floor(i / batchSize) + 1}: requested ${batch.length} symbols, API returned ${Object.keys(data).length} entries`);
+        const missingFromResponse = batch.filter(s => !data[s.toUpperCase()]);
+        if (missingFromResponse.length > 0) {
+          console.log(`[quotes] Missing from API response: ${missingFromResponse.join(', ')}`);
+        }
         for (const sym of batch) {
           const entry = data[sym.toUpperCase()];
           if (!entry) continue;
@@ -825,9 +831,21 @@ export class SchwabService {
           const isDelayed = q.delayed ?? q.isDelayed ?? false;
           if (isDelayed) anyDelayed = true;
 
+          // Use lastPrice, falling back to mark, then previous close
+          // (ETFs don't trade extended hours, so lastPrice can be 0 pre-market)
+          const price = (q.lastPrice && q.lastPrice > 0) ? q.lastPrice
+            : (q.mark && q.mark > 0) ? q.mark
+            : (q.closePrice && q.closePrice > 0) ? q.closePrice
+            : 0;
+
+          // Log ETF price resolution for debugging
+          if (SECTOR_ETF_SYMBOLS.has(sym.toUpperCase())) {
+            console.log(`[quotes] ${sym}: lastPrice=${q.lastPrice}, mark=${q.mark}, closePrice=${q.closePrice} → using ${price}`);
+          }
+
           quotes.set(sym.toUpperCase(), {
             symbol: sym.toUpperCase(),
-            price: q.lastPrice ?? q.mark ?? 0,
+            price,
             change: q.netChange ?? 0,
             changePercent: q.netPercentChange ?? 0,
             volume: q.totalVolume,
@@ -835,8 +853,8 @@ export class SchwabService {
             delayed: isDelayed,
           });
         }
-      } catch {
-        // Skip failed batches
+      } catch (err) {
+        console.error(`[quotes] Batch ${Math.floor(i / batchSize) + 1} failed:`, err);
       }
     }
 
@@ -883,7 +901,9 @@ export class SchwabService {
 
     try {
       const symbols = Array.from(symbolSecurityMap.keys());
+      console.log(`[refresh] Schwab refreshPrices: requesting ${symbols.length} symbols`);
       const { quotes, delayed } = await this.getMarketQuotes(symbols);
+      console.log(`[refresh] Schwab refreshPrices: got ${quotes.size} quotes back (delayed: ${delayed})`);
       const today = new Date().toISOString().split('T')[0];
       const now = new Date().toISOString();
 

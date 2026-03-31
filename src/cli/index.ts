@@ -20,6 +20,7 @@ const COMMANDS: Record<string, () => Promise<{ run: CommandFn }>> = {
   scorecard: () => import('./commands/scorecard'),
   'levels-refresh': () => import('./commands/levels-refresh'),
   attribution: () => import('./commands/attribution'),
+  'basket-resize': () => import('./commands/basket-resize'),
 };
 
 async function main() {

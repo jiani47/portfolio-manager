@@ -43,6 +43,12 @@ export class Database {
     this.dbPath = dbPath;
   }
 
+  /** Expose the raw better-sqlite3 instance for CLI command reuse. */
+  getDb(): BetterSqlite3.Database {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db;
+  }
+
   initialize(): void {
     this.db = new BetterSqlite3(this.dbPath);
     this.db.pragma('journal_mode = WAL');

@@ -307,7 +307,31 @@ declare global {
       getPositionSnapshotHistory: (symbol: string, days?: number) => Promise<Array<{ date: string; quantity: number; costBasis: number; closePrice: number; marketValue: number; unrealizedGain: number }>>;
 
       getFmpApiKey: () => Promise<string | null>;
-      getSectorPerformance: () => Promise<{ nyse: Record<string, number>; nasdaq: Record<string, number>; date: string } | null>;
+      getSectorPerformance: () => Promise<{ sectors: Array<{ symbol: string; name: string; changePct: number; price: number }>; benchmark: { symbol: string; changePct: number; price: number } | null; date: string } | null>;
+      readRegime: () => Promise<{
+        rewarding?: string;
+        punishing?: string;
+        date?: string;
+        error?: string;
+        regime?: {
+          type: 'trend' | 'sorting';
+          confidence: number;
+          avgIndexCorrelation: number;
+          avgAutocorrelation: number;
+          dispersionPct: number;
+          correlatedSectorCount: number;
+          totalSectors: number;
+          sectorSignals: Array<{
+            symbol: string;
+            sector: string;
+            changePct: number;
+            indexCorrelation: number;
+            autocorrelation: number;
+            quadrant: string;
+          }>;
+          summary: string;
+        };
+      }>;
       streamingStart: (symbols: string[]) => Promise<void>;
       streamingStop: () => Promise<void>;
       streamingGetStatus: () => Promise<StreamingState>;
@@ -333,6 +357,7 @@ declare global {
       // EMS Basket operations
       emsListBaskets: () => Promise<RebalanceBasket[]>;
       emsGetBasket: (name: string) => Promise<RebalanceBasket | null>;
+      emsResizeBasket: (name: string) => Promise<unknown>;
     };
   }
 }
@@ -1963,7 +1988,23 @@ export function useEmsBaskets() {
     }
   }, []);
 
-  return { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket };
+  const resizeBasket = useCallback(async (name: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.emsResizeBasket(name);
+      // Refresh basket data after resize
+      await fetchBasket(name);
+      return result;
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchBasket]);
+
+  return { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket, resizeBasket };
 }
 
 export function useValuationMetrics() {
