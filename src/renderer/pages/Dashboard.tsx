@@ -22,7 +22,7 @@ export default function Dashboard() {
   const { articles: newsArticles, fetchRecentNews } = useNews();
   const { earnings, fetchPortfolioEarnings } = useEarnings();
   const { positionBetas, fetchAnalytics } = useAnalytics();
-  const { baskets, activeBasket, fetchBaskets, fetchBasket } = useEmsBaskets();
+  const { baskets, activeBasket, loading: basketLoading, fetchBaskets, fetchBasket, resizeBasket } = useEmsBaskets();
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [expandedTranches, setExpandedTranches] = useState<Set<string>>(new Set());
   const [expandAllTranches, setExpandAllTranches] = useState(false);
@@ -146,7 +146,31 @@ export default function Dashboard() {
     if (!syms.includes('QQQ')) syms.push('QQQ');
     return syms;
   }, [positions, securityMap]);
-  const { quotes: streamingQuotes } = useStreamingQuotes(symbolList);
+  const { quotes: streamingQuotes, status: streamingStatus } = useStreamingQuotes(symbolList);
+
+  // Last quote timestamp — tracks freshness
+  const [lastQuoteAge, setLastQuoteAge] = useState<string>('');
+  const lastQuoteTs = useMemo(() => {
+    let max = 0;
+    for (const [, q] of streamingQuotes) {
+      if (q.timestamp > max) max = q.timestamp;
+    }
+    return max;
+  }, [streamingQuotes]);
+
+  useEffect(() => {
+    const update = () => {
+      if (lastQuoteTs === 0) { setLastQuoteAge(''); return; }
+      const secs = Math.floor((Date.now() - lastQuoteTs) / 1000);
+      if (secs < 10) setLastQuoteAge('just now');
+      else if (secs < 60) setLastQuoteAge(`${secs}s ago`);
+      else if (secs < 3600) setLastQuoteAge(`${Math.floor(secs / 60)}m ago`);
+      else setLastQuoteAge(`${Math.floor(secs / 3600)}h ago`);
+    };
+    update();
+    const interval = setInterval(update, 5000);
+    return () => clearInterval(interval);
+  }, [lastQuoteTs]);
 
   // Today's ritual
   const todayRitual = useMemo(() => {
@@ -288,11 +312,30 @@ export default function Dashboard() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
         <div className="flex items-center gap-3">
-          {lastSynced && (
-            <span className="text-xs text-gray-400">
-              Last synced: {lastSynced.toLocaleTimeString()}
-            </span>
-          )}
+          {(() => {
+            const quoteFresh = lastQuoteTs > 0 && (Date.now() - lastQuoteTs) < 15000;
+            const isLive = streamingStatus === 'connected' || (streamingStatus === 'outside_hours' && quoteFresh);
+            const isStale = lastQuoteTs > 0 && (Date.now() - lastQuoteTs) > 30000;
+            return (
+              <div className="flex items-center gap-1.5" title={`${streamingStatus}${lastQuoteAge ? ` · ${lastQuoteAge}` : ''}`}>
+                <span className={`w-2 h-2 rounded-full ${
+                  isStale ? 'bg-red-500' :
+                  isLive ? 'bg-green-500 animate-pulse' :
+                  streamingStatus === 'connecting' ? 'bg-yellow-400 animate-pulse' :
+                  streamingStatus === 'error' ? 'bg-red-500' :
+                  'bg-gray-400'
+                }`} />
+                <span className="text-xs text-gray-400">
+                  {isStale ? 'Stale' :
+                   isLive ? 'Live' :
+                   streamingStatus === 'connecting' ? 'Connecting...' :
+                   streamingStatus === 'error' ? 'Error' :
+                   'Offline'}
+                  {lastQuoteAge && ` · ${lastQuoteAge}`}
+                </span>
+              </div>
+            );
+          })()}
           <button onClick={() => { fetchSummary(); fetchPositions(); fetchRituals(1); }} className="btn-secondary text-sm">
             Refresh
           </button>
@@ -619,21 +662,36 @@ export default function Dashboard() {
               <div className="card">
                 <div className="flex items-center justify-between mb-3">
                   <h2 className="text-lg font-semibold text-gray-900">Portfolio Allocation</h2>
-                  {tranchesBySymbol.size > 0 && (
-                    <button
-                      onClick={() => {
-                        setExpandAllTranches(!expandAllTranches);
-                        if (!expandAllTranches) {
-                          setExpandedTranches(new Set(Array.from(tranchesBySymbol.keys())));
-                        } else {
-                          setExpandedTranches(new Set());
-                        }
-                      }}
-                      className="text-xs text-blue-600 hover:underline"
-                    >
-                      {expandAllTranches ? 'Collapse tranches' : 'Show scheduled tranches'}
-                    </button>
-                  )}
+                  <div className="flex items-center gap-3">
+                    {activeBasket && (
+                      <button
+                        onClick={async () => {
+                          await resizeBasket(activeBasket.name);
+                          fetchBasket(activeBasket.name);
+                        }}
+                        disabled={basketLoading}
+                        className="px-3 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 disabled:opacity-50"
+                        title="Recalculate EMS tranche quantities from target allocations"
+                      >
+                        {basketLoading ? 'Resizing...' : 'Resize Tranches'}
+                      </button>
+                    )}
+                    {tranchesBySymbol.size > 0 && (
+                      <button
+                        onClick={() => {
+                          setExpandAllTranches(!expandAllTranches);
+                          if (!expandAllTranches) {
+                            setExpandedTranches(new Set(Array.from(tranchesBySymbol.keys())));
+                          } else {
+                            setExpandedTranches(new Set());
+                          }
+                        }}
+                        className="text-xs text-blue-600 hover:underline"
+                      >
+                        {expandAllTranches ? 'Collapse tranches' : 'Show scheduled tranches'}
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <table className="w-full text-sm">
                   <thead>

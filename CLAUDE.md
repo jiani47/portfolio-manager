@@ -154,6 +154,12 @@ Run with the user in conversation. Three phases across the day.
 ### EOD
 1. Ask: "One sentence — today I did/didn't act because ___"
 2. Record: `pm-cli.sh ritual-set journal "..."`
+3. Automated (scheduler runs if app is open at market close):
+   - +5min: Price backfill (today's candles for all symbols)
+   - +15min: Portfolio snapshot
+   - +20min: S/R levels refresh (swing highs/lows recomputed)
+   - +30min: Sector performance saved
+   - If app wasn't open, run manually: `pm-cli.sh refresh && pm-cli.sh snapshot && pm-cli.sh levels-refresh`
 
 ## Pre-Trade Checklist
 The `pre_trade_check` function in `scripts/commands/pretrade.sh` runs before every buy/sell order. It surfaces:

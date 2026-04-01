@@ -83,7 +83,7 @@ const SUBSCRIBE_FIELDS = '0,1,2,3,8,10,11,12,17,18,42';
 const SNAPSHOT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const POSITION_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MARKET_CHECK_INTERVAL_MS = 30 * 1000; // 30 seconds
-const EXTENDED_HOURS_POLL_INTERVAL_MS = 60 * 1000; // 1 minute
+const EXTENDED_HOURS_POLL_INTERVAL_MS = 5 * 1000; // 5 seconds
 const MAX_RECONNECT_FAILURES = 5;
 const MAX_RECONNECT_DELAY_MS = 60 * 1000;
 
@@ -208,16 +208,13 @@ export class SchwabStreamService {
           console.error('Failed to refresh price levels:', err);
         }
       }
-      // Start extended hours polling if applicable
-      if (extendedHours && isSchwabProvider && isConnectedToSchwab) {
+      // Start polling whenever Schwab is connected and market is closed
+      if (isSchwabProvider && isConnectedToSchwab) {
         this.startExtendedHoursPolling();
       }
     } else if (!marketOpen && isSchwabProvider && isConnectedToSchwab) {
-      if (extendedHours) {
-        this.startExtendedHoursPolling();
-      } else {
-        this.stopExtendedHoursPolling();
-      }
+      // Poll whenever Schwab is connected and market is closed (pre/post/overnight)
+      this.startExtendedHoursPolling();
       if (this.status === 'disconnected') {
         this.setStatus('outside_hours');
       }
@@ -281,7 +278,7 @@ export class SchwabStreamService {
   private startExtendedHoursPolling(): void {
     if (this.extendedHoursPollTimer) return; // Already polling
 
-    console.log('Schwab: starting extended hours polling (every 60s)');
+    console.log('Schwab: starting extended hours polling (every 5s)');
     this.pollExtendedHoursQuotes(); // Poll immediately
     this.extendedHoursPollTimer = setInterval(() => {
       this.pollExtendedHoursQuotes();
@@ -344,25 +341,52 @@ export class SchwabStreamService {
 
   private async pollExtendedHoursQuotes(): Promise<void> {
     try {
+      const pollStart = Date.now();
       const symbols = this.buildSymbolList();
-      if (symbols.length === 0) return;
+      if (symbols.length === 0) {
+        console.log('[poll] No symbols to poll');
+        return;
+      }
+
+      console.log(`[poll] Starting: ${symbols.length} symbols`);
 
       // Fetch quotes via REST API — includes extendedHoursQuote
-      await this.schwabService.ensureTokenFresh();
+      try {
+        await this.schwabService.ensureTokenFresh();
+      } catch (tokenErr) {
+        console.error('[poll] Token refresh failed:', tokenErr);
+        return;
+      }
+      console.log(`[poll] Token OK (${Date.now() - pollStart}ms)`);
 
       const batchSize = 40;
       const mainWindow = this.getMainWindow();
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        console.log('[poll] No main window — skipping');
+        return;
+      }
+      const priceUpdates: Array<{
+        securityId: string; openPrice?: number; highPrice?: number;
+        lowPrice?: number; closePrice: number; volume?: number; fetchedAt: string;
+      }> = [];
+      let quotesReceived = 0;
 
       for (let i = 0; i < symbols.length; i += batchSize) {
         const batch = symbols.slice(i, i + batchSize);
+        const batchNum = Math.floor(i / batchSize) + 1;
+        const batchStart = Date.now();
         try {
           const symbolsParam = batch.map(s => encodeURIComponent(s)).join(',');
           const response = await this.schwabService.fetchMarketDataApi(
             `/marketdata/v1/quotes?symbols=${symbolsParam}&fields=quote,extended`
           );
-          if (!response.ok) continue;
+          if (!response.ok) {
+            console.error(`[poll] Batch ${batchNum} HTTP ${response.status} (${Date.now() - batchStart}ms)`);
+            continue;
+          }
 
           const data = await response.json();
+          console.log(`[poll] Batch ${batchNum}: ${Object.keys(data).length}/${batch.length} quotes (${Date.now() - batchStart}ms)`);
 
           for (const sym of batch) {
             const entry = data[sym.toUpperCase()];
@@ -398,24 +422,18 @@ export class SchwabStreamService {
             this.latestQuotes.set(sym.toUpperCase(), quote);
             logger.info(`[quotes:poll:resolved] ${sym.toUpperCase()} last=$${quote.last.toFixed(2)} netChange=${quote.netChange?.toFixed(2)} netChangePct=${quote.netChangePct?.toFixed(2)}% close=$${quote.close?.toFixed(2) ?? 'null'} open=$${quote.open?.toFixed(2) ?? 'null'}`);
 
-            // Save to price_history (close_price = last traded price)
+            // Collect for batch DB write after all batches complete
             const securityId = this.symbolSecurityMap.get(sym.toUpperCase());
-            if (securityId && this.db) {
-              const today = new Date().toISOString().split('T')[0];
-              try {
-                this.db.savePriceHistory({
-                  securityId,
-                  date: today,
-                  openPrice: regularQuote?.openPrice || null,
-                  highPrice: regularQuote?.highPrice || null,
-                  lowPrice: regularQuote?.lowPrice || null,
-                  closePrice: last,
-                  volume: regularQuote?.totalVolume || null,
-                  fetchedAt: new Date().toISOString(),
-                });
-              } catch (e) {
-                // Non-fatal: don't break polling if DB write fails
-              }
+            if (securityId) {
+              priceUpdates.push({
+                securityId,
+                openPrice: regularQuote?.openPrice || undefined,
+                highPrice: regularQuote?.highPrice || undefined,
+                lowPrice: regularQuote?.lowPrice || undefined,
+                closePrice: last,
+                volume: regularQuote?.totalVolume || undefined,
+                fetchedAt: new Date().toISOString(),
+              });
             }
 
             // Check monitors
@@ -445,14 +463,25 @@ export class SchwabStreamService {
             // Push to renderer
             if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.webContents.send('streaming:quote', quote);
+              quotesReceived++;
             }
           }
-        } catch {
-          // Skip failed batches
+        } catch (batchErr) {
+          console.error(`[poll] Batch error:`, batchErr);
         }
       }
 
-      console.log(`Schwab extended hours: polled ${symbols.length} quotes`);
+      // Batch write to price_history in a single transaction
+      if (priceUpdates.length > 0 && this.db) {
+        try {
+          const etDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
+          this.db.savePriceHistoryBatch(priceUpdates.map(u => ({ ...u, date: etDate })));
+        } catch {
+          // Non-fatal
+        }
+      }
+
+      console.log(`[poll] Done: ${quotesReceived}/${symbols.length} quotes sent, ${priceUpdates.length} saved (${Date.now() - pollStart}ms)`);
     } catch (err) {
       console.error('Extended hours poll error:', err);
     }
