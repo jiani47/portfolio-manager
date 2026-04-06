@@ -402,7 +402,7 @@ export class SchwabStreamService {
             if (last === 0) continue;
 
             // Debug: log raw Schwab fields + resolved values
-            logger.info(`[quotes:poll:raw] ${sym.toUpperCase()} | phase=${preMarket ? 'pre' : 'mkt/post'} | ext.last=${extQuote?.lastPrice ?? 'null'} | reg.last=${regularQuote?.lastPrice ?? 'null'} reg.close=${regularQuote?.closePrice ?? 'null'} reg.open=${regularQuote?.openPrice ?? 'null'} reg.mark=${regularQuote?.mark ?? 'null'} | resolved: last=$${last.toFixed(2)} change=${netChange.toFixed(2)} pct=${netChangePct.toFixed(2)}%`);
+            logger.debug(`[quotes:poll:raw] ${sym.toUpperCase()} | phase=${preMarket ? 'pre' : 'mkt/post'} | ext.last=${extQuote?.lastPrice ?? 'null'} | reg.last=${regularQuote?.lastPrice ?? 'null'} reg.close=${regularQuote?.closePrice ?? 'null'} reg.open=${regularQuote?.openPrice ?? 'null'} reg.mark=${regularQuote?.mark ?? 'null'} | resolved: last=$${last.toFixed(2)} change=${netChange.toFixed(2)} pct=${netChangePct.toFixed(2)}%`);
 
             const quote: StreamingQuote = {
               symbol: sym.toUpperCase(),
@@ -420,7 +420,7 @@ export class SchwabStreamService {
             };
 
             this.latestQuotes.set(sym.toUpperCase(), quote);
-            logger.info(`[quotes:poll:resolved] ${sym.toUpperCase()} last=$${quote.last.toFixed(2)} netChange=${quote.netChange?.toFixed(2)} netChangePct=${quote.netChangePct?.toFixed(2)}% close=$${quote.close?.toFixed(2) ?? 'null'} open=$${quote.open?.toFixed(2) ?? 'null'}`);
+            logger.debug(`[quotes:poll:resolved] ${sym.toUpperCase()} last=$${quote.last.toFixed(2)} netChange=${quote.netChange?.toFixed(2)} netChangePct=${quote.netChangePct?.toFixed(2)}% close=$${quote.close?.toFixed(2) ?? 'null'} open=$${quote.open?.toFixed(2) ?? 'null'}`);
 
             // Collect for batch DB write after all batches complete
             const securityId = this.symbolSecurityMap.get(sym.toUpperCase());

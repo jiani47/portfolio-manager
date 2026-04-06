@@ -849,18 +849,26 @@ db, date = sys.argv[1], sys.argv[2]
 
 ETFS = {
     'XLK':  'Technology',
+    'SMH':  'Technology',
+    'IGV':  'Technology',
     'XLF':  'Financials',
     'XLV':  'Health Care',
+    'XBI':  'Health Care',
     'XLE':  'Energy',
+    'XOP':  'Energy',
+    'AMLP': 'Energy',
     'XLI':  'Industrials',
+    'ITA':  'Industrials',
+    'SHLD': 'Industrials',
     'XLY':  'Consumer Cyclical',
     'XLP':  'Consumer Defensive',
     'XLU':  'Utilities',
     'XLRE': 'Real Estate',
     'XLB':  'Basic Materials',
     'XLC':  'Communication Svcs',
+    'ARKX': 'Technology',
 }
-ALL_SYMS = list(ETFS.keys()) + ['SPY']
+ALL_SYMS = list(ETFS.keys()) + ['SPY', 'QQQ']
 INDEX_CORR_THRESHOLD = 0.6
 AUTO_CORR_THRESHOLD = 0.3
 TREND_SECTOR_MIN = 7

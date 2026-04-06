@@ -245,9 +245,11 @@ case "$1" in
     echo ""
     echo "--- Dynamic Allocation View (derived from target %) ---"
     PTOTAL=$(sqlite3 "$DB" "
-      SELECT SUM(p.quantity * COALESCE(
-        (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1), 0
-      )) FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type NOT IN ('cash','option') AND p.quantity > 0;
+      SELECT
+        COALESCE((SELECT SUM(p.quantity * COALESCE(
+          (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1), 0
+        )) FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type NOT IN ('cash','option') AND p.quantity > 0), 0) +
+        COALESCE((SELECT SUM(p.quantity) FROM positions p JOIN securities s ON p.security_id = s.id WHERE s.type = 'cash' AND p.quantity > 0), 0)
     ")
 
     python3 - "$DB" "$BASKET_ID" "$PTOTAL" "$BASKET_SHOW_ALL" << 'PYEOF'

@@ -947,8 +947,8 @@ for date, rtype, notes, rewarding, punishing in rituals[:10]:
 print()
 
 # --- Compute current regime signals from price_history ---
-ETFS = ['XLK','XLF','XLV','XLE','XLI','XLY','XLP','XLU','XLRE','XLB','XLC']
-ALL_SYMS = ETFS + ['SPY']
+ETFS = ['XLK','SMH','IGV','XLF','XLV','XBI','XLE','XOP','AMLP','XLI','ITA','SHLD','XLY','XLP','XLU','XLRE','XLB','XLC','ARKX']
+ALL_SYMS = ETFS + ['SPY', 'QQQ']
 placeholders = ','.join('?' * len(ALL_SYMS))
 
 # Find aligned dates
