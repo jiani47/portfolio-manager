@@ -715,7 +715,10 @@ export default function Dashboard() {
                       const symbolTranches = tranchesBySymbol.get(a.symbol);
                       const isExpanded = expandedTranches.has(a.symbol);
                       const hasTranches = symbolTranches && symbolTranches.length > 0;
-                      const totalScheduled = symbolTranches?.reduce((s, t) => s + t.shares, 0) || 0;
+                      const totalScheduled = symbolTranches?.reduce((s, t) => {
+                        const sign = t.side === 'sell' ? -1 : 1;
+                        return s + (t.shares * sign);
+                      }, 0) || 0;
 
                       const rows = [(
                         <tr
@@ -734,7 +737,7 @@ export default function Dashboard() {
                               <span className="font-medium text-gray-900">{a.symbol}</span>
                               {hasTranches && (
                                 <span className="text-xs text-blue-500" title={`${totalScheduled} shares scheduled`}>
-                                  {isExpanded ? '▾' : '▸'} +{totalScheduled}
+                                  {isExpanded ? '▾' : '▸'} {totalScheduled >= 0 ? '+' : ''}{totalScheduled}
                                 </span>
                               )}
                             </div>

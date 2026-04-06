@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Transaction operations
   getTransactions: (filters?: unknown) => ipcRenderer.invoke('db:transactions:list', filters),
+  getSymbolTransactions: (symbol: string, limit?: number) => ipcRenderer.invoke('db:transactions:bySymbol', symbol, limit),
   createTransaction: (transaction: unknown) => ipcRenderer.invoke('db:transactions:create', transaction),
   updateTransaction: (id: string, transaction: unknown) => ipcRenderer.invoke('db:transactions:update', id, transaction),
   deleteTransaction: (id: string) => ipcRenderer.invoke('db:transactions:delete', id),
@@ -228,6 +229,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   emsListBaskets: () => ipcRenderer.invoke('ems:baskets:list'),
   emsGetBasket: (name: string) => ipcRenderer.invoke('ems:baskets:get', name),
   emsResizeBasket: (name: string) => ipcRenderer.invoke('ems:baskets:resize', name),
+  emsFillTranche: (id: string, data: { filledQty: number; filledPrice: number; brokerageOrderStatus?: string }) =>
+    ipcRenderer.invoke('ems:tranches:fill', id, data),
 
   // Entry plan operations
   getEntryPlanBySymbol: (symbol: string) => ipcRenderer.invoke('db:entry-plans:get-by-symbol', symbol),

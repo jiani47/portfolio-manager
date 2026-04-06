@@ -3,10 +3,11 @@ import { useEmsBaskets, useValuationMetrics } from '../hooks/useApi';
 import type { EntryPlanTranche } from '../../shared/types';
 
 export default function EmsBaskets() {
-  const { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket, resizeBasket } = useEmsBaskets();
+  const { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket, resizeBasket, fillTranche } = useEmsBaskets();
   const { valuations } = useValuationMetrics();
   const [selectedBasket, setSelectedBasket] = useState<string | null>(null);
   const [showCompleted, setShowCompleted] = useState(false);
+  const [fillingTranche, setFillingTranche] = useState<string | null>(null);
 
   useEffect(() => {
     fetchBaskets();
@@ -64,6 +65,30 @@ export default function EmsBaskets() {
     if (showCompleted) return allTranches;
     return allTranches.filter(t => t.status !== 'filled' && t.status !== 'cancelled');
   }, [allTranches, showCompleted]);
+
+  const handleMarkFilled = async (tranche: EntryPlanTranche & { symbol: string; side: string }) => {
+    if (!tranche.id) return;
+
+    // Prompt for fill details
+    const qty = prompt(`Fill quantity for ${tranche.symbol}:`, String(tranche.shares));
+    if (!qty) return;
+
+    const price = prompt(`Fill price for ${tranche.symbol}:`, tranche.limitPrice ? String(tranche.limitPrice) : '');
+    if (!price) return;
+
+    setFillingTranche(tranche.id);
+    try {
+      await fillTranche(tranche.id, {
+        filledQty: parseFloat(qty),
+        filledPrice: parseFloat(price),
+        brokerageOrderStatus: 'FILLED'
+      });
+    } catch (err) {
+      console.error('Failed to fill tranche:', err);
+    } finally {
+      setFillingTranche(null);
+    }
+  };
 
   // Compute allocation context per symbol
   const symbolAllocation = useMemo(() => {
@@ -224,7 +249,6 @@ export default function EmsBaskets() {
                 <tr className="border-b border-gray-200 bg-gray-50">
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Symbol</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Side</th>
-                  <th className="text-right px-4 py-3 font-medium text-gray-600">#</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Trigger</th>
                   <th className="text-right px-4 py-3 font-medium text-gray-600">Qty</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
@@ -232,6 +256,7 @@ export default function EmsBaskets() {
                   <th className="text-right px-4 py-3 font-medium text-gray-600">Fill Px</th>
                   <th className="text-right px-4 py-3 font-medium text-gray-600">Fill Qty</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">Broker</th>
+                  <th className="text-center px-4 py-3 font-medium text-gray-600">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -247,7 +272,6 @@ export default function EmsBaskets() {
                         {(t.side || 'buy').toUpperCase()}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-right text-gray-500">{t.trancheNumber}</td>
                     <td className="px-4 py-3 text-gray-600">
                       {t.triggerType === 'date' ? t.triggerDate : t.triggerPrice ? `$${t.triggerPrice.toFixed(2)}` : '-'}
                     </td>
@@ -267,6 +291,17 @@ export default function EmsBaskets() {
                       ) : ''}
                     </td>
                     <td className="px-4 py-3 text-gray-500 text-xs">{t.brokerageOrderStatus || ''}</td>
+                    <td className="px-4 py-3 text-center">
+                      {(t.status === 'pending' || t.status === 'triggered' || t.status === 'submitted') && (
+                        <button
+                          onClick={() => handleMarkFilled(t)}
+                          disabled={fillingTranche === t.id}
+                          className="text-xs px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                        >
+                          {fillingTranche === t.id ? 'Filling...' : 'Mark Filled'}
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

@@ -90,6 +90,7 @@ declare global {
 
       // Transaction operations
       getTransactions: (filters?: TransactionFilters) => Promise<Transaction[]>;
+      getSymbolTransactions: (symbol: string, limit?: number) => Promise<Array<Transaction & { accountName?: string }>>;
       createTransaction: (transaction: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>) => Promise<Transaction>;
       updateTransaction: (id: string, transaction: Partial<Transaction>) => Promise<Transaction>;
       deleteTransaction: (id: string) => Promise<void>;
@@ -358,6 +359,7 @@ declare global {
       emsListBaskets: () => Promise<RebalanceBasket[]>;
       emsGetBasket: (name: string) => Promise<RebalanceBasket | null>;
       emsResizeBasket: (name: string) => Promise<unknown>;
+      emsFillTranche: (id: string, data: { filledQty: number; filledPrice: number; brokerageOrderStatus?: string }) => Promise<unknown>;
     };
   }
 }
@@ -2004,7 +2006,25 @@ export function useEmsBaskets() {
     }
   }, [fetchBasket]);
 
-  return { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket, resizeBasket };
+  const fillTranche = useCallback(async (id: string, data: { filledQty: number; filledPrice: number; brokerageOrderStatus?: string }) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await window.electronAPI.emsFillTranche(id, data);
+      // Refresh active basket data after fill
+      if (activeBasket) {
+        await fetchBasket(activeBasket.name);
+      }
+      return result;
+    } catch (err) {
+      setError((err as Error).message);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  }, [activeBasket, fetchBasket]);
+
+  return { baskets, activeBasket, loading, error, fetchBaskets, fetchBasket, resizeBasket, fillTranche };
 }
 
 export function useValuationMetrics() {

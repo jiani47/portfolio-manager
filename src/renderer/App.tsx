@@ -15,6 +15,7 @@ import EarningsReviews from './pages/EarningsReviews';
 import BrokerPL from './pages/BrokerPL';
 import PortfolioHistory from './pages/PortfolioHistory';
 import EmsBaskets from './pages/EmsBaskets';
+import Transactions from './pages/Transactions';
 
 function App() {
   return (
@@ -33,6 +34,7 @@ function App() {
         <Route path="/earnings-reviews" element={<EarningsReviews />} />
         <Route path="/broker-pl" element={<BrokerPL />} />
         <Route path="/portfolio-history" element={<PortfolioHistory />} />
+        <Route path="/transactions" element={<Transactions />} />
         <Route path="/ems" element={<EmsBaskets />} />
         <Route path="/settings" element={<Settings />} />
       </Routes>

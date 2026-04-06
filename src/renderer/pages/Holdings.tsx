@@ -4,6 +4,7 @@ import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import BrokerageImportModal from '../components/BrokerageImportModal';
 import PriceLevelTooltip from '../components/PriceLevelTooltip';
 import ChartModal from '../components/ChartModal';
+import SymbolTransactionsModal from '../components/SymbolTransactionsModal';
 import type { Position, Security, SecurityTag, PositionIntent, Account, NewsArticle, ValuationMetric } from '../../shared/types';
 
 interface PositionWithPercent extends Position {
@@ -50,6 +51,7 @@ export default function Holdings() {
   const [showWatchlist, setShowWatchlist] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [chartSymbol, setChartSymbol] = useState<{ symbol: string; name?: string } | null>(null);
+  const [transactionsSymbol, setTransactionsSymbol] = useState<string | null>(null);
   const [newsSymbol, setNewsSymbol] = useState<string | null>(null);
   const [newsArticles, setNewsArticles] = useState<NewsArticle[]>([]);
   const [newsLoading, setNewsLoading] = useState(false);
@@ -1016,13 +1018,27 @@ export default function Holdings() {
                       >
                         <td className="table-cell font-medium">
                           <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => position.security && setChartSymbol({ symbol: position.security.symbol, name: position.security.name })}
-                              className="hover:text-blue-600 cursor-pointer"
-                              title="View chart"
-                            >
-                              {position.security?.symbol || 'Unknown'}
-                            </button>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => position.security && setChartSymbol({ symbol: position.security.symbol, name: position.security.name })}
+                                className="hover:text-blue-600 cursor-pointer"
+                                title="View chart"
+                              >
+                                {position.security?.symbol || 'Unknown'}
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  position.security && setTransactionsSymbol(position.security.symbol);
+                                }}
+                                className="text-gray-400 hover:text-blue-600 cursor-pointer text-xs"
+                                title="View transaction history"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                                </svg>
+                              </button>
+                            </div>
                             {position.portfolioPercent >= 8 && (
                               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-200 text-amber-800">
                                 {'\u2265'}8%
@@ -1738,6 +1754,12 @@ export default function Holdings() {
           onLevelsChanged={fetchLevels}
         />
       )}
+
+      {/* Transactions Modal */}
+      <SymbolTransactionsModal
+        symbol={transactionsSymbol}
+        onClose={() => setTransactionsSymbol(null)}
+      />
     </div>
   );
 }

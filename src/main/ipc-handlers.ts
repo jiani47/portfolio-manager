@@ -52,6 +52,7 @@ export function setupIpcHandlers(
 
   // Transaction handlers
   ipcMain.handle('db:transactions:list', (_, filters) => db.listTransactions(filters));
+  ipcMain.handle('db:transactions:bySymbol', (_, symbol, limit) => db.getTransactionsBySymbol(symbol, limit));
   ipcMain.handle('db:transactions:create', (_, transaction) => db.createTransaction(transaction));
   ipcMain.handle('db:transactions:update', (_, id, transaction) => db.updateTransaction(id, transaction));
   ipcMain.handle('db:transactions:delete', (_, id) => db.deleteTransaction(id));
@@ -1457,6 +1458,14 @@ export function setupIpcHandlers(
     }
 
     return runBasketResize([name], rawDb);
+  });
+
+  ipcMain.handle('ems:tranches:fill', (_event, id: string, data: { filledQty: number; filledPrice: number; brokerageOrderStatus?: string }) => {
+    return db.fillTranche(id, {
+      filledQty: data.filledQty,
+      filledPrice: data.filledPrice,
+      brokerageOrderStatus: data.brokerageOrderStatus || 'FILLED'
+    });
   });
 
   // Entry plan handlers

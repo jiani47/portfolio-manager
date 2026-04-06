@@ -110,133 +110,105 @@ export function run(args: string[], db: Database.Database): BasketResizeResult {
   const portfolioTotal = getPortfolioTotal(db);
   if (portfolioTotal <= 0) throw new Error('Portfolio total is zero — run refresh first');
 
-  // Get distinct symbol+side combos with any non-filled tranches
-  const symbolSides = db.prepare(`
-    SELECT DISTINCT s.symbol, ep.side
-    FROM entry_plans ep
-    JOIN securities s ON ep.security_id = s.id
-    JOIN entry_plan_tranches ept ON ept.plan_id = ep.id
-    WHERE ep.basket_id = ? AND ep.status = 'active'
-      AND ept.status IN ('pending', 'triggered')
-    ORDER BY ep.side, s.symbol
-  `).all(basketId) as SymbolSideRow[];
+  // Get all positions with target allocations
+  interface PositionWithTarget {
+    symbol: string;
+    security_id: string;
+    current_qty: number;
+    target_pct: number;
+    price: number;
+  }
+
+  const positionsWithTargets = db.prepare(`
+    SELECT DISTINCT
+      s.symbol,
+      s.id as security_id,
+      COALESCE((SELECT SUM(p2.quantity) FROM positions p2 WHERE p2.security_id = s.id AND p2.quantity > 0), 0) as current_qty,
+      pi.target_allocation_pct as target_pct,
+      COALESCE((SELECT ph.close_price FROM price_history ph WHERE ph.security_id = s.id ORDER BY ph.date DESC LIMIT 1), 0) as price
+    FROM position_intents pi
+    JOIN positions p ON pi.position_id = p.id
+    JOIN securities s ON p.security_id = s.id
+    WHERE pi.target_allocation_pct IS NOT NULL AND s.type NOT IN ('cash', 'option')
+  `).all() as PositionWithTarget[];
 
   const resized: ResizedSymbol[] = [];
   const skipped: SkippedSymbol[] = [];
 
-  const cancelStmt = db.prepare(
-    `UPDATE entry_plan_tranches SET status = 'cancelled' WHERE id = ?`
-  );
-  const insertStmt = db.prepare(`
+  const createPlanStmt = db.prepare(`
+    INSERT INTO entry_plans (id, security_id, basket_id, side, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'))
+  `);
+
+  const cancelAllTranchesStmt = db.prepare(`
+    UPDATE entry_plan_tranches
+    SET status = 'cancelled'
+    WHERE plan_id IN (
+      SELECT ep.id FROM entry_plans ep
+      JOIN securities s ON ep.security_id = s.id
+      WHERE ep.basket_id = ? AND s.symbol = ? AND ep.side = ?
+    )
+  `);
+
+  const insertTrancheStmt = db.prepare(`
     INSERT INTO entry_plan_tranches (id, plan_id, tranche_number, trigger_price, shares, status, trigger_type, trigger_date)
     VALUES (?, ?, ?, 0, ?, 'pending', 'date', ?)
   `);
 
-  for (const ss of symbolSides) {
-    const { symbol, side } = ss;
+  for (const pos of positionsWithTargets) {
+    if (pos.price <= 0) {
+      skipped.push({ symbol: pos.symbol, side: 'buy', reason: 'no price data' });
+      continue;
+    }
 
-    // Get ALL pending/triggered tranches across all plans
-    const tranches = db.prepare(`
-      SELECT ept.id, ept.tranche_number, ept.shares, ept.status, ept.plan_id
-      FROM entry_plan_tranches ept
-      JOIN entry_plans ep ON ept.plan_id = ep.id
+    const targetMv = portfolioTotal * pos.target_pct / 100;
+    const targetQty = Math.floor(targetMv / pos.price);
+    const currentQty = Math.floor(pos.current_qty);
+    const delta = targetQty - currentQty;
+
+    // Cancel ALL existing tranches for this symbol (both buy and sell)
+    // This prevents orphaned opposite-side tranches from previous operations
+    cancelAllTranchesStmt.run(basketId, pos.symbol, 'buy');
+    cancelAllTranchesStmt.run(basketId, pos.symbol, 'sell');
+
+    if (delta === 0) {
+      // At target - no new tranches needed
+      continue;
+    }
+
+    const side = delta > 0 ? 'buy' : 'sell';
+    const needQty = Math.abs(delta);
+
+    // Get or create plan for this symbol+side
+    let planRow = db.prepare(`
+      SELECT ep.id FROM entry_plans ep
       JOIN securities s ON ep.security_id = s.id
       WHERE ep.basket_id = ? AND s.symbol = ? AND ep.side = ? AND ep.status = 'active'
-        AND ept.status IN ('pending', 'triggered')
-      ORDER BY ept.tranche_number
-    `).all(basketId, symbol, side) as TrancheRow[];
+      LIMIT 1
+    `).get(basketId, pos.symbol, side) as { id: string } | undefined;
 
-    if (tranches.length === 0) continue;
-
-    // Get the first plan ID (we'll create new tranches on this plan)
-    const firstPlanId = tranches[0].plan_id;
-    const oldTotal = tranches.reduce((s, t) => s + t.shares, 0);
-
-    // Current position quantity
-    const posRow = db.prepare(`
-      SELECT SUM(p.quantity) as qty FROM positions p
-      JOIN securities s ON p.security_id = s.id
-      WHERE s.symbol = ? AND s.type NOT IN ('cash', 'option') AND p.quantity > 0
-    `).get(symbol) as { qty: number | null };
-    const currentQty = Math.floor(posRow?.qty ?? 0);
-
-    // Target allocation %
-    const intentRow = db.prepare(`
-      SELECT pi.target_allocation_pct FROM position_intents pi
-      JOIN positions p ON pi.position_id = p.id
-      JOIN securities s ON p.security_id = s.id
-      WHERE s.symbol = ? AND pi.target_allocation_pct IS NOT NULL LIMIT 1
-    `).get(symbol) as { target_allocation_pct: number } | undefined;
-
-    if (!intentRow) {
-      skipped.push({ symbol, side, reason: 'no target allocation set' });
-      continue;
-    }
-    const targetPct = intentRow.target_allocation_pct;
-
-    // Latest close price
-    const priceRow = db.prepare(`
-      SELECT ph.close_price FROM price_history ph
-      JOIN securities s ON ph.security_id = s.id
-      WHERE s.symbol = ? ORDER BY ph.date DESC LIMIT 1
-    `).get(symbol) as { close_price: number } | undefined;
-
-    if (!priceRow || priceRow.close_price <= 0) {
-      skipped.push({ symbol, side, reason: 'no price data' });
-      continue;
-    }
-    const price = priceRow.close_price;
-
-    const targetMv = portfolioTotal * targetPct / 100;
-    const targetQty = Math.floor(targetMv / price);
-
-    const totalNeed = side === 'sell'
-      ? Math.max(0, currentQty - targetQty)
-      : Math.max(0, targetQty - currentQty);
-
-    // Subtract already-filled shares
-    const filledRow = db.prepare(`
-      SELECT SUM(COALESCE(ept.filled_qty, 0)) as filled
-      FROM entry_plan_tranches ept
-      JOIN entry_plans ep ON ept.plan_id = ep.id
-      JOIN securities s ON ep.security_id = s.id
-      WHERE ep.basket_id = ? AND s.symbol = ? AND ep.side = ? AND ept.status = 'filled'
-    `).get(basketId, symbol, side) as { filled: number | null };
-    const alreadyFilled = Math.floor(filledRow?.filled ?? 0);
-
-    const remainingNeed = Math.max(0, totalNeed - alreadyFilled);
-
-    // Step 1: Cancel ALL existing pending/triggered tranches
-    for (const t of tranches) {
-      cancelStmt.run(t.id);
+    let planId: string;
+    if (!planRow) {
+      // Create new plan
+      planId = uuidv4();
+      createPlanStmt.run(planId, pos.security_id, basketId, side);
+    } else {
+      planId = planRow.id;
     }
 
-    // Step 2: If no remaining need, we're done (all cancelled)
-    if (remainingNeed === 0) {
-      resized.push({
-        symbol, side, action: 'cancelled',
-        oldTotal, newTotal: 0, targetPct, targetMv, currentQty, price,
-        tranches: tranches.map(t => ({
-          trancheId: t.id, trancheNumber: t.tranche_number,
-          oldShares: t.shares, newShares: 0,
-        })),
-      });
-      continue;
-    }
-
-    // Step 3: Create fresh weekly tranches
-    const numTranches = Math.min(DEFAULT_NUM_TRANCHES, remainingNeed); // don't create more tranches than shares
-    const perTranche = Math.floor(remainingNeed / numTranches);
-    const remainder = remainingNeed % numTranches;
+    // Create fresh tranches
+    const numTranches = Math.min(DEFAULT_NUM_TRANCHES, needQty);
+    const perTranche = Math.floor(needQty / numTranches);
+    const remainder = needQty % numTranches;
     const dates = getWeeklyDates(numTranches);
 
     const newTranches: ResizedTranche[] = [];
     for (let i = 0; i < numTranches; i++) {
       const shares = i < numTranches - 1 ? perTranche : perTranche + remainder;
-      const id = uuidv4();
-      insertStmt.run(id, firstPlanId, i + 1, shares, dates[i]);
+      const trancheId = uuidv4();
+      insertTrancheStmt.run(trancheId, planId, i + 1, shares, dates[i]);
       newTranches.push({
-        trancheId: id,
+        trancheId,
         trancheNumber: i + 1,
         oldShares: 0,
         newShares: shares,
@@ -245,8 +217,15 @@ export function run(args: string[], db: Database.Database): BasketResizeResult {
     }
 
     resized.push({
-      symbol, side, action: 'resized',
-      oldTotal, newTotal: remainingNeed, targetPct, targetMv, currentQty, price,
+      symbol: pos.symbol,
+      side,
+      action: 'resized',
+      oldTotal: 0, // we cancelled everything
+      newTotal: needQty,
+      targetPct: pos.target_pct,
+      targetMv,
+      currentQty,
+      price: pos.price,
       tranches: newTranches,
     });
   }

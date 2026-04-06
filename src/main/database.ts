@@ -1368,6 +1368,29 @@ export class Database {
     return stmt.all(...params).map(this.mapRowToTransaction);
   }
 
+  getTransactionsBySymbol(symbol: string, limit = 20): Array<Transaction & { accountName?: string }> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const sql = `
+      SELECT
+        t.*,
+        a.name as account_name
+      FROM transactions t
+      JOIN securities s ON t.security_id = s.id
+      LEFT JOIN accounts a ON t.account_id = a.id
+      WHERE s.symbol = ?
+      ORDER BY t.date DESC
+      LIMIT ?
+    `;
+
+    const rows = this.db.prepare(sql).all(symbol.toUpperCase(), limit) as unknown[];
+    return rows.map(row => {
+      const txn = this.mapRowToTransaction(row);
+      const accountName = (row as Record<string, unknown>).account_name as string | undefined;
+      return { ...txn, accountName };
+    });
+  }
+
   createTransaction(transaction: Omit<Transaction, 'id' | 'createdAt' | 'updatedAt'>): Transaction {
     if (!this.db) throw new Error('Database not initialized');
     const id = uuidv4();
