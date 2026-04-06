@@ -13,6 +13,8 @@ import type Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 
 const DEFAULT_NUM_TRANCHES = 6; // weekly over 6 weeks
+const DRIFT_TOLERANCE_PCT = 0.5; // ignore drift < 0.5% of portfolio
+const MIN_TRADE_SIZE_USD = 2000; // ignore trades < $2000
 
 export interface ResizedTranche {
   trancheId: string;
@@ -178,6 +180,19 @@ export function run(args: string[], db: Database.Database): BasketResizeResult {
 
     const side = delta > 0 ? 'buy' : 'sell';
     const needQty = Math.abs(delta);
+    const tradeSizeUsd = needQty * pos.price;
+    const currentMv = currentQty * pos.price;
+    const driftPct = Math.abs((targetMv - currentMv) / portfolioTotal * 100);
+
+    // Apply drift tolerance: skip if drift is too small to matter
+    if (driftPct < DRIFT_TOLERANCE_PCT || tradeSizeUsd < MIN_TRADE_SIZE_USD) {
+      skipped.push({
+        symbol: pos.symbol,
+        side,
+        reason: `drift ${driftPct.toFixed(2)}% ($${tradeSizeUsd.toFixed(0)}) below threshold`
+      });
+      continue;
+    }
 
     // Get or create plan for this symbol+side
     let planRow = db.prepare(`
