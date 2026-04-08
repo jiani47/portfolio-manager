@@ -93,10 +93,6 @@ export class Database {
         security_id TEXT NOT NULL,
         quantity REAL NOT NULL DEFAULT 0,
         cost_basis REAL NOT NULL DEFAULT 0,
-        current_price REAL,
-        market_value REAL,
-        unrealized_gain REAL,
-        unrealized_gain_percent REAL,
         last_updated TEXT NOT NULL,
         FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
         FOREIGN KEY (security_id) REFERENCES securities(id),
@@ -1190,7 +1186,7 @@ export class Database {
       sql += ' WHERE account_id = ?';
       params.push(accountId);
     }
-    sql += ' ORDER BY market_value DESC';
+    sql += ' ORDER BY cost_basis DESC';
     const stmt = this.db.prepare(sql);
     return (params.length ? stmt.all(...params) : stmt.all()).map(this.mapRowToPosition);
   }
@@ -1272,8 +1268,8 @@ export class Database {
     if (!this.db) throw new Error('Database not initialized');
     const id = uuidv4();
     const stmt = this.db.prepare(`
-      INSERT INTO positions (id, account_id, security_id, quantity, cost_basis, current_price, market_value, unrealized_gain, unrealized_gain_percent, last_updated)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO positions (id, account_id, security_id, quantity, cost_basis, last_updated)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       id,
@@ -1281,10 +1277,6 @@ export class Database {
       position.securityId,
       position.quantity,
       position.costBasis,
-      position.currentPrice || null,
-      position.marketValue || null,
-      position.unrealizedGain || null,
-      position.unrealizedGainPercent || null,
       position.lastUpdated
     );
     return this.getPositionById(id)!;
@@ -1304,10 +1296,6 @@ export class Database {
 
     if (position.quantity !== undefined) { fields.push('quantity = ?'); values.push(position.quantity); }
     if (position.costBasis !== undefined) { fields.push('cost_basis = ?'); values.push(position.costBasis); }
-    if (position.currentPrice !== undefined) { fields.push('current_price = ?'); values.push(position.currentPrice); }
-    if (position.marketValue !== undefined) { fields.push('market_value = ?'); values.push(position.marketValue); }
-    if (position.unrealizedGain !== undefined) { fields.push('unrealized_gain = ?'); values.push(position.unrealizedGain); }
-    if (position.unrealizedGainPercent !== undefined) { fields.push('unrealized_gain_percent = ?'); values.push(position.unrealizedGainPercent); }
     fields.push('last_updated = ?');
     values.push(new Date().toISOString());
 
@@ -3016,10 +3004,6 @@ export class Database {
       securityId: r.security_id as string,
       quantity: r.quantity as number,
       costBasis: r.cost_basis as number,
-      currentPrice: r.current_price as number | undefined,
-      marketValue: r.market_value as number | undefined,
-      unrealizedGain: r.unrealized_gain as number | undefined,
-      unrealizedGainPercent: r.unrealized_gain_percent as number | undefined,
       lastUpdated: r.last_updated as string,
     };
   };

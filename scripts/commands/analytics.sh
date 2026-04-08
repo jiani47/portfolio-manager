@@ -116,7 +116,6 @@ pos_rows = db.execute("""
     SELECT s.symbol,
       SUM(p.quantity * COALESCE(
         (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = s.id ORDER BY ph.date DESC LIMIT 1),
-        p.current_price,
         p.cost_basis / NULLIF(p.quantity, 0)
       )) as mv
     FROM positions p JOIN securities s ON p.security_id = s.id

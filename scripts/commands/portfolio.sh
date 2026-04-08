@@ -8,7 +8,7 @@ case "$1" in
              a.name as account, a.book,
              printf('%.2f', p.quantity) as qty,
              printf('%.2f', p.cost_basis) as cost_basis,
-             printf('%.2f', COALESCE(p.market_value, 0)) as market_value,
+             printf('%.2f', p.quantity * COALESCE((SELECT close_price FROM price_history WHERE security_id = s.id ORDER BY date DESC LIMIT 1), 0)) as market_value,
              s.sector, s.type as sec_type,
              pi.tier, pi.thesis, pi.invalidation, pi.target_hold_period
       FROM positions p
@@ -16,7 +16,7 @@ case "$1" in
       JOIN accounts a ON p.account_id = a.id
       LEFT JOIN position_intents pi ON pi.position_id = p.id
       WHERE s.type != 'cash'
-      ORDER BY COALESCE(p.market_value, 0) DESC;
+      ORDER BY p.quantity * COALESCE((SELECT close_price FROM price_history WHERE security_id = s.id ORDER BY date DESC LIMIT 1), 0) DESC;
     "
     ;;
   cash)
@@ -100,7 +100,7 @@ case "$1" in
         a.name as account,
         a.book,
         COUNT(CASE WHEN s.type != 'cash' THEN 1 END) as positions,
-        printf('%.2f', SUM(CASE WHEN s.type != 'cash' THEN COALESCE(p.market_value, 0) ELSE 0 END)) as equity_value,
+        printf('%.2f', SUM(CASE WHEN s.type != 'cash' THEN p.quantity * COALESCE((SELECT close_price FROM price_history WHERE security_id = s.id ORDER BY date DESC LIMIT 1), 0) ELSE 0 END)) as equity_value,
         printf('%.2f', SUM(CASE WHEN s.type = 'cash' THEN p.quantity ELSE 0 END)) as cash
       FROM positions p
       JOIN securities s ON p.security_id = s.id
