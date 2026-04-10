@@ -89,15 +89,6 @@ function getWeeklyDates(n: number): string[] {
   return dates;
 }
 
-interface SymbolSideRow { symbol: string; side: string }
-interface TrancheRow {
-  id: string;
-  tranche_number: number;
-  shares: number;
-  status: string;
-  plan_id: string;
-}
-
 export function run(args: string[], db: Database.Database): BasketResizeResult {
   const basketName = args[0];
   if (!basketName) throw new Error('Usage: basket-resize <basket_name>');
