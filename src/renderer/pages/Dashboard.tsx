@@ -42,6 +42,7 @@ export default function Dashboard() {
   const [showRegimeDetail, setShowRegimeDetail] = useState(false);
   const [newsTab, setNewsTab] = useState<'all' | 'positions' | 'watchlist'>('all');
   const [watchlistSymbols, setWatchlistSymbols] = useState<string[]>([]);
+  const [earningsDays, setEarningsDays] = useState<number>(14);
 
   useEffect(() => {
     fetchSummary();
@@ -53,11 +54,11 @@ export default function Dashboard() {
     fetchRecentNews(24);
     fetchAnalytics(90);
     const today = format(new Date(), 'yyyy-MM-dd');
-    const twoWeeksOut = format(addDays(new Date(), 14), 'yyyy-MM-dd');
-    fetchPortfolioEarnings(today, twoWeeksOut);
+    const endDate = format(addDays(new Date(), earningsDays), 'yyyy-MM-dd');
+    fetchPortfolioEarnings(today, endDate);
     window.electronAPI.getWatchlistSymbols().then(setWatchlistSymbols).catch(() => {});
     fetchBaskets();
-  }, [fetchSummary, fetchPositions, fetchSecurities, fetchSettings, fetchIntents, fetchRituals, fetchRecentNews, fetchAnalytics, fetchPortfolioEarnings, fetchBaskets]);
+  }, [fetchSummary, fetchPositions, fetchSecurities, fetchSettings, fetchIntents, fetchRituals, fetchRecentNews, fetchAnalytics, fetchPortfolioEarnings, fetchBaskets, earningsDays]);
 
   // Auto-load first active basket
   useEffect(() => {
@@ -811,9 +812,25 @@ export default function Dashboard() {
           })()}
 
           {/* Upcoming Earnings */}
-          {earnings.length > 0 && (
-            <div className="card">
-              <h2 className="text-lg font-semibold text-gray-900 mb-3">Upcoming Earnings</h2>
+          <div className="card">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold text-gray-900">Upcoming Earnings</h2>
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-gray-500">Next</label>
+                <select
+                  value={earningsDays}
+                  onChange={(e) => setEarningsDays(Number(e.target.value))}
+                  className="px-2 py-1 text-xs border border-gray-300 rounded-md bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value={7}>7 days</option>
+                  <option value={14}>14 days</option>
+                  <option value={30}>30 days</option>
+                  <option value={60}>60 days</option>
+                  <option value={90}>90 days</option>
+                </select>
+              </div>
+            </div>
+            {earnings.length > 0 ? (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
@@ -849,8 +866,10 @@ export default function Dashboard() {
                   </tbody>
                 </table>
               </div>
-            </div>
-          )}
+            ) : (
+              <p className="text-sm text-gray-400">No earnings scheduled in the next {earningsDays} days.</p>
+            )}
+          </div>
 
           {/* Recent News */}
           {newsArticles.length > 0 && (
