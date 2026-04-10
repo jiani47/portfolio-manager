@@ -21,6 +21,7 @@ const COMMANDS: Record<string, () => Promise<{ run: CommandFn }>> = {
   'levels-refresh': () => import('./commands/levels-refresh'),
   attribution: () => import('./commands/attribution'),
   'basket-resize': () => import('./commands/basket-resize'),
+  watchlist: () => import('./commands/watchlist'),
 };
 
 async function main() {
