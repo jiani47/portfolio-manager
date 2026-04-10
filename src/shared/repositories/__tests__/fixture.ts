@@ -168,10 +168,15 @@ export function createTestDb(): Database.Database {
       id TEXT PRIMARY KEY,
       watchlist_id TEXT NOT NULL,
       symbol TEXT NOT NULL,
-      target_price REAL,
-      thesis TEXT,
+      security_id TEXT,
+      notes TEXT,
+      target_entry_price REAL,
+      target_exit_price REAL,
+      thesis_snippet TEXT,
       created_at TEXT NOT NULL,
-      FOREIGN KEY (watchlist_id) REFERENCES watchlists(id),
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (watchlist_id) REFERENCES watchlists(id) ON DELETE CASCADE,
+      FOREIGN KEY (security_id) REFERENCES securities(id) ON DELETE SET NULL,
       UNIQUE(watchlist_id, symbol)
     );
   `);
@@ -224,6 +229,22 @@ export function seedPortfolio(db: Database.Database) {
     ('ph-goog', 'sec-goog', '2026-03-27', 280.00, '${now}'),
     ('ph-nvda', 'sec-nvda', '2026-03-27', 150.00, '${now}'),
     ('ph-sofi', 'sec-sofi', '2026-03-27', 12.00, '${now}');
+  `);
+
+  // Watchlists
+  db.exec(`
+    INSERT INTO watchlists (id, name, description, created_at, updated_at) VALUES
+    ('wl-growth', 'High Growth', 'High growth potential tech stocks', '${now}', '${now}'),
+    ('wl-value', 'Value Plays', 'Undervalued names for entry', '${now}', '${now}');
+  `);
+
+  // Watchlist Items (some with targets, some without)
+  db.exec(`
+    INSERT INTO watchlist_items (id, watchlist_id, symbol, security_id, notes, target_entry_price, target_exit_price, thesis_snippet, created_at, updated_at) VALUES
+    ('wli-1', 'wl-growth', 'NVDA', 'sec-nvda', 'Monitor for pullback', 140.00, 200.00, 'AI leader, strong demand', '${now}', '${now}'),
+    ('wli-2', 'wl-growth', 'META', NULL, 'AI + VR play', 300.00, NULL, 'Reels growth + AI integration', '${now}', '${now}'),
+    ('wli-3', 'wl-value', 'SOFI', 'sec-sofi', NULL, 10.00, 15.00, 'Fintech recovery play', '${now}', '${now}'),
+    ('wli-4', 'wl-value', 'PLTR', NULL, NULL, NULL, NULL, 'Gov contracts + AI adoption', '${now}', '${now}');
   `);
 }
 
