@@ -4,22 +4,23 @@
 # Extracted from pm-cli.sh. Requires: schwab_ensure_token, schwab_get_account_hash,
 # pre_trade_check, SCHWAB_API, DB, ACCESS_TOKEN, TOKEN_TYPE.
 
+# TypeScript CLI delegation
+TSX="npx tsx"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TS_CLI="$REPO_ROOT/src/cli/index.ts"
+
 case "$1" in
   basket-create)
-    BASKET_NAME="$2"
-    if [ -z "$BASKET_NAME" ]; then
-      echo "Usage: pm-cli.sh basket-create <name>"
+    shift # consume 'basket-create'
+    $TSX "$TS_CLI" --rw ems basket-create "$@" 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+result = data.get('data', {})
+print(result.get('message', 'Basket created'))
+" || {
+      echo "Error: Failed to create basket"
       exit 1
-    fi
-    EXISTING=$(sqlite3 "$DB" "SELECT id FROM rebalance_baskets WHERE name = '$BASKET_NAME';")
-    if [ -n "$EXISTING" ]; then
-      echo "Error: Basket '$BASKET_NAME' already exists (id: $EXISTING)"
-      exit 1
-    fi
-    BASKET_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-    NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    sqlite3 "$DB" "INSERT INTO rebalance_baskets (id, name, status, created_at, updated_at) VALUES ('$BASKET_ID', '$BASKET_NAME', 'active', '$NOW', '$NOW');"
-    echo "Basket created: $BASKET_NAME (id: $BASKET_ID)"
+    }
     ;;
 
   basket-add)
@@ -210,21 +211,32 @@ case "$1" in
     ;;
 
   baskets)
-    echo "=== Rebalance Baskets ==="
-    sqlite3 -header -column "$DB" "
-      SELECT rb.name, rb.status,
-        COUNT(DISTINCT ep.id) as plans,
-        SUM(CASE WHEN ept.status = 'filled' THEN 1 ELSE 0 END) as filled,
-        SUM(CASE WHEN ept.status = 'submitted' THEN 1 ELSE 0 END) as submitted,
-        SUM(CASE WHEN ept.status = 'triggered' THEN 1 ELSE 0 END) as triggered,
-        SUM(CASE WHEN ept.status = 'pending' THEN 1 ELSE 0 END) as pending,
-        rb.created_at
-      FROM rebalance_baskets rb
-      LEFT JOIN entry_plans ep ON ep.basket_id = rb.id
-      LEFT JOIN entry_plan_tranches ept ON ept.plan_id = ep.id
-      GROUP BY rb.id
-      ORDER BY rb.created_at DESC;
-    "
+    $TSX "$TS_CLI" --rw ems baskets 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+baskets = data.get('data', [])
+
+if not baskets:
+    print('No baskets found')
+    sys.exit(0)
+
+print('=== Rebalance Baskets ===')
+print()
+print(f\"{'Name':<20} {'Status':<10} {'Plans':>6} {'Pending':>7} {'Triggered':>9} {'Submitted':>9} {'Filled':>7} {'Created':<20}\")
+print(f\"{'-'*20} {'-'*10} {'-'*6} {'-'*7} {'-'*9} {'-'*9} {'-'*7} {'-'*20}\")
+
+for b in baskets:
+    name = b['name'][:20]
+    status = b['status']
+    plans = b['planCount']
+    pending = b['pendingTranches']
+    triggered = b['triggeredTranches']
+    submitted = b['submittedTranches']
+    filled = b['filledTranches']
+    created = b['createdAt'][:19]
+
+    print(f\"{name:<20} {status:<10} {plans:>6} {pending:>7} {triggered:>9} {submitted:>9} {filled:>7} {created:<20}\")
+"
     ;;
 
   basket)
@@ -464,48 +476,44 @@ PYEOF
     ;;
 
   basket-orders)
-    BASKET_NAME="$2"
-    BASKET_FILTER=""
-    if [ -n "$BASKET_NAME" ]; then
-      BASKET_ID=$(sqlite3 "$DB" "SELECT id FROM rebalance_baskets WHERE name = '$BASKET_NAME';")
-      if [ -z "$BASKET_ID" ]; then
-        echo "Error: Basket '$BASKET_NAME' not found"; exit 1
-      fi
-      BASKET_FILTER="AND ep.basket_id = '$BASKET_ID'"
-    fi
+    shift # consume 'basket-orders'
+    $TSX "$TS_CLI" --rw ems basket-orders "$@" 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+orders = data.get('data', [])
 
-    echo "=== Triggered Orders Awaiting Confirmation ==="
-    sqlite3 -header -column "$DB" "
-      SELECT substr(ept.id, 1, 8) as tranche_id,
-        rb.name as basket,
-        ep.side,
-        s.symbol,
-        ept.tranche_number as '#',
-        ept.shares as qty,
-        ept.trigger_type as trig,
-        COALESCE(ept.trigger_date, '\$' || printf('%.2f', ept.trigger_price)) as trigger,
-        COALESCE('\$' || printf('%.2f', (SELECT ph.close_price FROM price_history ph JOIN securities s2 ON ph.security_id = s2.id WHERE s2.symbol = s.symbol ORDER BY ph.date DESC LIMIT 1)), '?') as last_price,
-        COALESCE(a.account_number, 'unset') as account
-      FROM entry_plan_tranches ept
-      JOIN entry_plans ep ON ept.plan_id = ep.id
-      JOIN securities s ON ep.security_id = s.id
-      LEFT JOIN rebalance_baskets rb ON ep.basket_id = rb.id
-      LEFT JOIN accounts a ON ept.account_id = a.id
-      WHERE ept.status = 'triggered' $BASKET_FILTER
-      ORDER BY s.symbol, ept.tranche_number;
-    "
-    TRIGGERED_COUNT=$(sqlite3 "$DB" "
-      SELECT COUNT(*) FROM entry_plan_tranches ept
-      JOIN entry_plans ep ON ept.plan_id = ep.id
-      WHERE ept.status = 'triggered' $BASKET_FILTER;
-    ")
-    echo ""
-    if [ "$TRIGGERED_COUNT" -gt 0 ]; then
-      echo "$TRIGGERED_COUNT order(s) awaiting confirmation."
-      echo "Confirm: pm-cli.sh basket-confirm <tranche_id> [limit_price]"
-    else
-      echo "No triggered orders awaiting confirmation."
-    fi
+print('=== Triggered Orders Awaiting Confirmation ===')
+if not orders:
+    print()
+    print('No triggered orders awaiting confirmation.')
+    sys.exit(0)
+
+print()
+print(f\"{'Tranche':<10} {'Basket':<15} {'Side':<5} {'Symbol':<6} {'#':>2} {'Qty':>5} {'Trigger':<12} {'Status':<10}\")
+print(f\"{'-'*10} {'-'*15} {'-'*5} {'-'*6} {'-'*2} {'-'*5} {'-'*12} {'-'*10}\")
+
+for o in orders:
+    tranche_id = o['trancheId'][:8]
+    basket = o['basketName'][:15]
+    side = o['side'].upper()
+    symbol = o['symbol']
+    tranche_num = o.get('trancheNumber', 0)
+    qty = o['shares']
+
+    # Format trigger
+    if o.get('triggerType') == 'date':
+        trigger = o.get('triggerDate', '')[:10]
+    else:
+        trigger = f\"\${o.get('triggerPrice', 0):.2f}\"
+
+    status = o['status']
+
+    print(f\"{tranche_id:<10} {basket:<15} {side:<5} {symbol:<6} {tranche_num:>2} {qty:>5} {trigger:<12} {status:<10}\")
+
+print()
+print(f\"{len(orders)} order(s) awaiting confirmation.\")
+print('Confirm: pm-cli.sh basket-confirm <tranche_id> [limit_price]')
+"
     ;;
 
   basket-confirm)
@@ -882,56 +890,53 @@ PYEOF
     ;;
 
   basket-fills)
-    BASKET_NAME="$2"
-    BASKET_FILTER=""
-    if [ -n "$BASKET_NAME" ]; then
-      BASKET_ID=$(sqlite3 "$DB" "SELECT id FROM rebalance_baskets WHERE name = '$BASKET_NAME';")
-      if [ -z "$BASKET_ID" ]; then
-        echo "Error: Basket '$BASKET_NAME' not found"; exit 1
-      fi
-      BASKET_FILTER="AND ep.basket_id = '$BASKET_ID'"
-    fi
+    shift # consume 'basket-fills'
+    $TSX "$TS_CLI" --rw ems basket-fills "$@" 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+fills = data.get('data', [])
 
-    echo "=== Fill History ==="
-    sqlite3 -header -column "$DB" "
-      SELECT s.symbol, ep.side,
-        ept.shares as ordered,
-        ept.filled_qty as filled,
-        '\$' || printf('%.2f', ept.limit_price) as limit_px,
-        '\$' || printf('%.2f', ept.filled_price) as fill_px,
-        ept.filled_at,
-        rb.name as basket
-      FROM entry_plan_tranches ept
-      JOIN entry_plans ep ON ept.plan_id = ep.id
-      JOIN securities s ON ep.security_id = s.id
-      LEFT JOIN rebalance_baskets rb ON ep.basket_id = rb.id
-      WHERE ept.status = 'filled' $BASKET_FILTER
-      ORDER BY ept.filled_at DESC;
-    "
+print('=== Fill History ===')
+if not fills:
+    print()
+    print('No fills found.')
+    sys.exit(0)
+
+print()
+print(f\"{'Symbol':<6} {'Side':<5} {'Ordered':>7} {'Filled':>7} {'Fill Px':>9} {'Filled At':<20} {'Basket':<15}\")
+print(f\"{'-'*6} {'-'*5} {'-'*7} {'-'*7} {'-'*9} {'-'*20} {'-'*15}\")
+
+for f in fills:
+    symbol = f['symbol']
+    side = f['side'].upper()
+    ordered = f['shares']
+    filled = f['filledQty']
+    fill_px = f\"\${f['filledPrice']:.2f}\"
+    filled_at = f['filledAt'][:19].replace('T', ' ')
+    basket = f['basketName'][:15]
+
+    print(f\"{symbol:<6} {side:<5} {ordered:>7} {filled:>7} {fill_px:>9} {filled_at:<20} {basket:<15}\")
+"
     ;;
 
   basket-status)
-    echo "=== EMS Status ==="
-    ACTIVE=$(sqlite3 "$DB" "SELECT COUNT(*) FROM rebalance_baskets WHERE status = 'active';")
-    echo "Active baskets: $ACTIVE"
-    echo ""
+    $TSX "$TS_CLI" --rw ems basket-status 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+summary = data.get('data', {})
 
-    TRIGGERED=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches ept JOIN entry_plans ep ON ept.plan_id = ep.id WHERE ept.status = 'triggered' AND ep.status = 'active';")
-    echo "Triggered (awaiting confirmation): $TRIGGERED"
+print('=== EMS Status ===')
+print(f\"Active baskets: {summary.get('activeBaskets', 0)}\")
+print()
+print(f\"Triggered (awaiting confirmation): {summary.get('triggered', 0)}\")
+print(f\"Submitted (working): {summary.get('submitted', 0)}\")
+print(f\"Pending (awaiting trigger): {summary.get('pending', 0)}\")
+print(f\"Filled: {summary.get('filled', 0)}\")
+print()
 
-    SUBMITTED=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches ept JOIN entry_plans ep ON ept.plan_id = ep.id WHERE ept.status = 'submitted' AND ep.status = 'active';")
-    echo "Submitted (working): $SUBMITTED"
-
-    PENDING=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches ept JOIN entry_plans ep ON ept.plan_id = ep.id WHERE ept.status = 'pending' AND ep.status = 'active';")
-    echo "Pending (awaiting trigger): $PENDING"
-
-    FILLED_TODAY=$(sqlite3 "$DB" "SELECT COUNT(*) FROM entry_plan_tranches WHERE status = 'filled' AND date(filled_at) = date('now');")
-    echo "Filled today: $FILLED_TODAY"
-
-    echo ""
-    if [ "$TRIGGERED" -gt 0 ]; then
-      echo "Run: pm-cli.sh basket-orders to review triggered orders"
-    fi
+if summary.get('triggered', 0) > 0:
+    print('Run: pm-cli.sh basket-orders to review triggered orders')
+"
     ;;
 
   basket-resize)

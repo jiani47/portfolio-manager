@@ -22,6 +22,7 @@ const COMMANDS: Record<string, () => Promise<{ run: CommandFn }>> = {
   attribution: () => import('./commands/attribution'),
   'basket-resize': () => import('./commands/basket-resize'),
   watchlist: () => import('./commands/watchlist'),
+  ems: () => import('./commands/ems'),
 };
 
 async function main() {

@@ -7,6 +7,9 @@ import Database from 'better-sqlite3';
 export function createTestDb(): Database.Database {
   const db = new Database(':memory:');
 
+  // Enable foreign key constraints
+  db.pragma('foreign_keys = ON');
+
   db.exec(`
     CREATE TABLE securities (
       id TEXT PRIMARY KEY,
@@ -132,7 +135,7 @@ export function createTestDb(): Database.Database {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY (security_id) REFERENCES securities(id),
-      FOREIGN KEY (basket_id) REFERENCES rebalance_baskets(id)
+      FOREIGN KEY (basket_id) REFERENCES rebalance_baskets(id) ON DELETE CASCADE
     );
 
     CREATE TABLE entry_plan_tranches (
@@ -153,7 +156,7 @@ export function createTestDb(): Database.Database {
       brokerage_order_status TEXT,
       filled_qty INTEGER,
       account_id TEXT,
-      FOREIGN KEY (plan_id) REFERENCES entry_plans(id)
+      FOREIGN KEY (plan_id) REFERENCES entry_plans(id) ON DELETE CASCADE
     );
 
     CREATE TABLE watchlists (
