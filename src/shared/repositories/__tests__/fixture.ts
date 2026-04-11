@@ -182,6 +182,19 @@ export function createTestDb(): Database.Database {
       FOREIGN KEY (security_id) REFERENCES securities(id) ON DELETE SET NULL,
       UNIQUE(watchlist_id, symbol)
     );
+
+    CREATE TABLE monitors (
+      id TEXT PRIMARY KEY,
+      symbol TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      price_level REAL NOT NULL,
+      label TEXT NOT NULL,
+      action_type TEXT NOT NULL DEFAULT 'info',
+      monitor_type TEXT NOT NULL DEFAULT 'price',
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   return db;
