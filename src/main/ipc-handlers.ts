@@ -1,4 +1,4 @@
-import { IpcMain, dialog } from 'electron';
+import { IpcMain, dialog, BrowserWindow } from 'electron';
 import * as XLSX from 'xlsx';
 import * as fs from 'fs';
 import Store from 'electron-store';
@@ -28,6 +28,7 @@ export function setupIpcHandlers(
   schwabService: SchwabService,
   streamService: SchwabStreamService | null,
   store: Store<{ settings: AppSettings }>,
+  mainWindow: BrowserWindow | null,
   analyticsService?: AnalyticsService,
   transactionAnalyticsService?: TransactionAnalyticsService,
   schedulerService?: SchedulerService,
@@ -361,9 +362,15 @@ export function setupIpcHandlers(
     const item = db.addWatchlistItem(watchlistId, data);
     // Auto-backfill price history and compute S/R levels for new symbol
     const symbol = data.symbol || item.symbol;
-    if (symbol) {
+    if (symbol && mainWindow) {
       (async () => {
         try {
+          mainWindow?.webContents.send('watchlist:sync-progress', {
+            symbol,
+            status: 'started',
+            message: 'Starting price history backfill...'
+          });
+
           const settings = store.get('settings');
           let security = db.findSecurityBySymbol(symbol);
           if (!security) {
@@ -372,18 +379,52 @@ export function setupIpcHandlers(
           const symbolSecurityMap = new Map([[symbol, security.id]]);
           const days = 1095; // 3 years
 
+          mainWindow?.webContents.send('watchlist:sync-progress', {
+            symbol,
+            status: 'backfilling',
+            message: 'Fetching 3 years of price history...'
+          });
+
+          let candleCount = 0;
           if (settings.dataProvider === 'schwab' && schwabService.isConnected()) {
             const result = await schwabService.fetchHistoricalForAll(symbolSecurityMap, days);
-            if (result.priceHistory.length > 0) db.savePriceHistoryBatch(result.priceHistory);
+            if (result.priceHistory.length > 0) {
+              db.savePriceHistoryBatch(result.priceHistory);
+              candleCount = result.priceHistory.length;
+            }
           } else if (settings.dataProvider === 'fmp' && fmpService.isConfigured()) {
             const result = await fmpService.fetchHistoricalForAll(symbolSecurityMap, days);
-            if (result.priceHistory.length > 0) db.savePriceHistoryBatch(result.priceHistory);
+            if (result.priceHistory.length > 0) {
+              db.savePriceHistoryBatch(result.priceHistory);
+              candleCount = result.priceHistory.length;
+            }
           }
+
+          mainWindow?.webContents.send('watchlist:sync-progress', {
+            symbol,
+            status: 'computing-levels',
+            message: 'Computing support/resistance levels...',
+            candleCount
+          });
+
           // Compute S/R levels
           db.refreshPriceLevels([symbol]);
+
+          mainWindow?.webContents.send('watchlist:sync-progress', {
+            symbol,
+            status: 'completed',
+            message: `✓ ${candleCount} candles loaded, S/R levels computed`,
+            candleCount
+          });
+
           console.log(`Auto-backfill + S/R levels complete for ${symbol}`);
         } catch (err) {
           console.error(`Auto-backfill failed for ${symbol}:`, err);
+          mainWindow?.webContents.send('watchlist:sync-progress', {
+            symbol,
+            status: 'error',
+            message: `Failed: ${err instanceof Error ? err.message : String(err)}`
+          });
         }
       })();
     }

@@ -11,7 +11,7 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from 'recharts';
-import type { PriceHistory, PriceLevel, NewsArticle, Transaction } from '../../shared/types';
+import type { PriceHistory, PriceLevel, NewsArticle, Transaction, EarningsEvent } from '../../shared/types';
 
 const PERIODS = [
   { label: '3M', days: 90 },
@@ -39,6 +39,7 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [news, setNews] = useState<NewsArticle[]>([]);
   const [newsLoading, setNewsLoading] = useState(false);
+  const [earnings, setEarnings] = useState<EarningsEvent | null>(null);
   const [trades, setTrades] = useState<Array<{ date: string; price: number; type: 'buy' | 'sell'; qty: number }>>([]);
   const chartRef = useRef<HTMLDivElement>(null);
 
@@ -68,6 +69,35 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
     }).catch(() => {
       if (!cancelled) setNewsLoading(false);
     });
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  // Fetch upcoming earnings for the symbol
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const today = new Date();
+        const futureDate = new Date(today);
+        futureDate.setDate(futureDate.getDate() + 30);
+        const fromDate = today.toISOString().split('T')[0];
+        const toDate = futureDate.toISOString().split('T')[0];
+
+        const allEarnings = await window.electronAPI.fmpGetPortfolioEarnings(fromDate, toDate);
+        if (cancelled) return;
+
+        // Find the earliest earnings for this symbol
+        const symbolEarnings = allEarnings.filter(e => e.symbol === symbol);
+        if (symbolEarnings.length > 0) {
+          symbolEarnings.sort((a, b) => a.date.localeCompare(b.date));
+          setEarnings(symbolEarnings[0]);
+        } else {
+          setEarnings(null);
+        }
+      } catch {
+        if (!cancelled) setEarnings(null);
+      }
+    })();
     return () => { cancelled = true; };
   }, [symbol]);
 
@@ -514,6 +544,68 @@ export default function PriceChart({ symbol, onLevelsChanged }: Props) {
             {levels.length === 0 && (
               <p className="text-xs text-gray-400 mt-2">No levels. Click "Refresh" to compute or "Add" to create manually.</p>
             )}
+
+            {/* Earnings */}
+            {earnings && (() => {
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              const earningsDate = new Date(earnings.date);
+              earningsDate.setHours(0, 0, 0, 0);
+              const daysUntil = Math.ceil((earningsDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+              if (daysUntil < 0 || daysUntil > 30) return null;
+
+              return (
+                <div className="mt-4 pt-3 border-t border-gray-200">
+                  <h3 className="text-sm font-semibold text-gray-900 mb-2 flex items-center gap-1">
+                    <span>📅</span>
+                    <span>Upcoming Earnings</span>
+                  </h3>
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Date:</span>
+                      <span className="font-medium text-gray-900">
+                        {new Date(earnings.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">In:</span>
+                      <span className={`font-medium ${
+                        daysUntil < 7 ? 'text-red-600' :
+                        daysUntil < 14 ? 'text-yellow-600' :
+                        'text-blue-600'
+                      }`}>
+                        {daysUntil === 0 ? 'Today' : daysUntil === 1 ? 'Tomorrow' : `${daysUntil} days`}
+                      </span>
+                    </div>
+                    {earnings.time && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Time:</span>
+                        <span className="font-medium text-gray-900">
+                          {earnings.time === 'bmo' ? 'Before Market' :
+                           earnings.time === 'amc' ? 'After Market' :
+                           earnings.time === 'dmh' ? 'During Market' : 'TBA'}
+                        </span>
+                      </div>
+                    )}
+                    {earnings.epsEstimated !== undefined && (
+                      <div className="flex justify-between pt-1.5 border-t border-gray-100">
+                        <span className="text-gray-600">EPS Est:</span>
+                        <span className="font-medium text-gray-900">${earnings.epsEstimated.toFixed(2)}</span>
+                      </div>
+                    )}
+                    {earnings.revenueEstimated !== undefined && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Revenue Est:</span>
+                        <span className="font-medium text-gray-900">
+                          ${(earnings.revenueEstimated / 1e9).toFixed(2)}B
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* News */}
             <div className="mt-4 pt-3 border-t border-gray-200">

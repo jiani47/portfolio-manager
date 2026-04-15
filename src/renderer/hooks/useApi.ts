@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import type {
   Account,
   Security,
@@ -354,6 +354,9 @@ declare global {
       // Scheduler events
       onSchedulerTaskStarted: (callback: (data: { taskId: string; startedAt: string }) => void) => () => void;
       onSchedulerTaskCompleted: (callback: (data: { taskId: string; status: string; result: string }) => void) => () => void;
+
+      // Watchlist sync events
+      onWatchlistSyncProgress: (callback: (data: { symbol: string; status: string; message: string; candleCount?: number }) => void) => () => void;
 
       // EMS Basket operations
       emsListBaskets: () => Promise<RebalanceBasket[]>;
@@ -1230,6 +1233,66 @@ export function useEarnings() {
     error,
     fetchEarningsCalendar,
     fetchPortfolioEarnings,
+  };
+}
+
+export function useUpcomingEarnings(symbols: string[]) {
+  const [earningsMap, setEarningsMap] = useState<Map<string, EarningsEvent>>(new Map());
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchUpcomingEarnings = useCallback(async (symbolList: string[]) => {
+    if (symbolList.length === 0) {
+      setEarningsMap(new Map());
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      // Fetch earnings for next 30 days
+      const today = new Date();
+      const futureDate = new Date(today);
+      futureDate.setDate(futureDate.getDate() + 30);
+
+      const fromDate = today.toISOString().split('T')[0];
+      const toDate = futureDate.toISOString().split('T')[0];
+
+      const data = await window.electronAPI.fmpGetPortfolioEarnings(fromDate, toDate);
+
+      // Create map for O(1) lookup, filtering to requested symbols
+      const symbolSet = new Set(symbolList.map(s => s.toUpperCase()));
+      const map = new Map<string, EarningsEvent>();
+
+      for (const event of data) {
+        if (symbolSet.has(event.symbol.toUpperCase())) {
+          // Only keep the earliest upcoming earnings for each symbol
+          const existing = map.get(event.symbol);
+          if (!existing || event.date < existing.date) {
+            map.set(event.symbol, event);
+          }
+        }
+      }
+
+      setEarningsMap(map);
+    } catch (err) {
+      setError((err as Error).message);
+      setEarningsMap(new Map());
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Auto-fetch when symbols change
+  useEffect(() => {
+    fetchUpcomingEarnings(symbols);
+  }, [symbols.join(','), fetchUpcomingEarnings]);
+
+  return {
+    earningsMap,
+    loading,
+    error,
+    refetch: () => fetchUpcomingEarnings(symbols),
   };
 }
 

@@ -1,10 +1,11 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePositions, useAccounts, useSecurities, useSecurityTags, useSettings, usePositionIntents, useDataProvider, usePriceLevels, useAnalytics, useValuationMetrics } from '../hooks/useApi';
+import { usePositions, useAccounts, useSecurities, useSecurityTags, useSettings, usePositionIntents, useDataProvider, usePriceLevels, useAnalytics, useValuationMetrics, useUpcomingEarnings } from '../hooks/useApi';
 import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import BrokerageImportModal from '../components/BrokerageImportModal';
 import PriceLevelTooltip from '../components/PriceLevelTooltip';
 import ChartModal from '../components/ChartModal';
 import SymbolTransactionsModal from '../components/SymbolTransactionsModal';
+import EarningsBadge from '../components/EarningsBadge';
 import type { Position, Security, SecurityTag, PositionIntent, Account, NewsArticle, ValuationMetric } from '../../shared/types';
 
 interface PositionWithPercent extends Position {
@@ -123,6 +124,9 @@ export default function Holdings() {
       .map(s => s!.symbol);
   }, [positions, securityMap]);
   const { quotes: streamingQuotes, status: streamStatus } = useStreamingQuotes(symbolList);
+
+  // Upcoming earnings for position symbols
+  const { earningsMap } = useUpcomingEarnings(symbolList);
 
   // Calculate positions with portfolio percentage and group them
   const { concentratedPositions, normalPositions, smallPositions, watchlistPositions, cashPositions, totalMarketValue, totalCash } = useMemo(() => {
@@ -1038,6 +1042,13 @@ export default function Holdings() {
                                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
                                 </svg>
                               </button>
+                              {position.security && (
+                                <EarningsBadge
+                                  symbol={position.security.symbol}
+                                  earningsEvent={earningsMap.get(position.security.symbol)}
+                                  onClick={() => position.security && setChartSymbol({ symbol: position.security.symbol, name: position.security.name })}
+                                />
+                              )}
                             </div>
                             {position.portfolioPercent >= 8 && (
                               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-200 text-amber-800">
@@ -1121,6 +1132,13 @@ export default function Holdings() {
                             >
                               {position.security?.symbol || 'Unknown'}
                             </button>
+                            {position.security && (
+                              <EarningsBadge
+                                symbol={position.security.symbol}
+                                earningsEvent={earningsMap.get(position.security.symbol)}
+                                onClick={() => position.security && setChartSymbol({ symbol: position.security.symbol, name: position.security.name })}
+                              />
+                            )}
                             {renderTierBadge(position.intent)}
                           </div>
                           {renderTagBadges(position.tags)}
@@ -1196,6 +1214,13 @@ export default function Holdings() {
                             >
                               {position.security?.symbol || 'Unknown'}
                             </button>
+                            {position.security && (
+                              <EarningsBadge
+                                symbol={position.security.symbol}
+                                earningsEvent={earningsMap.get(position.security.symbol)}
+                                onClick={() => position.security && setChartSymbol({ symbol: position.security.symbol, name: position.security.name })}
+                              />
+                            )}
                             {renderTierBadge(position.intent)}
                           </div>
                           {renderTagBadges(position.tags)}

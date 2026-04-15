@@ -1,9 +1,10 @@
 import { useEffect, useState, useMemo } from 'react';
-import { useWatchlists, usePriceLevels } from '../hooks/useApi';
+import { useWatchlists, usePriceLevels, useUpcomingEarnings } from '../hooks/useApi';
 import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import PriceLevelTooltip from '../components/PriceLevelTooltip';
 import ChartModal from '../components/ChartModal';
-import type { Watchlist, WatchlistItem, StreamingQuote, PriceLevel } from '../../shared/types';
+import EarningsBadge from '../components/EarningsBadge';
+import type { Watchlist, WatchlistItem, StreamingQuote, PriceLevel, EarningsEvent } from '../../shared/types';
 
 function renderItemRow(
   item: WatchlistItem,
@@ -11,6 +12,8 @@ function renderItemRow(
   formatCurrency: (v: number) => string,
   showRemove: boolean,
   priceLevels: PriceLevel[],
+  syncStatus: Map<string, { status: string; message: string; candleCount?: number }>,
+  earningsMap: Map<string, EarningsEvent>,
   onRemove?: (id: string) => void,
   onChart?: (symbol: string) => void,
 ) {
@@ -23,16 +26,37 @@ function renderItemRow(
     ? ((price - item.targetEntryPrice) / item.targetEntryPrice) * 100
     : null;
   const isNearTarget = distance != null && Math.abs(distance) <= 5;
+  const sync = syncStatus.get(item.symbol);
   return (
     <tr key={item.id} className={`hover:bg-gray-50 ${isNearTarget ? 'bg-green-50' : ''}`}>
       <td className="px-4 py-3 text-sm font-medium text-gray-900 whitespace-nowrap">
-        <button
-          onClick={() => onChart?.(item.symbol)}
-          className="hover:text-blue-600 cursor-pointer"
-          title="View chart"
-        >
-          {item.symbol}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onChart?.(item.symbol)}
+            className="hover:text-blue-600 cursor-pointer"
+            title="View chart"
+          >
+            {item.symbol}
+          </button>
+          {sync && (
+            <span className={`text-xs ${
+              sync.status === 'completed' ? 'text-green-600' :
+              sync.status === 'error' ? 'text-red-600' :
+              'text-blue-600'
+            }`} title={sync.message}>
+              {sync.status === 'backfilling' && '⏳'}
+              {sync.status === 'computing-levels' && '🔄'}
+              {sync.status === 'completed' && '✓'}
+              {sync.status === 'error' && '⚠'}
+              {sync.status === 'started' && '▶'}
+            </span>
+          )}
+          <EarningsBadge
+            symbol={item.symbol}
+            earningsEvent={earningsMap.get(item.symbol)}
+            onClick={() => onChart?.(item.symbol)}
+          />
+        </div>
       </td>
       <td className="px-4 py-3 text-sm text-gray-700 text-right whitespace-nowrap">
         {price != null ? (
@@ -98,15 +122,58 @@ export default function Watchlists() {
   const [addThesis, setAddThesis] = useState('');
   const [chartSymbol, setChartSymbol] = useState<string | null>(null);
 
+  // Quick add ticker modal
+  const [showQuickAdd, setShowQuickAdd] = useState(false);
+  const [quickAddSymbol, setQuickAddSymbol] = useState('');
+  const [quickAddWatchlist, setQuickAddWatchlist] = useState('');
+
+  // Sync progress tracking
+  const [syncStatus, setSyncStatus] = useState<Map<string, { status: string; message: string; candleCount?: number }>>(new Map());
+
   // Streaming quotes for watchlist items
   const symbolList = useMemo(() => items.map(i => i.symbol), [items]);
   const { quotes: streamingQuotes } = useStreamingQuotes(symbolList);
   const { levels: priceLevels, fetchLevels } = usePriceLevels();
 
+  // Fetch upcoming earnings for all watchlist symbols
+  const { earningsMap } = useUpcomingEarnings(symbolList);
+
   useEffect(() => {
     fetchWatchlists();
     fetchLevels();
   }, [fetchWatchlists, fetchLevels]);
+
+  // Listen for sync progress events
+  useEffect(() => {
+    const handleSyncProgress = (data: { symbol: string; status: string; message: string; candleCount?: number }) => {
+      setSyncStatus(prev => {
+        const next = new Map(prev);
+        next.set(data.symbol, {
+          status: data.status,
+          message: data.message,
+          candleCount: data.candleCount
+        });
+        // Clear status after completion or error
+        if (data.status === 'completed' || data.status === 'error') {
+          setTimeout(() => {
+            setSyncStatus(current => {
+              const updated = new Map(current);
+              updated.delete(data.symbol);
+              return updated;
+            });
+            // Refresh levels after completion
+            if (data.status === 'completed') {
+              fetchLevels();
+            }
+          }, 5000); // Clear after 5 seconds
+        }
+        return next;
+      });
+    };
+
+    const cleanup = window.electronAPI.onWatchlistSyncProgress(handleSyncProgress);
+    return cleanup;
+  }, [fetchLevels]);
 
   useEffect(() => {
     if (selectedId === '__all__') {
@@ -175,6 +242,15 @@ export default function Watchlists() {
     await removeItem(id);
   };
 
+  const handleQuickAdd = async () => {
+    if (!quickAddSymbol.trim() || !quickAddWatchlist) return;
+    await addItem(quickAddWatchlist, {
+      symbol: quickAddSymbol.trim().toUpperCase(),
+    });
+    setQuickAddSymbol('');
+    setShowQuickAdd(false);
+  };
+
   const itemCountFor = (wlId: string) => {
     // We only have items for the selected watchlist loaded, so show count only for selected
     if (wlId === selectedId) return items.length;
@@ -183,11 +259,24 @@ export default function Watchlists() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Watchlists</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Track symbols you are watching for potential entry.
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Watchlists</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Track symbols you are watching for potential entry.
+          </p>
+        </div>
+        <button
+          onClick={() => {
+            setQuickAddWatchlist(selectedId && selectedId !== '__all__' ? selectedId : watchlists[0]?.id || '');
+            setShowQuickAdd(true);
+          }}
+          className="px-4 py-2 rounded-lg bg-primary-600 text-white hover:bg-primary-700 font-medium text-sm flex items-center gap-2"
+          disabled={watchlists.length === 0}
+        >
+          <span className="text-lg">+</span>
+          Add Ticker
+        </button>
       </div>
 
       <div className="flex gap-6">
@@ -316,7 +405,7 @@ export default function Watchlists() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-200">
-                        {group.items.map(item => renderItemRow(item, streamingQuotes, formatCurrency, false, priceLevels, undefined, setChartSymbol))}
+                        {group.items.map(item => renderItemRow(item, streamingQuotes, formatCurrency, false, priceLevels, syncStatus, earningsMap, undefined, setChartSymbol))}
                       </tbody>
                     </table>
                   </div>
@@ -401,7 +490,7 @@ export default function Watchlists() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200">
-                      {items.map(item => renderItemRow(item, streamingQuotes, formatCurrency, true, priceLevels, handleRemoveItem, setChartSymbol))}
+                      {items.map(item => renderItemRow(item, streamingQuotes, formatCurrency, true, priceLevels, syncStatus, earningsMap, handleRemoveItem, setChartSymbol))}
                     </tbody>
                   </table>
                 )}
@@ -427,6 +516,63 @@ export default function Watchlists() {
           onLevelsChanged={fetchLevels}
         />
       )}
+
+      {/* Quick Add Ticker Modal */}
+      {showQuickAdd && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-96 shadow-xl">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Add Ticker</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Symbol</label>
+                <input
+                  type="text"
+                  value={quickAddSymbol}
+                  onChange={e => setQuickAddSymbol(e.target.value)}
+                  placeholder="AAPL"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 uppercase"
+                  onKeyDown={e => e.key === 'Enter' && handleQuickAdd()}
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Watchlist</label>
+                <select
+                  value={quickAddWatchlist}
+                  onChange={e => setQuickAddWatchlist(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                >
+                  {watchlists.map(wl => (
+                    <option key={wl.id} value={wl.id}>{wl.name}</option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-xs text-gray-500">
+                Price history and S/R levels will be automatically loaded.
+              </p>
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => {
+                  setShowQuickAdd(false);
+                  setQuickAddSymbol('');
+                }}
+                className="flex-1 px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleQuickAdd}
+                disabled={!quickAddSymbol.trim()}
+                className="flex-1 px-4 py-2 rounded-lg bg-primary-600 text-white hover:bg-primary-700 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

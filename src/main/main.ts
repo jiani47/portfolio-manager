@@ -151,7 +151,7 @@ async function initializeApp() {
   schedulerService.start();
 
   // Setup IPC handlers
-  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, schwabService, streamService, store, analyticsService, transactionAnalyticsService, schedulerService, preTradeValidator);
+  setupIpcHandlers(ipcMain, database, backupService, aiService, fmpService, massiveService, schwabService, streamService, store, mainWindow, analyticsService, transactionAnalyticsService, schedulerService, preTradeValidator);
 }
 
 app.whenReady().then(async () => {

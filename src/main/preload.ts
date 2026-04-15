@@ -295,4 +295,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('scheduler:task-completed', handler);
     return () => { ipcRenderer.removeListener('scheduler:task-completed', handler); };
   },
+  onWatchlistSyncProgress: (callback: (data: { symbol: string; status: string; message: string; candleCount?: number }) => void) => {
+    const handler = (_event: unknown, data: { symbol: string; status: string; message: string; candleCount?: number }) => callback(data);
+    ipcRenderer.on('watchlist:sync-progress', handler);
+    return () => { ipcRenderer.removeListener('watchlist:sync-progress', handler); };
+  },
 });
