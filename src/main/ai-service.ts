@@ -10,8 +10,19 @@ import {
   Account,
   PortfolioSummary,
   AssetAllocation,
+  NewsCategory,
+  NewsMateriality,
+  NewsUrgency,
+  SuggestionType,
+  ThesisImpact,
 } from '../shared/types';
 import { v4 as uuidv4 } from 'uuid';
+import { Models } from './config/models';
+import { calculateLLMCost, formatCost } from './utils/llm-cost-calculator';
+
+// Budget thresholds for cost warnings
+const BUDGET_WARNING_PER_CALL = 0.50; // $0.50 per individual LLM call
+const BUDGET_CRITICAL_PER_CALL = 2.00; // $2.00 per individual LLM call
 
 interface PortfolioData {
   positions: Position[];
@@ -63,23 +74,40 @@ export class AIService {
     try {
       let response: string;
 
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let modelUsed = '';
+
       if (this.anthropic) {
+        modelUsed = Models.Anthropic.ClaudeSonnet.name;
         const message = await this.anthropic.messages.create({
-          model: 'claude-sonnet-4-20250514',
+          model: modelUsed,
           max_tokens: 2048,
           messages: [{ role: 'user', content: prompt }],
         });
         response = (message.content[0] as { text: string }).text;
+        inputTokens = message.usage.input_tokens;
+        outputTokens = message.usage.output_tokens;
       } else if (this.openai) {
+        modelUsed = Models.OpenAI.GPT4Turbo.name;
         const completion = await this.openai.chat.completions.create({
-          model: 'gpt-4-turbo-preview',
+          model: modelUsed,
           max_tokens: 2048,
           messages: [{ role: 'user', content: prompt }],
         });
         response = completion.choices[0]?.message?.content || '';
+        inputTokens = completion.usage?.prompt_tokens || 0;
+        outputTokens = completion.usage?.completion_tokens || 0;
       } else {
         return this.generateBasicInsights(data);
       }
+
+      // Log cost
+      const cost = calculateLLMCost(modelUsed, inputTokens, outputTokens);
+      console.log(
+        `[AI] generateInsights: ${formatCost(cost.totalCost)} (${inputTokens}+${outputTokens} tokens, model: ${modelUsed})`
+      );
+      this.warnIfExpensive(cost.totalCost, 'generateInsights');
 
       return this.parseInsightsResponse(response);
     } catch (error) {
@@ -96,20 +124,49 @@ export class AIService {
     const prompt = this.buildAnalysisPrompt(data);
 
     try {
+      let response: string;
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let modelUsed = '';
+
       if (this.anthropic) {
+        modelUsed = Models.Anthropic.ClaudeSonnet.name;
         const message = await this.anthropic.messages.create({
-          model: 'claude-sonnet-4-20250514',
+          model: modelUsed,
           max_tokens: 4096,
           messages: [{ role: 'user', content: prompt }],
         });
-        return (message.content[0] as { text: string }).text;
+        response = (message.content[0] as { text: string }).text;
+        inputTokens = message.usage.input_tokens;
+        outputTokens = message.usage.output_tokens;
+
+        // Log cost
+        const cost = calculateLLMCost(modelUsed, inputTokens, outputTokens);
+        console.log(
+          `[AI] analyzePortfolio: ${formatCost(cost.totalCost)} (${inputTokens}+${outputTokens} tokens, model: ${modelUsed})`
+        );
+        this.warnIfExpensive(cost.totalCost, 'analyzePortfolio');
+
+        return response;
       } else if (this.openai) {
+        modelUsed = Models.OpenAI.GPT4Turbo.name;
         const completion = await this.openai.chat.completions.create({
-          model: 'gpt-4-turbo-preview',
+          model: modelUsed,
           max_tokens: 4096,
           messages: [{ role: 'user', content: prompt }],
         });
-        return completion.choices[0]?.message?.content || this.generateBasicAnalysis(data);
+        response = completion.choices[0]?.message?.content || this.generateBasicAnalysis(data);
+        inputTokens = completion.usage?.prompt_tokens || 0;
+        outputTokens = completion.usage?.completion_tokens || 0;
+
+        // Log cost
+        const cost = calculateLLMCost(modelUsed, inputTokens, outputTokens);
+        console.log(
+          `[AI] analyzePortfolio: ${formatCost(cost.totalCost)} (${inputTokens}+${outputTokens} tokens, model: ${modelUsed})`
+        );
+        this.warnIfExpensive(cost.totalCost, 'analyzePortfolio');
+
+        return response;
       }
     } catch (error) {
       console.error('AI analysis error:', error);
@@ -349,5 +406,410 @@ ${allocation.some(a => a.percentage > 50) ? '- Consider diversifying - one asset
 4. Review your risk tolerance periodically.
 
 *Note: For detailed AI-powered analysis, configure an AI provider in Settings.*`;
+  }
+
+  /**
+   * Classify a news article for material impact and categorization.
+   * Lightweight, fast classification for real-time processing.
+   */
+  async classifyNews(article: {
+    symbol: string;
+    title: string;
+    snippet: string;
+    publishedAt: string;
+  }): Promise<{
+    category: NewsCategory;
+    materiality: NewsMateriality;
+    urgency: NewsUrgency;
+    confidence: number;
+    symbolsAffected: string[];
+    summary: string;
+  }> {
+    if (this.provider === 'none' || (!this.anthropic && !this.openai)) {
+      // Fallback: basic keyword matching
+      return this.classifyNewsBasic(article);
+    }
+
+    const prompt = `Classify this news article for investment portfolio impact:
+
+Symbol: ${article.symbol}
+Title: ${article.title}
+Snippet: ${article.snippet}
+Published: ${article.publishedAt}
+
+Classify on these dimensions:
+1. Category: earnings, guidance, product, regulatory, macro, sector, other
+2. Materiality: high (fundamental change), medium (notable event), low (routine news)
+3. Urgency: breaking (immediate attention), high (review today), medium (review soon), low (FYI)
+4. Confidence: 0-100 (how certain are you of this classification)
+5. Symbols affected: which ticker symbols are materially impacted (including ${article.symbol})
+6. Summary: 1 sentence summary of the key information
+
+Return ONLY a JSON object:
+{
+  "category": "...",
+  "materiality": "...",
+  "urgency": "...",
+  "confidence": 0.85,
+  "symbolsAffected": ["AAPL"],
+  "summary": "..."
+}`;
+
+    try {
+      let response: string;
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let modelUsed = '';
+
+      if (this.anthropic) {
+        modelUsed = Models.Anthropic.ClaudeHaiku.name; // Fast, cheap model for classification
+        const message = await this.anthropic.messages.create({
+          model: modelUsed,
+          max_tokens: 512,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        response = (message.content[0] as { text: string }).text;
+        inputTokens = message.usage.input_tokens;
+        outputTokens = message.usage.output_tokens;
+      } else if (this.openai) {
+        modelUsed = Models.OpenAI.GPT4oMini.name; // Fast, cheap model
+        const completion = await this.openai.chat.completions.create({
+          model: modelUsed,
+          max_tokens: 512,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        response = completion.choices[0]?.message?.content || '';
+        inputTokens = completion.usage?.prompt_tokens || 0;
+        outputTokens = completion.usage?.completion_tokens || 0;
+      } else {
+        return this.classifyNewsBasic(article);
+      }
+
+      // Log cost
+      const cost = calculateLLMCost(modelUsed, inputTokens, outputTokens);
+      console.log(
+        `[AI] classifyNews: ${formatCost(cost.totalCost)} (${inputTokens}+${outputTokens} tokens, model: ${modelUsed})`
+      );
+
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON found in response');
+      }
+
+      const parsed = JSON.parse(jsonMatch[0]);
+      return {
+        category: (parsed.category as NewsCategory) || NewsCategory.OTHER,
+        materiality: (parsed.materiality as NewsMateriality) || NewsMateriality.LOW,
+        urgency: (parsed.urgency as NewsUrgency) || NewsUrgency.LOW,
+        confidence: parsed.confidence || 0.5,
+        symbolsAffected: parsed.symbolsAffected || [article.symbol],
+        summary: parsed.summary || article.title,
+      };
+    } catch (error) {
+      console.error('News classification error:', error);
+      return this.classifyNewsBasic(article);
+    }
+  }
+
+  private classifyNewsBasic(article: { symbol: string; title: string; snippet: string }): {
+    category: NewsCategory;
+    materiality: NewsMateriality;
+    urgency: NewsUrgency;
+    confidence: number;
+    symbolsAffected: string[];
+    summary: string;
+  } {
+    const text = `${article.title} ${article.snippet}`.toLowerCase();
+
+    let category: NewsCategory = NewsCategory.OTHER;
+    if (text.includes('earnings') || text.includes('revenue') || text.includes('profit')) category = NewsCategory.EARNINGS;
+    else if (text.includes('guidance') || text.includes('outlook') || text.includes('forecast')) category = NewsCategory.GUIDANCE;
+    else if (text.includes('product') || text.includes('launch') || text.includes('release')) category = NewsCategory.PRODUCT;
+    else if (text.includes('regulation') || text.includes('sec') || text.includes('fine')) category = NewsCategory.REGULATORY;
+    else if (text.includes('fed') || text.includes('interest') || text.includes('inflation')) category = NewsCategory.MACRO;
+
+    let materiality: NewsMateriality = NewsMateriality.LOW;
+    if (category === NewsCategory.EARNINGS || category === NewsCategory.GUIDANCE) materiality = NewsMateriality.HIGH;
+    else if (category === NewsCategory.REGULATORY || category === NewsCategory.PRODUCT) materiality = NewsMateriality.MEDIUM;
+
+    return {
+      category,
+      materiality,
+      urgency: materiality === NewsMateriality.HIGH ? NewsUrgency.HIGH : NewsUrgency.MEDIUM,
+      confidence: 0.4, // Low confidence for basic classification
+      symbolsAffected: [article.symbol],
+      summary: article.title,
+    };
+  }
+
+  /**
+   * Deep analysis of news against thesis criteria.
+   * Used in EOD batch processing to generate update suggestions.
+   */
+  async reviewThesis(params: {
+    symbol: string;
+    news: Array<{ title: string; snippet: string; publishedAt: string }>;
+    scorecard: { bull: Array<{ label: string; status: string }>; bear: Array<{ label: string; status: string }> } | null;
+    observations: Array<{ note: string; date: string; impact: string }>;
+    intent: { tier: string; thesis: string; invalidation: string } | null;
+  }): Promise<Array<{
+    suggestionType: SuggestionType;
+    criteriaNumber?: string;
+    oldStatus?: string;
+    newStatus?: string;
+    observationNote?: string;
+    thesisImpact?: ThesisImpact;
+    rationale: string;
+    confidence: number;
+  }>> {
+    if (this.provider === 'none' || (!this.anthropic && !this.openai)) {
+      return []; // No AI provider, no suggestions
+    }
+
+    const prompt = `Analyze news for thesis impact:
+
+Symbol: ${params.symbol}
+
+Thesis: ${params.intent?.thesis || 'No thesis on file'}
+Invalidation: ${params.intent?.invalidation || 'None specified'}
+Tier: ${params.intent?.tier || 'Unknown'}
+
+Bull Criteria:
+${params.scorecard?.bull.map((c, i) => `B${i + 1}. ${c.label} [${c.status}]`).join('\n') || 'None'}
+
+Bear Criteria:
+${params.scorecard?.bear.map((c, i) => `B${i + 1}. ${c.label} [${c.status}]`).join('\n') || 'None'}
+
+Recent Observations:
+${params.observations.slice(0, 5).map(o => `- ${o.date}: ${o.note} [${o.impact}]`).join('\n') || 'None'}
+
+News (last 24h):
+${params.news.map((n, i) => `${i + 1}. ${n.title}\n   ${n.snippet}\n   Published: ${n.publishedAt}`).join('\n\n')}
+
+Task: Identify which bull/bear criteria are affected by this news. For each affected criterion, suggest:
+1. scorecard_update: if criterion status should change (e.g., "strong" → "weak")
+2. observation: if news is notable but doesn't warrant status change
+
+Return ONLY a JSON array:
+[
+  {
+    "suggestionType": "scorecard_update",
+    "criteriaNumber": "B2",
+    "oldStatus": "strong",
+    "newStatus": "weak",
+    "rationale": "Q4 revenue growth was 12%, below the 15% threshold in criterion B2",
+    "confidence": 0.85
+  },
+  {
+    "suggestionType": "observation",
+    "observationNote": "Management announced cost-cutting measures, supporting margin expansion thesis",
+    "thesisImpact": "supports",
+    "rationale": "Aligns with bull thesis but no specific criterion to update",
+    "confidence": 0.70
+  }
+]
+
+If no criteria are affected, return empty array: []`;
+
+    try {
+      let response: string;
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let modelUsed = '';
+
+      if (this.anthropic) {
+        modelUsed = Models.Anthropic.ClaudeSonnet.name; // Full model for deep analysis
+        const message = await this.anthropic.messages.create({
+          model: modelUsed,
+          max_tokens: 2048,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        response = (message.content[0] as { text: string }).text;
+        inputTokens = message.usage.input_tokens;
+        outputTokens = message.usage.output_tokens;
+      } else if (this.openai) {
+        modelUsed = Models.OpenAI.GPT4Turbo.name;
+        const completion = await this.openai.chat.completions.create({
+          model: modelUsed,
+          max_tokens: 2048,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        response = completion.choices[0]?.message?.content || '';
+        inputTokens = completion.usage?.prompt_tokens || 0;
+        outputTokens = completion.usage?.completion_tokens || 0;
+      } else {
+        return [];
+      }
+
+      // Log cost
+      const cost = calculateLLMCost(modelUsed, inputTokens, outputTokens);
+      console.log(
+        `[AI] reviewThesis(${params.symbol}): ${formatCost(cost.totalCost)} (${inputTokens}+${outputTokens} tokens, model: ${modelUsed})`
+      );
+      this.warnIfExpensive(cost.totalCost, `reviewThesis(${params.symbol})`);
+
+      const jsonMatch = response.match(/\[[\s\S]*\]/);
+      if (!jsonMatch) {
+        return [];
+      }
+
+      return JSON.parse(jsonMatch[0]);
+    } catch (error) {
+      console.error('Thesis review error:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Generate executive summary for morning briefing.
+   * Synthesizes overnight events into actionable narrative.
+   */
+  async generateBriefingSummary(params: {
+    overnightNews: Array<{ symbol: string; title: string; materiality: string }>;
+    valuationChanges: Array<{ symbol: string; oldPeg: number; newPeg: number }>;
+    pendingSuggestions: Array<{ symbol: string; suggestionType: string; rationale: string }>;
+    monitors: Array<{ symbol: string; label: string }>;
+    portfolioSymbols: string[];
+  }): Promise<{
+    summary: string;
+    keyThemes: string[];
+    focusAreas: string[];
+  }> {
+    if (this.provider === 'none' || (!this.anthropic && !this.openai)) {
+      return this.generateBasicBriefingSummary(params);
+    }
+
+    const prompt = `Generate a morning briefing executive summary for a portfolio manager:
+
+Portfolio symbols: ${params.portfolioSymbols.join(', ')}
+
+Overnight News (${params.overnightNews.length} articles):
+${params.overnightNews.slice(0, 10).map(n => `- ${n.symbol}: ${n.title} [${n.materiality}]`).join('\n')}
+
+Valuation Changes:
+${params.valuationChanges.map(v => `- ${v.symbol}: PEG ${v.oldPeg.toFixed(2)} → ${v.newPeg.toFixed(2)}`).join('\n') || 'None'}
+
+Pending Thesis Reviews (${params.pendingSuggestions.length}):
+${params.pendingSuggestions.slice(0, 5).map(s => `- ${s.symbol}: ${s.suggestionType} - ${s.rationale.substring(0, 80)}...`).join('\n') || 'None'}
+
+Triggered Monitors:
+${params.monitors.map(m => `- ${m.symbol}: ${m.label}`).join('\n') || 'None'}
+
+Generate:
+1. summary: 3-5 sentence executive summary highlighting what happened overnight and what requires attention today
+2. keyThemes: 2-4 key themes across the portfolio (e.g., "Tech sector rotation", "Earnings reactions")
+3. focusAreas: 2-3 symbols or actions to prioritize today (e.g., "Review NVDA scorecard", "Consider TSLA exit")
+
+Return ONLY a JSON object:
+{
+  "summary": "Overnight, tech stocks pulled back 1.5% on rate concerns. Three holdings reported earnings...",
+  "keyThemes": ["Rate sensitivity", "Earnings season"],
+  "focusAreas": ["Review NVDA post-earnings", "Check AAPL valuation change"]
+}`;
+
+    try {
+      let response: string;
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let modelUsed = '';
+
+      if (this.anthropic) {
+        modelUsed = Models.Anthropic.ClaudeSonnet.name;
+        const message = await this.anthropic.messages.create({
+          model: modelUsed,
+          max_tokens: 1024,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        response = (message.content[0] as { text: string }).text;
+        inputTokens = message.usage.input_tokens;
+        outputTokens = message.usage.output_tokens;
+      } else if (this.openai) {
+        modelUsed = Models.OpenAI.GPT4Turbo.name;
+        const completion = await this.openai.chat.completions.create({
+          model: modelUsed,
+          max_tokens: 1024,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        response = completion.choices[0]?.message?.content || '';
+        inputTokens = completion.usage?.prompt_tokens || 0;
+        outputTokens = completion.usage?.completion_tokens || 0;
+      } else {
+        return this.generateBasicBriefingSummary(params);
+      }
+
+      // Log cost
+      const cost = calculateLLMCost(modelUsed, inputTokens, outputTokens);
+      console.log(
+        `[AI] generateBriefingSummary: ${formatCost(cost.totalCost)} (${inputTokens}+${outputTokens} tokens, model: ${modelUsed})`
+      );
+      this.warnIfExpensive(cost.totalCost, 'generateBriefingSummary');
+
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON found in response');
+      }
+
+      return JSON.parse(jsonMatch[0]);
+    } catch (error) {
+      console.error('Briefing summary error:', error);
+      return this.generateBasicBriefingSummary(params);
+    }
+  }
+
+  private generateBasicBriefingSummary(params: {
+    overnightNews: Array<{ symbol: string; title: string; materiality: string }>;
+    valuationChanges: Array<{ symbol: string; oldPeg: number; newPeg: number }>;
+    pendingSuggestions: Array<{ symbol: string; suggestionType: string }>;
+    monitors: Array<{ symbol: string; label: string }>;
+  }): {
+    summary: string;
+    keyThemes: string[];
+    focusAreas: string[];
+  } {
+    const highMaterialityNews = params.overnightNews.filter(n => n.materiality === 'high');
+    const summary = [
+      highMaterialityNews.length > 0
+        ? `${highMaterialityNews.length} high-materiality news items overnight.`
+        : 'Quiet overnight session.',
+      params.pendingSuggestions.length > 0
+        ? `${params.pendingSuggestions.length} thesis updates pending review.`
+        : null,
+      params.monitors.length > 0
+        ? `${params.monitors.length} price alerts triggered.`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    const themes: string[] = [];
+    if (highMaterialityNews.length > 2) themes.push('Active news flow');
+    if (params.valuationChanges.length > 0) themes.push('Valuation shifts');
+    if (params.pendingSuggestions.length > 3) themes.push('Thesis maintenance needed');
+
+    const focusAreas: string[] = [];
+    if (params.pendingSuggestions.length > 0) {
+      const symbols = [...new Set(params.pendingSuggestions.slice(0, 2).map(s => s.symbol))];
+      focusAreas.push(...symbols.map(s => `Review ${s} updates`));
+    }
+    if (params.monitors.length > 0) {
+      focusAreas.push(`Check ${params.monitors.length} triggered monitor(s)`);
+    }
+
+    return { summary: summary || 'No significant overnight activity.', keyThemes: themes, focusAreas };
+  }
+
+  /**
+   * Warn if an LLM call exceeds budget thresholds
+   */
+  private warnIfExpensive(cost: number, operation: string): void {
+    if (cost >= BUDGET_CRITICAL_PER_CALL) {
+      console.error(
+        `[AI] 🚨 CRITICAL: Expensive LLM call in ${operation}: ${formatCost(cost)} (threshold: ${formatCost(BUDGET_CRITICAL_PER_CALL)})`
+      );
+    } else if (cost >= BUDGET_WARNING_PER_CALL) {
+      console.warn(
+        `[AI] ⚠️  WARNING: Expensive LLM call in ${operation}: ${formatCost(cost)} (threshold: ${formatCost(BUDGET_WARNING_PER_CALL)})`
+      );
+    }
   }
 }

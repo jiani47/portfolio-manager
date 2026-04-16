@@ -1044,3 +1044,102 @@ export interface ValuationMetric {
   pegRating: 'CHEAP' | 'FAIR' | 'RICH' | 'PRICEY' | null;
   fetchedAt: string;
 }
+
+export enum NewsCategory {
+  EARNINGS = 'earnings',
+  GUIDANCE = 'guidance',
+  PRODUCT = 'product',
+  REGULATORY = 'regulatory',
+  MACRO = 'macro',
+  SECTOR = 'sector',
+  OTHER = 'other',
+}
+
+export enum NewsMateriality {
+  HIGH = 'high',
+  MEDIUM = 'medium',
+  LOW = 'low',
+}
+
+export enum NewsUrgency {
+  BREAKING = 'breaking',
+  HIGH = 'high',
+  MEDIUM = 'medium',
+  LOW = 'low',
+}
+
+export interface NewsAnalysis {
+  id: string;
+  newsId: string;
+  symbol: string;
+  category: NewsCategory;
+  materiality: NewsMateriality;
+  urgency: NewsUrgency;
+  confidence: number;
+  symbolsAffected: string | null;
+  summary: string | null;
+  analyzedAt: string;
+}
+
+export enum ThesisReviewStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
+}
+
+export interface ThesisReviewQueueItem {
+  id: string;
+  newsId: string;
+  symbol: string;
+  securityId: string;
+  queuedAt: string;
+  processedAt: string | null;
+  status: ThesisReviewStatus;
+}
+
+export enum SuggestionType {
+  SCORECARD_UPDATE = 'scorecard_update',
+  OBSERVATION = 'observation',
+}
+
+export enum ThesisImpact {
+  SUPPORTS = 'supports',
+  CHALLENGES = 'challenges',
+  NEUTRAL = 'neutral',
+}
+
+export enum SuggestionStatus {
+  PENDING = 'pending',
+  APPROVED = 'approved',
+  REJECTED = 'rejected',
+}
+
+export interface ThesisUpdateSuggestion {
+  id: string;
+  symbol: string;
+  securityId: string;
+  suggestionType: SuggestionType;
+  criteriaNumber: string | null;
+  oldStatus: string | null;
+  newStatus: string | null;
+  observationNote: string | null;
+  thesisImpact: ThesisImpact | null;
+  rationale: string;
+  confidence: number;
+  sourceNewsIds: string | null;
+  suggestedAt: string;
+  reviewedAt: string | null;
+  status: SuggestionStatus;
+  reviewedBy: string | null;
+}
+
+export interface BriefingSummary {
+  id: string;
+  date: string;
+  summary: string;
+  keyThemes: string | null;
+  focusAreas: string | null;
+  pendingReviewCount: number;
+  generatedAt: string;
+}

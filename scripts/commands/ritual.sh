@@ -217,6 +217,68 @@ PYEOF
     echo "  Prices as of: $LATEST_DATE"
     echo ""
 
+    # === AI-Generated Executive Summary ===
+    TODAY=$(date +%Y-%m-%d)
+    BRIEFING_SUMMARY=$(sqlite3 "$DB" -json "SELECT summary, key_themes, focus_areas, pending_review_count FROM briefing_summaries WHERE date = '$TODAY'" 2>/dev/null | jq -r '.[0] // null')
+    if [ "$BRIEFING_SUMMARY" != "null" ] && [ -n "$BRIEFING_SUMMARY" ]; then
+      SUMMARY_TEXT=$(echo "$BRIEFING_SUMMARY" | jq -r '.summary')
+      KEY_THEMES=$(echo "$BRIEFING_SUMMARY" | jq -r '.key_themes')
+      FOCUS_AREAS=$(echo "$BRIEFING_SUMMARY" | jq -r '.focus_areas')
+      PENDING_COUNT=$(echo "$BRIEFING_SUMMARY" | jq -r '.pending_review_count // 0')
+
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "  📊 EXECUTIVE SUMMARY"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo ""
+      echo "  $SUMMARY_TEXT"
+      echo ""
+      if [ -n "$KEY_THEMES" ] && [ "$KEY_THEMES" != "null" ]; then
+        echo "  Key Themes:"
+        echo "$KEY_THEMES" | while IFS= read -r theme; do
+          [ -n "$theme" ] && echo "    • $theme"
+        done
+        echo ""
+      fi
+      if [ -n "$FOCUS_AREAS" ] && [ "$FOCUS_AREAS" != "null" ]; then
+        echo "  Today's Focus:"
+        echo "$FOCUS_AREAS" | while IFS= read -r area; do
+          [ -n "$area" ] && echo "    → $area"
+        done
+        echo ""
+      fi
+      if [ "$PENDING_COUNT" -gt 0 ]; then
+        echo "  ⚠️  $PENDING_COUNT thesis update(s) pending review (pm-cli.sh thesis-pending)"
+        echo ""
+      fi
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo ""
+    fi
+
+    # === Pending Thesis Update Suggestions ===
+    PENDING_SUGGESTIONS=$(sqlite3 "$DB" -json "
+      SELECT tus.symbol, tus.suggestion_type, tus.criteria_number, tus.rationale, tus.confidence,
+             substr(tus.id, 1, 8) as short_id
+      FROM thesis_update_suggestions tus
+      WHERE tus.status = 'pending'
+      ORDER BY tus.confidence DESC, tus.suggested_at DESC
+      LIMIT 5
+    " 2>/dev/null)
+    PENDING_COUNT=$(echo "$PENDING_SUGGESTIONS" | jq length 2>/dev/null)
+    if [ "$PENDING_COUNT" -gt 0 ]; then
+      echo "🔔 === PENDING THESIS REVIEWS ($PENDING_COUNT) ==="
+      echo "$PENDING_SUGGESTIONS" | jq -r '.[] |
+        "  \(.symbol) | \(.suggestion_type)" +
+        (if .criteria_number then " (\(.criteria_number))" else "" end) +
+        " | \((.confidence * 100 | floor))% conf\n" +
+        "    \(.rationale | .[0:80])" +
+        (if (.rationale | length) > 80 then "..." else "" end) +
+        "\n    → pm-cli.sh thesis-approve \(.short_id)"'
+      echo ""
+      echo "  View all: pm-cli.sh thesis-pending"
+      echo "======================================"
+      echo ""
+    fi
+
     # Show triggered monitors at top of briefing
     TRIGGERED_MONITORS=$(sqlite3 "$DB" "
       SELECT m.symbol, m.direction, printf('%.2f', m.price_level) as level,

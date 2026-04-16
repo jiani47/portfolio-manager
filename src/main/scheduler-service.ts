@@ -4,6 +4,9 @@ import { exec } from 'child_process';
 import { Database } from './database';
 import { FMPService } from './fmp-service';
 import { SchwabService } from './schwab-service';
+import { NewsClassifierService } from './news-classifier-service';
+import { ThesisReviewerService } from './thesis-reviewer-service';
+import { AIService } from './ai-service';
 import {
   AppSettings,
   TaskRunRecord,
@@ -132,6 +135,27 @@ export class SchedulerService {
         name: 'News Refresh',
         schedule: { type: 'interval', intervalMs: 10 * 60 * 1000, wakingHoursOnly: true },
         execute: () => this.executeNews(),
+        enabled: true,
+      },
+      {
+        id: 'news-classify',
+        name: 'News Classification (AI)',
+        schedule: { type: 'interval', intervalMs: 10 * 60 * 1000, wakingHoursOnly: true },
+        execute: () => this.executeNewsClassification(),
+        enabled: true,
+      },
+      {
+        id: 'thesis-review',
+        name: 'Thesis Review (EOD)',
+        schedule: { type: 'after_market_close', afterMarketDelayMinutes: 45 },
+        execute: () => this.executeThesisReview(),
+        enabled: true,
+      },
+      {
+        id: 'briefing-summary',
+        name: 'Briefing Summary Generation',
+        schedule: { type: 'daily', dailyHourET: 6 },
+        execute: () => this.executeBriefingSummary(),
         enabled: true,
       },
       {
@@ -696,6 +720,134 @@ export class SchedulerService {
       }
 
       return { success: true, message: `Fetched ${totalArticles} news articles` };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private async executeNewsClassification(): Promise<TaskResult> {
+    try {
+      const settings = this.store.get('settings');
+      if (!settings || settings.aiProvider === 'none') {
+        return { success: true, message: 'AI disabled - classification skipped' };
+      }
+
+      const classifier = new NewsClassifierService(this.db, settings);
+      const result = await classifier.processUnanalyzedNews();
+
+      return {
+        success: true,
+        message: `Classified ${result.analyzed} articles, queued ${result.queued} for thesis review`,
+      };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private async executeThesisReview(): Promise<TaskResult> {
+    try {
+      const settings = this.store.get('settings');
+      if (!settings || settings.aiProvider === 'none') {
+        return { success: true, message: 'AI disabled - thesis review skipped' };
+      }
+
+      const reviewer = new ThesisReviewerService(this.db, settings);
+      const result = await reviewer.processThesisReviewQueue();
+
+      if (result.suggestionsGenerated > 0) {
+        this.notifyRenderer('thesis:suggestions-available', { count: result.suggestionsGenerated });
+        sendNtfyNotification(
+          'Thesis Updates Available',
+          `${result.suggestionsGenerated} suggested update(s) from EOD news review`,
+          'high'
+        );
+      }
+
+      return {
+        success: true,
+        message: `Reviewed ${result.processed} news items, generated ${result.suggestionsGenerated} suggestions`,
+      };
+    } catch (err) {
+      return { success: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  private async executeBriefingSummary(): Promise<TaskResult> {
+    try {
+      const settings = this.store.get('settings');
+      if (!settings || settings.aiProvider === 'none') {
+        return { success: true, message: 'AI disabled - briefing summary skipped' };
+      }
+
+      // Gather overnight data
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+      const rawDb = this.db.getRawDb();
+
+      // Get overnight news with analysis
+      const overnightNews = rawDb
+        .prepare(
+          `
+        SELECT n.symbol, n.title, na.materiality
+        FROM news n
+        JOIN news_analysis na ON n.id = na.news_id
+        WHERE n.published_at >= ?
+        ORDER BY na.materiality DESC, n.published_at DESC
+        LIMIT 20
+      `
+        )
+        .all(yesterdayStr) as Array<{ symbol: string; title: string; materiality: string }>;
+
+      // Get valuation changes (TODO: would need valuation history tracking)
+      const valuationChanges: Array<{ symbol: string; oldPeg: number; newPeg: number }> = [];
+
+      // Get pending suggestions
+      const pendingSuggestions = this.db.getPendingThesisSuggestions();
+      const suggestionsSummary = pendingSuggestions.map(s => ({
+        symbol: s.symbol,
+        suggestionType: s.suggestionType,
+        rationale: s.rationale,
+      }));
+
+      // Get triggered monitors
+      const monitors = rawDb
+        .prepare(
+          `
+        SELECT symbol, label
+        FROM monitors
+        WHERE triggered_at IS NOT NULL AND status != 'dismissed'
+        ORDER BY triggered_at DESC
+        LIMIT 10
+      `
+        )
+        .all() as Array<{ symbol: string; label: string }>;
+
+      // Get portfolio symbols
+      const portfolioSymbols = this.getPortfolioAndWatchlistSymbols();
+
+      const aiService = new AIService(settings);
+      const summary = await aiService.generateBriefingSummary({
+        overnightNews,
+        valuationChanges,
+        pendingSuggestions: suggestionsSummary,
+        monitors,
+        portfolioSymbols,
+      });
+
+      // Save summary
+      const today = new Date().toISOString().split('T')[0];
+      this.db.saveBriefingSummary({
+        date: today,
+        summary: summary.summary,
+        keyThemes: summary.keyThemes.join('\n'),
+        focusAreas: summary.focusAreas.join('\n'),
+        pendingReviewCount: pendingSuggestions.length,
+        generatedAt: new Date().toISOString(),
+      });
+
+      return { success: true, message: `Generated briefing summary for ${today}` };
     } catch (err) {
       return { success: false, message: err instanceof Error ? err.message : String(err) };
     }

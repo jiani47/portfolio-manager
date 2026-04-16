@@ -300,4 +300,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('watchlist:sync-progress', handler);
     return () => { ipcRenderer.removeListener('watchlist:sync-progress', handler); };
   },
+
+  // Thesis suggestion operations
+  getPendingThesisSuggestions: (symbol?: string) => ipcRenderer.invoke('thesis:get-pending-suggestions', symbol),
+  approveThesisSuggestion: (id: string) => ipcRenderer.invoke('thesis:approve-suggestion', id),
+  rejectThesisSuggestion: (id: string) => ipcRenderer.invoke('thesis:reject-suggestion', id),
+  getThesisSuggestionHistory: (opts?: { symbol?: string; limit?: number }) => ipcRenderer.invoke('thesis:get-suggestion-history', opts),
 });

@@ -33,6 +33,17 @@ import {
   Observation,
   ThesisScoreChange,
   ValuationMetric,
+  NewsAnalysis,
+  NewsCategory,
+  NewsMateriality,
+  NewsUrgency,
+  ThesisReviewQueueItem,
+  ThesisReviewStatus,
+  ThesisUpdateSuggestion,
+  SuggestionType,
+  ThesisImpact,
+  SuggestionStatus,
+  BriefingSummary,
 } from '../shared/types';
 
 export class Database {
@@ -816,6 +827,91 @@ export class Database {
       )
     `);
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_valuation_symbol ON valuation_metrics(symbol)');
+
+    // News analysis table - LLM classification results
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS news_analysis (
+        id TEXT PRIMARY KEY,
+        news_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        category TEXT NOT NULL,
+        materiality TEXT NOT NULL,
+        urgency TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        symbols_affected TEXT,
+        summary TEXT,
+        analyzed_at TEXT NOT NULL,
+        FOREIGN KEY (news_id) REFERENCES news(id) ON DELETE CASCADE,
+        UNIQUE(news_id)
+      )
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_news_analysis_symbol ON news_analysis(symbol)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_news_analysis_materiality ON news_analysis(materiality)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_news_analysis_analyzed ON news_analysis(analyzed_at)');
+
+    // Migration: add analyzed_at to news table
+    try {
+      this.db.exec(`ALTER TABLE news ADD COLUMN analyzed_at TEXT`);
+    } catch {
+      // Column already exists
+    }
+
+    // Thesis review queue - material news pending EOD batch review
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS thesis_review_queue (
+        id TEXT PRIMARY KEY,
+        news_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        security_id TEXT NOT NULL,
+        queued_at TEXT NOT NULL,
+        processed_at TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        FOREIGN KEY (news_id) REFERENCES news(id) ON DELETE CASCADE,
+        FOREIGN KEY (security_id) REFERENCES securities(id) ON DELETE CASCADE
+      )
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_queue_symbol ON thesis_review_queue(symbol)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_queue_status ON thesis_review_queue(status)');
+
+    // Thesis update suggestions - awaiting user approval
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS thesis_update_suggestions (
+        id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        security_id TEXT NOT NULL,
+        suggestion_type TEXT NOT NULL,
+        criteria_number TEXT,
+        old_status TEXT,
+        new_status TEXT,
+        observation_note TEXT,
+        thesis_impact TEXT,
+        rationale TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        source_news_ids TEXT,
+        suggested_at TEXT NOT NULL,
+        reviewed_at TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        reviewed_by TEXT,
+        FOREIGN KEY (security_id) REFERENCES securities(id) ON DELETE CASCADE
+      )
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_suggestions_symbol ON thesis_update_suggestions(symbol)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_suggestions_status ON thesis_update_suggestions(status)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_thesis_suggestions_type ON thesis_update_suggestions(suggestion_type)');
+
+    // Briefing summaries - cached daily executive summaries
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS briefing_summaries (
+        id TEXT PRIMARY KEY,
+        date TEXT NOT NULL UNIQUE,
+        summary TEXT NOT NULL,
+        key_themes TEXT,
+        focus_areas TEXT,
+        pending_review_count INTEGER DEFAULT 0,
+        generated_at TEXT NOT NULL
+      )
+    `);
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_briefing_summaries_date ON briefing_summaries(date)');
 
     // Sync watchlist monitors on startup
     this.syncWatchlistMonitors();
@@ -4184,6 +4280,295 @@ export class Database {
       reason: r.reason as string | null,
       changedAt: r.changed_at as string,
       createdAt: r.created_at as string,
+    };
+  };
+
+  // News analysis operations
+  saveNewsAnalysis(analysis: Omit<NewsAnalysis, 'id'>): NewsAnalysis {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    this.db.prepare(`
+      INSERT INTO news_analysis (id, news_id, symbol, category, materiality, urgency, confidence, symbols_affected, summary, analyzed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      analysis.newsId,
+      analysis.symbol,
+      analysis.category,
+      analysis.materiality,
+      analysis.urgency,
+      analysis.confidence,
+      analysis.symbolsAffected,
+      analysis.summary,
+      analysis.analyzedAt
+    );
+    // Update news table with analyzed_at timestamp
+    this.db.prepare('UPDATE news SET analyzed_at = ? WHERE id = ?').run(analysis.analyzedAt, analysis.newsId);
+    return { id, ...analysis };
+  }
+
+  getNewsAnalysis(newsId: string): NewsAnalysis | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM news_analysis WHERE news_id = ?').get(newsId);
+    return row ? this.mapRowToNewsAnalysis(row) : null;
+  }
+
+  listNewsAnalysisBySymbol(symbol: string, limit = 20): NewsAnalysis[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.prepare(`
+      SELECT * FROM news_analysis
+      WHERE symbol = ? OR symbols_affected LIKE ?
+      ORDER BY analyzed_at DESC
+      LIMIT ?
+    `).all(symbol, `%${symbol}%`, limit);
+    return rows.map(this.mapRowToNewsAnalysis);
+  }
+
+  getUnanalyzedNews(limit = 100): Array<{ id: string; symbol: string; title: string; snippet: string; publishedAt: string }> {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.prepare(`
+      SELECT n.id, n.symbol, n.title, n.snippet, n.published_at
+      FROM news n
+      LEFT JOIN news_analysis na ON n.id = na.news_id
+      WHERE na.id IS NULL
+      ORDER BY n.published_at DESC
+      LIMIT ?
+    `).all(limit);
+    return rows.map((r: any) => ({
+      id: r.id,
+      symbol: r.symbol,
+      title: r.title,
+      snippet: r.snippet,
+      publishedAt: r.published_at,
+    }));
+  }
+
+  private mapRowToNewsAnalysis = (row: unknown): NewsAnalysis => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      newsId: r.news_id as string,
+      symbol: r.symbol as string,
+      category: r.category as NewsCategory,
+      materiality: r.materiality as NewsMateriality,
+      urgency: r.urgency as NewsUrgency,
+      confidence: r.confidence as number,
+      symbolsAffected: r.symbols_affected as string | null,
+      summary: r.summary as string | null,
+      analyzedAt: r.analyzed_at as string,
+    };
+  };
+
+  // Thesis review queue operations
+  addToThesisReviewQueue(item: Omit<ThesisReviewQueueItem, 'id' | 'processedAt' | 'status'>): ThesisReviewQueueItem {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    this.db.prepare(`
+      INSERT INTO thesis_review_queue (id, news_id, symbol, security_id, queued_at, status)
+      VALUES (?, ?, ?, ?, ?, 'pending')
+    `).run(id, item.newsId, item.symbol, item.securityId, item.queuedAt);
+    return { id, ...item, processedAt: null, status: ThesisReviewStatus.PENDING };
+  }
+
+  getPendingThesisReviews(): ThesisReviewQueueItem[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const rows = this.db.prepare(`
+      SELECT * FROM thesis_review_queue
+      WHERE status = 'pending'
+      ORDER BY queued_at ASC
+    `).all();
+    return rows.map(this.mapRowToThesisReviewQueueItem);
+  }
+
+  markThesisReviewProcessed(id: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare(`
+      UPDATE thesis_review_queue
+      SET status = 'completed', processed_at = ?
+      WHERE id = ?
+    `).run(new Date().toISOString(), id);
+  }
+
+  private mapRowToThesisReviewQueueItem = (row: unknown): ThesisReviewQueueItem => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      newsId: r.news_id as string,
+      symbol: r.symbol as string,
+      securityId: r.security_id as string,
+      queuedAt: r.queued_at as string,
+      processedAt: r.processed_at as string | null,
+      status: r.status as ThesisReviewStatus,
+    };
+  };
+
+  // Thesis update suggestions operations
+  saveThesisUpdateSuggestion(suggestion: Omit<ThesisUpdateSuggestion, 'id' | 'reviewedAt' | 'status' | 'reviewedBy'>): ThesisUpdateSuggestion {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    this.db.prepare(`
+      INSERT INTO thesis_update_suggestions
+      (id, symbol, security_id, suggestion_type, criteria_number, old_status, new_status,
+       observation_note, thesis_impact, rationale, confidence, source_news_ids, suggested_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    `).run(
+      id,
+      suggestion.symbol,
+      suggestion.securityId,
+      suggestion.suggestionType,
+      suggestion.criteriaNumber,
+      suggestion.oldStatus,
+      suggestion.newStatus,
+      suggestion.observationNote,
+      suggestion.thesisImpact,
+      suggestion.rationale,
+      suggestion.confidence,
+      suggestion.sourceNewsIds,
+      suggestion.suggestedAt
+    );
+    return { id, ...suggestion, reviewedAt: null, status: SuggestionStatus.PENDING, reviewedBy: null };
+  }
+
+  getPendingThesisSuggestions(symbol?: string): ThesisUpdateSuggestion[] {
+    if (!this.db) throw new Error('Database not initialized');
+    let sql = `
+      SELECT * FROM thesis_update_suggestions
+      WHERE status = 'pending'
+    `;
+    const params: string[] = [];
+    if (symbol) {
+      sql += ' AND symbol = ?';
+      params.push(symbol);
+    }
+    sql += ' ORDER BY suggested_at DESC';
+    const rows = this.db.prepare(sql).all(...params);
+    return rows.map(this.mapRowToThesisUpdateSuggestion);
+  }
+
+  approveThesisSuggestion(id: string, reviewedBy: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = new Date().toISOString();
+
+    // Get the suggestion
+    const suggestion = this.db.prepare('SELECT * FROM thesis_update_suggestions WHERE id = ?').get(id);
+    if (!suggestion) throw new Error('Suggestion not found');
+    const s = this.mapRowToThesisUpdateSuggestion(suggestion);
+
+    // Apply the suggestion
+    if (s.suggestionType === SuggestionType.SCORECARD_UPDATE && s.criteriaNumber) {
+      // Log the scorecard change
+      this.db.prepare(`
+        INSERT INTO thesis_score_changes (id, security_id, criteria_number, old_status, new_status, reason, changed_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(uuidv4(), s.securityId, s.criteriaNumber, s.oldStatus || 'unknown', s.newStatus || 'unknown', s.rationale, now, now);
+    } else if (s.suggestionType === SuggestionType.OBSERVATION && s.observationNote) {
+      // Create observation
+      this.db.prepare(`
+        INSERT INTO observations (id, security_id, observation_date, note, source, thesis_impact, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(uuidv4(), s.securityId, now.split('T')[0], s.observationNote, 'AI analysis', s.thesisImpact || ThesisImpact.NEUTRAL, now);
+    }
+
+    // Mark as approved
+    this.db.prepare(`
+      UPDATE thesis_update_suggestions
+      SET status = 'approved', reviewed_at = ?, reviewed_by = ?
+      WHERE id = ?
+    `).run(now, reviewedBy, id);
+  }
+
+  rejectThesisSuggestion(id: string, reviewedBy: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare(`
+      UPDATE thesis_update_suggestions
+      SET status = 'rejected', reviewed_at = ?, reviewed_by = ?
+      WHERE id = ?
+    `).run(new Date().toISOString(), reviewedBy, id);
+  }
+
+  getThesisSuggestionHistory(opts?: { symbol?: string; limit?: number }): ThesisUpdateSuggestion[] {
+    if (!this.db) throw new Error('Database not initialized');
+    let sql = `
+      SELECT * FROM thesis_update_suggestions
+      WHERE status IN ('approved', 'rejected')
+    `;
+    const params: (string | number)[] = [];
+    if (opts?.symbol) {
+      sql += ' AND symbol = ?';
+      params.push(opts.symbol);
+    }
+    sql += ' ORDER BY reviewed_at DESC';
+    if (opts?.limit) {
+      sql += ' LIMIT ?';
+      params.push(opts.limit);
+    }
+    const rows = this.db.prepare(sql).all(...params);
+    return rows.map(this.mapRowToThesisUpdateSuggestion);
+  }
+
+  private mapRowToThesisUpdateSuggestion = (row: unknown): ThesisUpdateSuggestion => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      symbol: r.symbol as string,
+      securityId: r.security_id as string,
+      suggestionType: r.suggestion_type as SuggestionType,
+      criteriaNumber: r.criteria_number as string | null,
+      oldStatus: r.old_status as string | null,
+      newStatus: r.new_status as string | null,
+      observationNote: r.observation_note as string | null,
+      thesisImpact: (r.thesis_impact as ThesisImpact) || null,
+      rationale: r.rationale as string,
+      confidence: r.confidence as number,
+      sourceNewsIds: r.source_news_ids as string | null,
+      suggestedAt: r.suggested_at as string,
+      reviewedAt: r.reviewed_at as string | null,
+      status: r.status as SuggestionStatus,
+      reviewedBy: r.reviewed_by as string | null,
+    };
+  };
+
+  // Briefing summary operations
+  saveBriefingSummary(summary: Omit<BriefingSummary, 'id'>): BriefingSummary {
+    if (!this.db) throw new Error('Database not initialized');
+    const id = uuidv4();
+    this.db.prepare(`
+      INSERT OR REPLACE INTO briefing_summaries (id, date, summary, key_themes, focus_areas, pending_review_count, generated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      summary.date,
+      summary.summary,
+      summary.keyThemes,
+      summary.focusAreas,
+      summary.pendingReviewCount,
+      summary.generatedAt
+    );
+    return { id, ...summary };
+  }
+
+  getBriefingSummary(date: string): BriefingSummary | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM briefing_summaries WHERE date = ?').get(date);
+    return row ? this.mapRowToBriefingSummary(row) : null;
+  }
+
+  getLatestBriefingSummary(): BriefingSummary | null {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db.prepare('SELECT * FROM briefing_summaries ORDER BY date DESC LIMIT 1').get();
+    return row ? this.mapRowToBriefingSummary(row) : null;
+  }
+
+  private mapRowToBriefingSummary = (row: unknown): BriefingSummary => {
+    const r = row as Record<string, unknown>;
+    return {
+      id: r.id as string,
+      date: r.date as string,
+      summary: r.summary as string,
+      keyThemes: r.key_themes as string | null,
+      focusAreas: r.focus_areas as string | null,
+      pendingReviewCount: r.pending_review_count as number,
+      generatedAt: r.generated_at as string,
     };
   };
 

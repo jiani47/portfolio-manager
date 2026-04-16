@@ -65,6 +65,7 @@ import type {
   BrokerPLRecord,
   RebalanceBasket,
   ValuationMetric,
+  ThesisUpdateSuggestion,
 } from '../../shared/types';
 
 // Type declaration for the electron API exposed via preload
@@ -363,6 +364,12 @@ declare global {
       emsGetBasket: (name: string) => Promise<RebalanceBasket | null>;
       emsResizeBasket: (name: string) => Promise<unknown>;
       emsFillTranche: (id: string, data: { filledQty: number; filledPrice: number; brokerageOrderStatus?: string }) => Promise<unknown>;
+
+      // Thesis suggestion operations
+      getPendingThesisSuggestions: (symbol?: string) => Promise<ThesisUpdateSuggestion[]>;
+      approveThesisSuggestion: (id: string) => Promise<void>;
+      rejectThesisSuggestion: (id: string) => Promise<void>;
+      getThesisSuggestionHistory: (opts?: { symbol?: string; limit?: number }) => Promise<ThesisUpdateSuggestion[]>;
     };
   }
 }
@@ -2111,4 +2118,78 @@ export function useValuationMetrics() {
   }, []);
 
   return { valuations, loading, fetchValuations };
+}
+
+export function useThesisSuggestions(symbol?: string) {
+  const [pendingSuggestions, setPendingSuggestions] = useState<ThesisUpdateSuggestion[]>([]);
+  const [history, setHistory] = useState<ThesisUpdateSuggestion[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchPending = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getPendingThesisSuggestions(symbol);
+      setPendingSuggestions(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [symbol]);
+
+  const fetchHistory = useCallback(async (opts?: { symbol?: string; limit?: number }) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await window.electronAPI.getThesisSuggestionHistory(opts);
+      setHistory(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const approveSuggestion = useCallback(async (id: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      await window.electronAPI.approveThesisSuggestion(id);
+      // Refresh pending list
+      await fetchPending();
+    } catch (err) {
+      setError((err as Error).message);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchPending]);
+
+  const rejectSuggestion = useCallback(async (id: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      await window.electronAPI.rejectThesisSuggestion(id);
+      // Refresh pending list
+      await fetchPending();
+    } catch (err) {
+      setError((err as Error).message);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchPending]);
+
+  return {
+    pendingSuggestions,
+    history,
+    loading,
+    error,
+    fetchPending,
+    fetchHistory,
+    approveSuggestion,
+    rejectSuggestion,
+  };
 }

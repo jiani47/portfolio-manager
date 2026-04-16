@@ -1538,4 +1538,10 @@ export function setupIpcHandlers(
 
   // Valuation metrics
   ipcMain.handle('db:valuations:list', () => db.listValuationMetrics());
+
+  // Thesis suggestion handlers
+  ipcMain.handle('thesis:get-pending-suggestions', (_, symbol?: string) => db.getPendingThesisSuggestions(symbol));
+  ipcMain.handle('thesis:approve-suggestion', (_, id: string) => db.approveThesisSuggestion(id, 'app-user'));
+  ipcMain.handle('thesis:reject-suggestion', (_, id: string) => db.rejectThesisSuggestion(id, 'app-user'));
+  ipcMain.handle('thesis:get-suggestion-history', (_, opts?: { symbol?: string; limit?: number }) => db.getThesisSuggestionHistory(opts));
 }
