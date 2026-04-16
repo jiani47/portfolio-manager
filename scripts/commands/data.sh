@@ -721,6 +721,133 @@ else:
     fi
     ;;
 
+  news-unanalyzed)
+    # Show news pending AI classification
+    LIMIT="${2:-50}"
+    echo "=== Unanalyzed News (pending AI classification) ==="
+
+    COUNT=$(sqlite3 "$DB" "
+      SELECT COUNT(*)
+      FROM news n
+      LEFT JOIN news_analysis na ON n.id = na.news_id
+      WHERE na.id IS NULL
+    ")
+
+    if [ "$COUNT" -eq 0 ]; then
+      echo "  No unanalyzed news"
+    else
+      echo "  Total unanalyzed: $COUNT"
+      echo ""
+      sqlite3 "$DB" "
+        SELECT n.symbol, n.published_at, n.title, n.source
+        FROM news n
+        LEFT JOIN news_analysis na ON n.id = na.news_id
+        WHERE na.id IS NULL
+        ORDER BY n.published_at DESC
+        LIMIT $LIMIT
+      " | python3 -c "
+import sys
+from collections import defaultdict
+by_symbol = defaultdict(list)
+for line in sys.stdin:
+    parts = line.strip().split('|')
+    if len(parts) < 4: continue
+    sym, pub, title, source = parts[0], parts[1], parts[2], parts[3]
+    by_symbol[sym].append((pub, title, source))
+
+for sym in sorted(by_symbol):
+    print(f'  {sym}:')
+    for pub, title, source in by_symbol[sym]:
+        time_str = pub[5:16] if len(pub) > 16 else pub
+        print(f'    {time_str}  [{source}] {title}')
+    print()
+" 2>/dev/null
+    fi
+    ;;
+
+  news-analyzed)
+    # Show news with AI analysis results
+    SYMBOL="$2"
+    LIMIT="${3:-20}"
+
+    if [ -n "$SYMBOL" ]; then
+      SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+      echo "=== Analyzed News: $SYMBOL ==="
+      sqlite3 "$DB" "
+        SELECT na.analyzed_at, n.title, na.category, na.materiality, na.confidence, na.summary
+        FROM news_analysis na
+        JOIN news n ON na.news_id = n.id
+        WHERE na.symbol = '$SYMBOL' OR na.symbols_affected LIKE '%$SYMBOL%'
+        ORDER BY na.analyzed_at DESC
+        LIMIT $LIMIT
+      " | python3 -c "
+import sys
+for line in sys.stdin:
+    parts = line.strip().split('|')
+    if len(parts) < 6: continue
+    analyzed, title, category, materiality, confidence, summary = parts
+    time_str = analyzed[5:16] if len(analyzed) > 16 else analyzed
+    conf_pct = int(float(confidence) * 100)
+
+    # Color codes
+    if materiality == 'high':
+        mat_color = '\033[91m'  # red
+    elif materiality == 'medium':
+        mat_color = '\033[93m'  # yellow
+    else:
+        mat_color = '\033[37m'  # white
+    reset = '\033[0m'
+
+    print(f'  {time_str}  {mat_color}[{materiality.upper()}]{reset}  {category}  ({conf_pct}%)')
+    print(f'    {title}')
+    if summary and summary != 'null':
+        print(f'    → {summary}')
+    print()
+" 2>/dev/null
+    else
+      echo "=== Analyzed News (recent) ==="
+
+      TOTAL=$(sqlite3 "$DB" "SELECT COUNT(*) FROM news_analysis")
+      echo "  Total analyzed: $TOTAL"
+      echo ""
+
+      sqlite3 "$DB" "
+        SELECT na.symbol, na.analyzed_at, n.title, na.category, na.materiality, na.confidence
+        FROM news_analysis na
+        JOIN news n ON na.news_id = n.id
+        ORDER BY na.analyzed_at DESC
+        LIMIT $LIMIT
+      " | python3 -c "
+import sys
+from collections import defaultdict
+by_symbol = defaultdict(list)
+for line in sys.stdin:
+    parts = line.strip().split('|')
+    if len(parts) < 6: continue
+    sym, analyzed, title, category, materiality, confidence = parts
+    by_symbol[sym].append((analyzed, title, category, materiality, confidence))
+
+for sym in sorted(by_symbol):
+    print(f'  {sym}:')
+    for analyzed, title, category, materiality, confidence in by_symbol[sym]:
+        time_str = analyzed[5:16] if len(analyzed) > 16 else analyzed
+        conf_pct = int(float(confidence) * 100)
+
+        # Materiality badge
+        if materiality == 'high':
+            mat_badge = '\033[91m[HIGH]\033[0m'
+        elif materiality == 'medium':
+            mat_badge = '\033[93m[MED]\033[0m'
+        else:
+            mat_badge = '[LOW]'
+
+        print(f'    {time_str}  {mat_badge}  {category}  ({conf_pct}%)')
+        print(f'      {title}')
+    print()
+" 2>/dev/null
+    fi
+    ;;
+
   technicals)
     # Show technical indicators for portfolio symbols via FMP API
     FMP_KEY=$(get_fmp_key)

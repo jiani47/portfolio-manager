@@ -40,7 +40,8 @@ Monitors:
 
 Data:
   refresh, backfill, snapshot, snapshot-history, snapshot-position
-  news, technicals, levels, levels-refresh, sectors, sync-transactions
+  news, news-unanalyzed, news-analyzed, technicals, levels, levels-refresh
+  sectors, sync-transactions
 
 Watchlists:
   watchlists, watchlist, watchlist-add, watchlist-rm, watchlist-create
@@ -100,7 +101,7 @@ case "$CMD" in
     source "$SCRIPT_DIR/commands/monitors.sh" ;;
 
   # Data
-  refresh|backfill|snapshot|snapshot-history|snapshot-position|news|technicals|levels|levels-refresh|sectors|sync-transactions)
+  refresh|backfill|snapshot|snapshot-history|snapshot-position|news|news-unanalyzed|news-analyzed|technicals|levels|levels-refresh|sectors|sync-transactions)
     source "$SCRIPT_DIR/commands/data.sh" ;;
 
   # Watchlists
