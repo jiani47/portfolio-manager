@@ -36,9 +36,13 @@ for m in conn.execute("SELECT symbol, direction, price_level, label FROM monitor
 
 # 2. Expired trading positions
 for t in conn.execute("""
-    SELECT symbol, shares, entry_price, entry_date, time_limit_days,
-      julianday('now') - julianday(entry_date) as days_held
-    FROM trading_positions WHERE status = 'open'
+    SELECT s.symbol, p.quantity as shares, p.cost_basis / p.quantity as entry_price,
+      substr(p.last_updated, 1, 10) as entry_date, p.time_limit_days,
+      julianday('now') - julianday(p.last_updated) as days_held
+    FROM positions p
+    JOIN securities s ON p.security_id = s.id
+    JOIN accounts a ON p.account_id = a.id
+    WHERE a.book = 'trading' AND p.quantity > 0 AND p.time_limit_days IS NOT NULL
 """).fetchall():
     days_held = int(t['days_held'] or 0)
     days_left = t['time_limit_days'] - days_held
@@ -61,9 +65,13 @@ for o in conn.execute("""
 
 # 4. Trading positions expiring in ≤5 days
 for t in conn.execute("""
-    SELECT symbol, shares, entry_price, entry_date, time_limit_days, stop_price,
-      julianday('now') - julianday(entry_date) as days_held
-    FROM trading_positions WHERE status = 'open'
+    SELECT s.symbol, p.quantity as shares, p.cost_basis / p.quantity as entry_price,
+      substr(p.last_updated, 1, 10) as entry_date, p.time_limit_days, p.stop_price,
+      julianday('now') - julianday(p.last_updated) as days_held
+    FROM positions p
+    JOIN securities s ON p.security_id = s.id
+    JOIN accounts a ON p.account_id = a.id
+    WHERE a.book = 'trading' AND p.quantity > 0 AND p.time_limit_days IS NOT NULL
 """).fetchall():
     days_held = int(t['days_held'] or 0)
     days_left = t['time_limit_days'] - days_held
@@ -535,13 +543,15 @@ PYEOF
 
     # === Trading Position Alerts ===
     TRADE_ALERTS=$(sqlite3 "$DB" "
-      SELECT tp.symbol, tp.shares, tp.entry_price, tp.entry_date, tp.stop_price, tp.time_limit_days,
-        julianday('now') - julianday(tp.entry_date) as days_held,
-        tp.time_limit_days - (julianday('now') - julianday(tp.entry_date)) as days_left,
-        (SELECT ph.close_price FROM price_history ph JOIN securities s ON ph.security_id = s.id
-         WHERE s.symbol = tp.symbol ORDER BY ph.date DESC LIMIT 1) as mtm
-      FROM trading_positions tp
-      WHERE tp.status = 'open';
+      SELECT s.symbol, p.quantity as shares, p.cost_basis / p.quantity as entry_price,
+        substr(p.last_updated, 1, 10) as entry_date, p.stop_price, p.time_limit_days,
+        julianday('now') - julianday(p.last_updated) as days_held,
+        p.time_limit_days - (julianday('now') - julianday(p.last_updated)) as days_left,
+        (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1) as mtm
+      FROM positions p
+      JOIN securities s ON p.security_id = s.id
+      JOIN accounts a ON p.account_id = a.id
+      WHERE a.book = 'trading' AND p.quantity > 0 AND p.time_limit_days IS NOT NULL;
     " 2>/dev/null)
 
     if [ -n "$TRADE_ALERTS" ]; then

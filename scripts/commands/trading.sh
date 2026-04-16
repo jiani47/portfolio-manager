@@ -361,14 +361,18 @@ print(json.dumps(order))
     # Step 3: Log trade
     echo ""
     SEC_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$TE_SYM' LIMIT 1;")
+    TRADE_ACCT=$(sqlite3 "$DB" "SELECT id FROM accounts WHERE book = 'trading' LIMIT 1;")
     TE_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
     NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-    TODAY=$(date +%Y-%m-%d)
     TE_THESIS_ESC=$(echo "$TE_THESIS" | sed "s/'/''/g")
 
-    sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS trading_positions (id TEXT PRIMARY KEY, security_id TEXT NOT NULL, symbol TEXT NOT NULL, entry_date TEXT NOT NULL, entry_price REAL NOT NULL, shares INTEGER NOT NULL, thesis TEXT NOT NULL, stop_price REAL, stop_order_id TEXT, time_limit_days INTEGER NOT NULL DEFAULT 20, status TEXT NOT NULL DEFAULT 'open', exit_date TEXT, exit_price REAL, exit_reason TEXT, pnl REAL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+    # Insert position
+    sqlite3 "$DB" "INSERT INTO positions (id, account_id, security_id, quantity, cost_basis, stop_price, time_limit_days, last_updated) VALUES ('$TE_ID', '$TRADE_ACCT', '$SEC_ID', $TE_SHARES, $(echo "$TE_SHARES * $TE_PRICE" | bc), $TE_STOP, $TE_DAYS, '$NOW');"
 
-    sqlite3 "$DB" "INSERT INTO trading_positions (id, security_id, symbol, entry_date, entry_price, shares, thesis, stop_price, time_limit_days, status, created_at, updated_at) VALUES ('$TE_ID', '$SEC_ID', '$TE_SYM', '$TODAY', $TE_PRICE, $TE_SHARES, '$TE_THESIS_ESC', $TE_STOP, $TE_DAYS, 'open', '$NOW', '$NOW');"
+    # Log intent with thesis
+    INTENT_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+    sqlite3 "$DB" "INSERT INTO position_intents (id, position_id, thesis, created_at, updated_at) VALUES ('$INTENT_ID', '$TE_ID', '$TE_THESIS_ESC', '$NOW', '$NOW');"
+
     echo "  ✓ Trade logged: $TE_SYM $TE_SHARES shares, stop \$$TE_STOP, ${TE_DAYS}d limit"
 
     # Step 4: Prompt for stop order
@@ -571,15 +575,22 @@ PYEOF
       exit 1
     fi
 
+    TRADE_ACCT=$(sqlite3 "$DB" "SELECT id FROM accounts WHERE book = 'trading' LIMIT 1;")
+    if [ -z "$TRADE_ACCT" ]; then
+      echo "Error: No trading account found"
+      exit 1
+    fi
+
     TO_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
     NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-    TODAY=$(date +%Y-%m-%d)
     TO_THESIS_ESC=$(echo "$TO_THESIS" | sed "s/'/''/g")
 
-    # Create table if not exists
-    sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS trading_positions (id TEXT PRIMARY KEY, security_id TEXT NOT NULL, symbol TEXT NOT NULL, entry_date TEXT NOT NULL, entry_price REAL NOT NULL, shares INTEGER NOT NULL, thesis TEXT NOT NULL, stop_price REAL, stop_order_id TEXT, time_limit_days INTEGER NOT NULL DEFAULT 20, status TEXT NOT NULL DEFAULT 'open', exit_date TEXT, exit_price REAL, exit_reason TEXT, pnl REAL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+    # Insert position
+    sqlite3 "$DB" "INSERT INTO positions (id, account_id, security_id, quantity, cost_basis, stop_price, time_limit_days, last_updated) VALUES ('$TO_ID', '$TRADE_ACCT', '$SEC_ID', $TO_SHARES, $(echo "$TO_SHARES * $TO_ENTRY" | bc), $TO_STOP, $TO_DAYS, '$NOW');"
 
-    sqlite3 "$DB" "INSERT INTO trading_positions (id, security_id, symbol, entry_date, entry_price, shares, thesis, stop_price, time_limit_days, status, created_at, updated_at) VALUES ('$TO_ID', '$SEC_ID', '$TO_SYM', '$TODAY', $TO_ENTRY, $TO_SHARES, '$TO_THESIS_ESC', $TO_STOP, $TO_DAYS, 'open', '$NOW', '$NOW');"
+    # Log intent with thesis
+    INTENT_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+    sqlite3 "$DB" "INSERT INTO position_intents (id, position_id, thesis, created_at, updated_at) VALUES ('$INTENT_ID', '$TO_ID', '$TO_THESIS_ESC', '$NOW', '$NOW');"
 
     RISK=$(python3 -c "print(f'\${abs($TO_SHARES * ($TO_ENTRY - $TO_STOP)):.0f}')")
     RISK_PCT=$(python3 -c "print(f'{abs(($TO_ENTRY - $TO_STOP) / $TO_ENTRY * 100):.1f}%')")
@@ -605,25 +616,40 @@ PYEOF
       exit 1
     fi
 
-    TC_TRADE=$(sqlite3 -separator '|' "$DB" "SELECT id, entry_price, shares, entry_date FROM trading_positions WHERE symbol = '$TC_SYM' AND status = 'open' ORDER BY entry_date DESC LIMIT 1;" 2>/dev/null)
+    TC_TRADE=$(sqlite3 -separator '|' "$DB" "
+      SELECT p.id, p.cost_basis, p.quantity, a.name, p.last_updated
+      FROM positions p
+      JOIN securities s ON p.security_id = s.id
+      JOIN accounts a ON p.account_id = a.id
+      WHERE s.symbol = '$TC_SYM' AND a.book = 'trading' AND p.quantity > 0
+      ORDER BY p.last_updated DESC LIMIT 1;
+    " 2>/dev/null)
     if [ -z "$TC_TRADE" ]; then
       echo "Error: No open trade found for $TC_SYM"
       exit 1
     fi
 
     TC_ID=$(echo "$TC_TRADE" | cut -d'|' -f1)
-    TC_ENTRY=$(echo "$TC_TRADE" | cut -d'|' -f2)
+    TC_COST_BASIS=$(echo "$TC_TRADE" | cut -d'|' -f2)
     TC_SHARES=$(echo "$TC_TRADE" | cut -d'|' -f3)
-    TC_DATE=$(echo "$TC_TRADE" | cut -d'|' -f4)
+    TC_DATE=$(echo "$TC_TRADE" | cut -d'|' -f5 | cut -d'T' -f1)
     NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-    TODAY=$(date +%Y-%m-%d)
     TC_REASON_ESC=$(echo "$TC_REASON" | sed "s/'/''/g")
 
+    TC_ENTRY=$(python3 -c "print(f'{$TC_COST_BASIS / $TC_SHARES:.2f}')" 2>/dev/null)
     PNL=$(python3 -c "print(f'{$TC_SHARES * ($TC_EXIT - $TC_ENTRY):.2f}')")
     PNL_PCT=$(python3 -c "print(f'{($TC_EXIT - $TC_ENTRY) / $TC_ENTRY * 100:.1f}')")
     HOLD_DAYS=$(python3 -c "from datetime import datetime; print((datetime.now() - datetime.strptime('$TC_DATE', '%Y-%m-%d')).days)")
 
-    sqlite3 "$DB" "UPDATE trading_positions SET status = 'closed', exit_date = '$TODAY', exit_price = $TC_EXIT, exit_reason = '$TC_REASON_ESC', pnl = $PNL, updated_at = '$NOW' WHERE id = '$TC_ID';"
+    # Close position by setting quantity to 0
+    sqlite3 "$DB" "UPDATE positions SET quantity = 0, last_updated = '$NOW' WHERE id = '$TC_ID';"
+
+    # Log exit reason if provided
+    if [ -n "$TC_REASON" ]; then
+      SEC_ID=$(sqlite3 "$DB" "SELECT id FROM securities WHERE symbol = '$TC_SYM' LIMIT 1;")
+      DEC_ID=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+      sqlite3 "$DB" "INSERT INTO decision_logs (id, security_id, decision_date, decision_type, decision, created_at, updated_at) VALUES ('$DEC_ID', '$SEC_ID', '$NOW', 'trade-exit', '$TC_REASON_ESC', '$NOW', '$NOW');"
+    fi
 
     echo "=== Trade Closed ==="
     echo "  $TC_SYM  $TC_SHARES shares"
@@ -634,7 +660,7 @@ PYEOF
 
   trades)
     # List trading positions: pm-cli.sh trades [all]
-    TRADE_FILTER="AND tp.status = 'open'"
+    TRADE_FILTER="AND p.quantity > 0"
     TRADE_LABEL="Open"
     if [ "$2" = "all" ]; then
       TRADE_FILTER=""
@@ -643,29 +669,41 @@ PYEOF
 
     echo "=== $TRADE_LABEL Trading Positions ==="
     sqlite3 "$DB" "
-      SELECT tp.symbol, tp.shares, tp.entry_price, tp.entry_date, tp.stop_price, tp.time_limit_days,
-        tp.thesis, tp.status, tp.exit_price, tp.pnl,
-        (SELECT ph.close_price FROM price_history ph JOIN securities s ON ph.security_id = s.id
-         WHERE s.symbol = tp.symbol ORDER BY ph.date DESC LIMIT 1) as mtm
-      FROM trading_positions tp
-      WHERE 1=1 $TRADE_FILTER
-      ORDER BY tp.entry_date DESC;
-    " 2>/dev/null | while IFS='|' read -r SYM SHARES ENTRY EDATE STOP DAYS THESIS STATUS EXIT_PX PNL MTM; do
-      if [ "$STATUS" = "open" ]; then
+      SELECT s.symbol, p.quantity, p.cost_basis, p.last_updated, p.stop_price, p.time_limit_days,
+        COALESCE(pi.thesis, '—') as thesis,
+        (SELECT ph.close_price FROM price_history ph WHERE ph.security_id = p.security_id ORDER BY ph.date DESC LIMIT 1) as mtm
+      FROM positions p
+      JOIN securities s ON p.security_id = s.id
+      JOIN accounts a ON p.account_id = a.id
+      LEFT JOIN position_intents pi ON pi.position_id = p.id
+      WHERE a.book = 'trading' $TRADE_FILTER
+      ORDER BY p.last_updated DESC;
+    " 2>/dev/null | while IFS='|' read -r SYM SHARES COST_BASIS UPDATED STOP DAYS THESIS MTM; do
+      if [ -n "$SHARES" ] && [ "$(echo "$SHARES > 0" | bc)" -eq 1 ]; then
+        # Open position
+        ENTRY=$(python3 -c "print(f'{$COST_BASIS / $SHARES:.2f}')" 2>/dev/null)
+        EDATE=$(echo "$UPDATED" | cut -d'T' -f1)
+
         # Compute unrealized P&L
         UPNL=$(python3 -c "print(f'\${$SHARES * ($MTM - $ENTRY):.0f}')" 2>/dev/null)
         UPNL_PCT=$(python3 -c "print(f'{($MTM - $ENTRY) / $ENTRY * 100:.1f}%')" 2>/dev/null)
-        # Check time remaining
-        DAYS_HELD=$(python3 -c "from datetime import datetime; print((datetime.now() - datetime.strptime('$EDATE', '%Y-%m-%d')).days)" 2>/dev/null)
-        DAYS_LEFT=$((DAYS - DAYS_HELD))
-        TIME_WARN=""
-        [ "$DAYS_LEFT" -le 5 ] 2>/dev/null && TIME_WARN=" ⚠ EXPIRING"
-        [ "$DAYS_LEFT" -le 0 ] 2>/dev/null && TIME_WARN=" ⛔ EXPIRED"
 
-        echo "  $SYM  ${SHARES}sh @ \$$ENTRY → \$$MTM (${UPNL_PCT}, $UPNL) | stop \$$STOP | ${DAYS_HELD}d/${DAYS}d${TIME_WARN}"
+        # Check time remaining if time limit set
+        if [ -n "$DAYS" ] && [ "$DAYS" != "" ]; then
+          DAYS_HELD=$(python3 -c "from datetime import datetime; print((datetime.now() - datetime.strptime('$EDATE', '%Y-%m-%d')).days)" 2>/dev/null)
+          DAYS_LEFT=$((DAYS - DAYS_HELD))
+          TIME_WARN=""
+          [ "$DAYS_LEFT" -le 5 ] 2>/dev/null && TIME_WARN=" ⚠ ${DAYS_LEFT}d left"
+          [ "$DAYS_LEFT" -le 0 ] 2>/dev/null && TIME_WARN=" ⚠ EXPIRED"
+          TIME_STR="${DAYS_HELD}d/${DAYS}d${TIME_WARN}"
+        else
+          TIME_STR="no limit"
+        fi
+
+        STOP_STR=$([ -n "$STOP" ] && echo "stop \$$STOP" || echo "no stop")
+
+        echo "  $SYM  ${SHARES}sh @ \$$ENTRY → \$$MTM (${UPNL_PCT}, $UPNL) | $STOP_STR | $TIME_STR"
         echo "    Thesis: $THESIS"
-      else
-        echo "  $SYM  ${SHARES}sh @ \$$ENTRY → \$$EXIT_PX (P&L: \$$PNL) [$STATUS] — entered $EDATE"
       fi
     done
     ;;
