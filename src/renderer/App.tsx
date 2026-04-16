@@ -17,6 +17,7 @@ import PortfolioHistory from './pages/PortfolioHistory';
 import EmsBaskets from './pages/EmsBaskets';
 import Transactions from './pages/Transactions';
 import ThesisReview from './pages/ThesisReview';
+import NewsAnalysis from './pages/NewsAnalysis';
 
 function App() {
   return (
@@ -34,6 +35,7 @@ function App() {
         <Route path="/post-mortems" element={<PostMortems />} />
         <Route path="/earnings-reviews" element={<EarningsReviews />} />
         <Route path="/thesis-review" element={<ThesisReview />} />
+        <Route path="/news-analysis" element={<NewsAnalysis />} />
         <Route path="/broker-pl" element={<BrokerPL />} />
         <Route path="/portfolio-history" element={<PortfolioHistory />} />
         <Route path="/transactions" element={<Transactions />} />

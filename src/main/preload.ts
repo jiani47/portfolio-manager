@@ -306,4 +306,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   approveThesisSuggestion: (id: string) => ipcRenderer.invoke('thesis:approve-suggestion', id),
   rejectThesisSuggestion: (id: string) => ipcRenderer.invoke('thesis:reject-suggestion', id),
   getThesisSuggestionHistory: (opts?: { symbol?: string; limit?: number }) => ipcRenderer.invoke('thesis:get-suggestion-history', opts),
+
+  // News analysis operations
+  getUnanalyzedNews: (limit?: number) => ipcRenderer.invoke('news:get-unanalyzed', limit),
+  getAnalyzedNews: (opts?: { symbol?: string; limit?: number }) => ipcRenderer.invoke('news:get-analyzed', opts),
+  getNewsStats: () => ipcRenderer.invoke('news:get-stats'),
 });

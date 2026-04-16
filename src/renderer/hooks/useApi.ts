@@ -370,6 +370,11 @@ declare global {
       approveThesisSuggestion: (id: string) => Promise<void>;
       rejectThesisSuggestion: (id: string) => Promise<void>;
       getThesisSuggestionHistory: (opts?: { symbol?: string; limit?: number }) => Promise<ThesisUpdateSuggestion[]>;
+
+      // News analysis operations
+      getUnanalyzedNews: (limit?: number) => Promise<Array<{ id: string; symbol: string; title: string; snippet: string; publishedAt: string }>>;
+      getAnalyzedNews: (opts?: { symbol?: string; limit?: number }) => Promise<any[]>;
+      getNewsStats: () => Promise<{ totalUnanalyzed: number; totalAnalyzed: number; highMateriality: number; mediumMateriality: number }>;
     };
   }
 }

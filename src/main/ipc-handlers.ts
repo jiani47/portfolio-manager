@@ -1544,4 +1544,50 @@ export function setupIpcHandlers(
   ipcMain.handle('thesis:approve-suggestion', (_, id: string) => db.approveThesisSuggestion(id, 'app-user'));
   ipcMain.handle('thesis:reject-suggestion', (_, id: string) => db.rejectThesisSuggestion(id, 'app-user'));
   ipcMain.handle('thesis:get-suggestion-history', (_, opts?: { symbol?: string; limit?: number }) => db.getThesisSuggestionHistory(opts));
+
+  // News analysis handlers
+  ipcMain.handle('news:get-unanalyzed', (_, limit = 100) => db.getUnanalyzedNews(limit));
+  ipcMain.handle('news:get-analyzed', (_, opts?: { symbol?: string; limit?: number }) => {
+    const symbol = opts?.symbol;
+    const limit = opts?.limit || 100;
+    if (symbol) {
+      return db.listNewsAnalysisBySymbol(symbol, limit);
+    }
+    // Get all analyzed with news joined
+    const rawDb = db.getRawDb();
+    return rawDb.prepare(`
+      SELECT
+        n.id, n.symbol, n.title, n.snippet, n.source, n.url, n.published_at as publishedAt, n.fetched_at as fetchedAt,
+        na.id as analysisId, na.category, na.materiality, na.urgency, na.confidence,
+        na.symbols_affected as symbolsAffected, na.summary, na.analyzed_at as analyzedAt
+      FROM news n
+      JOIN news_analysis na ON n.id = na.news_id
+      ORDER BY na.analyzed_at DESC
+      LIMIT ?
+    `).all(limit);
+  });
+  ipcMain.handle('news:get-stats', () => {
+    const rawDb = db.getRawDb();
+    const unanalyzed = rawDb.prepare(`
+      SELECT COUNT(*) as count
+      FROM news n
+      LEFT JOIN news_analysis na ON n.id = na.news_id
+      WHERE na.id IS NULL
+    `).get() as { count: number };
+
+    const analyzed = rawDb.prepare(`
+      SELECT
+        COUNT(*) as totalAnalyzed,
+        SUM(CASE WHEN materiality = 'high' THEN 1 ELSE 0 END) as highMateriality,
+        SUM(CASE WHEN materiality = 'medium' THEN 1 ELSE 0 END) as mediumMateriality
+      FROM news_analysis
+    `).get() as { totalAnalyzed: number; highMateriality: number; mediumMateriality: number };
+
+    return {
+      totalUnanalyzed: unanalyzed.count,
+      totalAnalyzed: analyzed.totalAnalyzed,
+      highMateriality: analyzed.highMateriality,
+      mediumMateriality: analyzed.mediumMateriality,
+    };
+  });
 }
