@@ -2864,14 +2864,35 @@ export class Database {
 
   didTaskRunToday(taskId: string): boolean {
     if (!this.db) throw new Error('Database not initialized');
-    // Use ET date so tasks don't re-run after 8pm ET (when UTC date flips)
-    const etDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const etDateStr = etDate.toISOString().split('T')[0];
-    const row = this.db.prepare(`
-      SELECT COUNT(*) as cnt FROM scheduler_task_runs
-      WHERE task_id = ? AND status = 'success' AND started_at >= ?
-    `).get(taskId, etDateStr + 'T00:00:00.000Z') as { cnt: number };
-    return row.cnt > 0;
+
+    // Get today's date in ET timezone
+    const now = new Date();
+    const todayET = now.toLocaleDateString('en-US', {
+      timeZone: 'America/New_York',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+
+    // Get last successful run
+    const lastRun = this.db.prepare(`
+      SELECT started_at FROM scheduler_task_runs
+      WHERE task_id = ? AND status = 'success'
+      ORDER BY started_at DESC
+      LIMIT 1
+    `).get(taskId) as { started_at: string } | undefined;
+
+    if (!lastRun) return false;
+
+    // Check if last run date in ET matches today in ET
+    const lastRunET = new Date(lastRun.started_at).toLocaleDateString('en-US', {
+      timeZone: 'America/New_York',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+
+    return lastRunET === todayET;
   }
 
   // === EOD Snapshot ===
