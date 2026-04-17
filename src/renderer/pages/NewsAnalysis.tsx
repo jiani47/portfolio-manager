@@ -27,6 +27,7 @@ export default function NewsAnalysis() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>('all');
   const [symbols, setSymbols] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [analyzingSymbol, setAnalyzingSymbol] = useState<string | null>(null);
   const [stats, setStats] = useState<{
     totalUnanalyzed: number;
     totalAnalyzed: number;
@@ -105,6 +106,21 @@ export default function NewsAnalysis() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  const handleAnalyzeSymbol = async (symbol: string) => {
+    setAnalyzingSymbol(symbol);
+    try {
+      const result = await window.electronAPI.analyzeSymbolNews(symbol, 20);
+      console.log(`Analyzed ${result.analyzed} articles for ${symbol}, queued ${result.queued} for thesis review`);
+      // Refresh data to show newly analyzed articles
+      await fetchData();
+    } catch (err) {
+      console.error('Failed to analyze symbol:', err);
+      alert(`Failed to analyze ${symbol}: ${(err as Error).message}`);
+    } finally {
+      setAnalyzingSymbol(null);
+    }
+  };
 
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
@@ -233,9 +249,20 @@ export default function NewsAnalysis() {
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([symbol, articles]) => (
               <div key={symbol} className="bg-white rounded-lg border">
-                <div className="px-4 py-3 border-b bg-gray-50">
-                  <h3 className="font-mono font-semibold text-gray-900">{symbol}</h3>
-                  <p className="text-xs text-gray-500 mt-0.5">{articles.length} article{articles.length !== 1 ? 's' : ''}</p>
+                <div className="px-4 py-3 border-b bg-gray-50 flex items-center justify-between">
+                  <div>
+                    <h3 className="font-mono font-semibold text-gray-900">{symbol}</h3>
+                    <p className="text-xs text-gray-500 mt-0.5">{articles.length} article{articles.length !== 1 ? 's' : ''}</p>
+                  </div>
+                  {viewMode === 'unanalyzed' && (
+                    <button
+                      onClick={() => handleAnalyzeSymbol(symbol)}
+                      disabled={analyzingSymbol === symbol}
+                      className="px-3 py-1.5 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-gray-400 text-white rounded-lg font-medium transition-colors"
+                    >
+                      {analyzingSymbol === symbol ? 'Analyzing...' : 'Analyze Now'}
+                    </button>
+                  )}
                 </div>
                 <div className="divide-y">
                   {articles.map(article => (

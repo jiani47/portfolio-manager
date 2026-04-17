@@ -373,6 +373,7 @@ declare global {
 
       // News analysis operations
       getUnanalyzedNews: (limit?: number) => Promise<Array<{ id: string; symbol: string; title: string; snippet: string; publishedAt: string }>>;
+      analyzeSymbolNews: (symbol: string, limit?: number) => Promise<{ analyzed: number; queued: number }>;
       getAnalyzedNews: (opts?: { symbol?: string; limit?: number }) => Promise<any[]>;
       getNewsStats: () => Promise<{ totalUnanalyzed: number; totalAnalyzed: number; highMateriality: number; mediumMateriality: number }>;
     };

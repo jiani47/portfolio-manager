@@ -309,6 +309,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // News analysis operations
   getUnanalyzedNews: (limit?: number) => ipcRenderer.invoke('news:get-unanalyzed', limit),
+  analyzeSymbolNews: (symbol: string, limit?: number) => ipcRenderer.invoke('news:analyze-symbol', symbol, limit),
   getAnalyzedNews: (opts?: { symbol?: string; limit?: number }) => ipcRenderer.invoke('news:get-analyzed', opts),
   getNewsStats: () => ipcRenderer.invoke('news:get-stats'),
 });

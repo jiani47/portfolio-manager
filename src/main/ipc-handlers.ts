@@ -1547,6 +1547,14 @@ export function setupIpcHandlers(
 
   // News analysis handlers
   ipcMain.handle('news:get-unanalyzed', (_, limit = 100) => db.getUnanalyzedNews(limit));
+  ipcMain.handle('news:analyze-symbol', async (_, symbol: string, limit = 20) => {
+    const settings = store.get('settings');
+    if (!settings || settings.aiProvider === 'none') {
+      throw new Error('AI provider not configured');
+    }
+    const classifier = new (await import('./news-classifier-service')).NewsClassifierService(db, settings);
+    return classifier.classifySymbolNews(symbol, limit);
+  });
   ipcMain.handle('news:get-analyzed', (_, opts?: { symbol?: string; limit?: number }) => {
     const symbol = opts?.symbol;
     const limit = opts?.limit || 100;
