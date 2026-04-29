@@ -62,6 +62,9 @@ export class NewsClassifierService {
           confidence: classification.confidence,
           symbolsAffected: classification.symbolsAffected.join(','),
           summary: classification.summary,
+          sentiment: classification.sentiment,
+          sentimentScore: classification.sentimentScore,
+          readAt: null,
           analyzedAt: new Date().toISOString(),
         });
 
@@ -132,6 +135,9 @@ export class NewsClassifierService {
           confidence: classification.confidence,
           symbolsAffected: classification.symbolsAffected.join(','),
           summary: classification.summary,
+          sentiment: classification.sentiment,
+          sentimentScore: classification.sentimentScore,
+          readAt: null,
           analyzedAt: new Date().toISOString(),
         });
 
@@ -198,6 +204,9 @@ export class NewsClassifierService {
       confidence: classification.confidence,
       symbolsAffected: classification.symbolsAffected.join(','),
       summary: classification.summary,
+      sentiment: classification.sentiment,
+      sentimentScore: classification.sentimentScore,
+      readAt: null,
       analyzedAt: new Date().toISOString(),
     });
 

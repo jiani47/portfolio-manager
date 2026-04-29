@@ -376,6 +376,11 @@ declare global {
       analyzeSymbolNews: (symbol: string, limit?: number) => Promise<{ analyzed: number; queued: number }>;
       getAnalyzedNews: (opts?: { symbol?: string; limit?: number }) => Promise<any[]>;
       getNewsStats: () => Promise<{ totalUnanalyzed: number; totalAnalyzed: number; highMateriality: number; mediumMateriality: number }>;
+      markNewsAsRead: (newsId: string) => Promise<void>;
+      markMultipleNewsAsRead: (newsIds: string[]) => Promise<void>;
+      getTodaysQueue: () => Promise<any[]>;
+      getNewsForPositions: (days?: number) => Promise<any[]>;
+      getNewsForWatchlist: (days?: number) => Promise<any[]>;
     };
   }
 }

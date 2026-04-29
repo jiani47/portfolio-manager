@@ -1598,4 +1598,82 @@ export function setupIpcHandlers(
       mediumMateriality: analyzed.mediumMateriality,
     };
   });
+
+  // Mark news as read
+  ipcMain.handle('news:mark-as-read', (_, newsId: string) => db.markNewsAsRead(newsId));
+  ipcMain.handle('news:mark-multiple-as-read', (_, newsIds: string[]) => db.markMultipleNewsAsRead(newsIds));
+
+  // Today's queue: HIGH/MEDIUM materiality news from last 24 hours, unread
+  ipcMain.handle('news:get-todays-queue', () => {
+    const rawDb = db.getRawDb();
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    return rawDb.prepare(`
+      SELECT
+        n.id, n.symbol, n.title, n.snippet, n.source, n.url, n.published_at as publishedAt, n.fetched_at as fetchedAt,
+        na.id as analysisId, na.category, na.materiality, na.urgency, na.confidence,
+        na.symbols_affected as symbolsAffected, na.summary, na.sentiment, na.sentiment_score as sentimentScore,
+        na.read_at as readAt, na.analyzed_at as analyzedAt
+      FROM news n
+      JOIN news_analysis na ON n.id = na.news_id
+      WHERE na.materiality IN ('high', 'medium')
+        AND n.published_at >= ?
+        AND na.read_at IS NULL
+      ORDER BY
+        CASE na.urgency
+          WHEN 'breaking' THEN 1
+          WHEN 'high' THEN 2
+          WHEN 'medium' THEN 3
+          ELSE 4
+        END,
+        CASE na.materiality
+          WHEN 'high' THEN 1
+          WHEN 'medium' THEN 2
+          ELSE 3
+        END,
+        n.published_at DESC
+    `).all(cutoff);
+  });
+
+  // News for current positions (non-cash holdings)
+  ipcMain.handle('news:get-for-positions', (_, days = 7) => {
+    const rawDb = db.getRawDb();
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    return rawDb.prepare(`
+      SELECT
+        n.id, n.symbol, n.title, n.snippet, n.source, n.url, n.published_at as publishedAt, n.fetched_at as fetchedAt,
+        na.id as analysisId, na.category, na.materiality, na.urgency, na.confidence,
+        na.symbols_affected as symbolsAffected, na.summary, na.sentiment, na.sentiment_score as sentimentScore,
+        na.read_at as readAt, na.analyzed_at as analyzedAt
+      FROM news n
+      JOIN news_analysis na ON n.id = na.news_id
+      WHERE n.symbol IN (
+        SELECT DISTINCT s.symbol
+        FROM positions p
+        JOIN securities s ON p.security_id = s.id
+        WHERE s.symbol != 'USD' AND p.quantity != 0
+      )
+      AND n.published_at >= ?
+      ORDER BY n.symbol, n.published_at DESC
+    `).all(cutoff);
+  });
+
+  // News for watchlist symbols
+  ipcMain.handle('news:get-for-watchlist', (_, days = 7) => {
+    const rawDb = db.getRawDb();
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    return rawDb.prepare(`
+      SELECT
+        n.id, n.symbol, n.title, n.snippet, n.source, n.url, n.published_at as publishedAt, n.fetched_at as fetchedAt,
+        na.id as analysisId, na.category, na.materiality, na.urgency, na.confidence,
+        na.symbols_affected as symbolsAffected, na.summary, na.sentiment, na.sentiment_score as sentimentScore,
+        na.read_at as readAt, na.analyzed_at as analyzedAt,
+        w.name as watchlistName
+      FROM news n
+      JOIN news_analysis na ON n.id = na.news_id
+      JOIN watchlist_items wi ON n.symbol = wi.symbol
+      JOIN watchlists w ON wi.watchlist_id = w.id
+      WHERE n.published_at >= ?
+      ORDER BY n.symbol, n.published_at DESC
+    `).all(cutoff);
+  });
 }

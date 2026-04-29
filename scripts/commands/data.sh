@@ -1449,4 +1449,236 @@ conn.close()
 print(f"\nSynced {total_synced} new transactions ({total_skipped} duplicates skipped)")
 PYEOF
     ;;
+
+  news-analyze)
+    # Manually trigger AI news classification for a specific symbol
+    SYMBOL="$2"
+    LIMIT="${3:-20}"
+
+    if [ -z "$SYMBOL" ]; then
+      echo "Usage: pm-cli.sh news-analyze <SYMBOL> [limit]"
+      echo ""
+      echo "Manually classify unanalyzed news for a symbol using AI."
+      echo "This will use your configured AI provider (Anthropic/OpenAI)."
+      exit 1
+    fi
+
+    SYMBOL=$(echo "$SYMBOL" | tr '[:lower:]' '[:upper:]')
+
+    # Check AI provider is configured (read from app config.json)
+    APP_CONFIG="$HOME/Library/Application Support/portfolio-manager/config.json"
+    if [ ! -f "$APP_CONFIG" ]; then
+      echo "Error: App config not found at $APP_CONFIG"
+      exit 1
+    fi
+
+    AI_PROVIDER=$(python3 -c "import json; print(json.load(open('$APP_CONFIG')).get('settings', {}).get('aiProvider', 'none'))" 2>/dev/null)
+    if [ "$AI_PROVIDER" = "none" ] || [ -z "$AI_PROVIDER" ]; then
+      echo "Error: AI provider not configured"
+      echo "Configure an AI provider in Settings first"
+      exit 1
+    fi
+
+    # Count unanalyzed news for this symbol
+    UNANALYZED=$(sqlite3 "$DB" "
+      SELECT COUNT(*)
+      FROM news n
+      LEFT JOIN news_analysis na ON n.id = na.news_id
+      WHERE na.id IS NULL AND n.symbol = '$SYMBOL'
+    ")
+
+    echo "=== Manual News Analysis: $SYMBOL ==="
+    echo "  AI Provider: $AI_PROVIDER"
+    echo "  Unanalyzed articles: $UNANALYZED"
+    echo "  Will analyze: $([ $UNANALYZED -lt $LIMIT ] && echo $UNANALYZED || echo $LIMIT) articles"
+    echo ""
+
+    if [ "$UNANALYZED" -eq 0 ]; then
+      echo "  No unanalyzed news for $SYMBOL"
+      exit 0
+    fi
+
+    # Get AI API key
+    AI_API_KEY=$(python3 -c "import json; print(json.load(open('$APP_CONFIG')).get('settings', {}).get('aiApiKey', ''))" 2>/dev/null)
+    if [ -z "$AI_API_KEY" ]; then
+      echo "Error: AI API key not found in settings"
+      exit 1
+    fi
+
+    # Get unanalyzed news items for this symbol
+    NEWS_JSON=$(sqlite3 "$DB" "
+      SELECT n.id, n.symbol, n.title, n.snippet, n.published_at
+      FROM news n
+      LEFT JOIN news_analysis na ON n.id = na.news_id
+      WHERE na.id IS NULL AND n.symbol = '$SYMBOL'
+      ORDER BY n.published_at DESC
+      LIMIT $LIMIT
+    " | python3 -c "
+import sys, json
+items = []
+for line in sys.stdin:
+    parts = line.strip().split('|')
+    if len(parts) >= 5:
+        items.append({
+            'id': parts[0],
+            'symbol': parts[1],
+            'title': parts[2],
+            'snippet': parts[3] if len(parts) > 3 else '',
+            'publishedAt': parts[4] if len(parts) > 4 else ''
+        })
+print(json.dumps(items))
+")
+
+    # Save news JSON to temp file
+    TMPFILE=$(mktemp)
+    echo "$NEWS_JSON" > "$TMPFILE"
+
+    # Process each article
+    echo "  Starting classification..."
+    python3 << PYEOF
+import sys, json, sqlite3, uuid
+from datetime import datetime, timezone
+
+# Read news items from temp file
+with open('$TMPFILE', 'r') as f:
+    news_items = json.loads(f.read())
+
+provider = '$AI_PROVIDER'
+api_key = '$AI_API_KEY'
+symbol = '$SYMBOL'
+db_path = '$DB'
+
+if provider == 'anthropic':
+    try:
+        from anthropic import Anthropic
+        client = Anthropic(api_key=api_key)
+    except ImportError:
+        print("  Error: anthropic package not installed. Run: pip install anthropic")
+        sys.exit(1)
+else:
+    print(f"  Error: Unsupported AI provider: {provider}")
+    sys.exit(1)
+
+analyzed_count = 0
+queued_count = 0
+
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+
+for article in news_items:
+    try:
+        # Build classification prompt
+        prompt = f"""Classify this news article for investment portfolio impact:
+
+Symbol: {article['symbol']}
+Title: {article['title']}
+Snippet: {article.get('snippet', '')}
+Published: {article.get('publishedAt', '')}
+
+Classify on these dimensions:
+1. Category: earnings, guidance, product, regulatory, macro, sector, other
+2. Materiality: high (fundamental change), medium (notable event), low (routine news)
+3. Urgency: breaking (immediate attention), high (review today), medium (review soon), low (FYI)
+4. Confidence: 0-1.0 (how certain are you of this classification)
+5. Symbols affected: which ticker symbols are materially impacted (including {article['symbol']})
+6. Summary: 1 sentence summary of the key information
+7. Sentiment: strong_bull, bull, neutral, bear, strong_bear
+8. Sentiment score: -1.0 (very bearish) to +1.0 (very bullish)
+
+Return ONLY a JSON object:
+{{
+  "category": "...",
+  "materiality": "...",
+  "urgency": "...",
+  "confidence": 0.85,
+  "symbolsAffected": ["TSM"],
+  "summary": "...",
+  "sentiment": "...",
+  "sentimentScore": 0.6
+}}"""
+
+        # Call Anthropic API (using sonnet - should work with all API keys)
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        response_text = message.content[0].text
+
+        # Parse JSON from response
+        json_start = response_text.find('{')
+        json_end = response_text.rfind('}') + 1
+        if json_start == -1 or json_end == 0:
+            print(f"  ⚠️  Skipping {article['title'][:50]} - no JSON in response")
+            continue
+
+        result = json.loads(response_text[json_start:json_end])
+
+        # Save analysis
+        analysis_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        cur.execute("""
+            INSERT INTO news_analysis (
+                id, news_id, symbol, category, materiality, urgency,
+                confidence, symbols_affected, summary, sentiment,
+                sentiment_score, analyzed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            analysis_id,
+            article['id'],
+            article['symbol'],
+            result.get('category', 'other'),
+            result.get('materiality', 'low'),
+            result.get('urgency', 'low'),
+            result.get('confidence', 0.5),
+            ','.join(result.get('symbolsAffected', [article['symbol']])),
+            result.get('summary', article['title']),
+            result.get('sentiment', 'neutral'),
+            result.get('sentimentScore', 0),
+            now
+        ))
+
+        analyzed_count += 1
+
+        # Queue for thesis review if material and confident
+        if result.get('confidence', 0) >= 0.6 and result.get('materiality') in ('high', 'medium'):
+            # Get security ID
+            sec_row = cur.execute("SELECT id FROM securities WHERE symbol = ?", (article['symbol'],)).fetchone()
+            if sec_row:
+                # Check if position exists
+                pos_row = cur.execute(
+                    "SELECT COUNT(*) FROM positions WHERE security_id = ? AND quantity != 0",
+                    (sec_row[0],)
+                ).fetchone()
+
+                if pos_row and pos_row[0] > 0:
+                    queue_id = str(uuid.uuid4())
+                    cur.execute("""
+                        INSERT INTO thesis_review_queue (id, news_id, symbol, security_id, queued_at, status)
+                        VALUES (?, ?, ?, ?, ?, 'pending')
+                    """, (queue_id, article['id'], article['symbol'], sec_row[0], now))
+                    queued_count += 1
+
+        print(f"  ✓ {article['title'][:60]}...")
+
+    except Exception as e:
+        print(f"  ✗ Error processing article: {e}")
+        continue
+
+conn.commit()
+conn.close()
+
+print()
+print(f"  ✓ Analyzed: {analyzed_count} articles")
+print(f"  ✓ Queued for thesis review: {queued_count} articles")
+print()
+print(f"  Run: pm-cli.sh news-analyzed {symbol}")
+PYEOF
+
+    # Clean up temp file
+    rm -f "$TMPFILE"
+    ;;
+
 esac

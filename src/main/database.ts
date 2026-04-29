@@ -37,6 +37,7 @@ import {
   NewsCategory,
   NewsMateriality,
   NewsUrgency,
+  NewsSentiment,
   ThesisReviewQueueItem,
   ThesisReviewStatus,
   ThesisUpdateSuggestion,
@@ -855,6 +856,25 @@ export class Database {
     } catch {
       // Column already exists
     }
+
+    // Migration: add sentiment columns to news_analysis
+    try {
+      this.db.exec(`ALTER TABLE news_analysis ADD COLUMN sentiment TEXT`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.db.exec(`ALTER TABLE news_analysis ADD COLUMN sentiment_score REAL`);
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.db.exec(`ALTER TABLE news_analysis ADD COLUMN read_at TEXT`);
+    } catch {
+      // Column already exists
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_news_analysis_sentiment ON news_analysis(sentiment)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_news_analysis_read ON news_analysis(read_at)');
 
     // Thesis review queue - material news pending EOD batch review
     this.db.exec(`
@@ -4288,8 +4308,8 @@ export class Database {
     if (!this.db) throw new Error('Database not initialized');
     const id = uuidv4();
     this.db.prepare(`
-      INSERT INTO news_analysis (id, news_id, symbol, category, materiality, urgency, confidence, symbols_affected, summary, analyzed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO news_analysis (id, news_id, symbol, category, materiality, urgency, confidence, symbols_affected, summary, sentiment, sentiment_score, read_at, analyzed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       analysis.newsId,
@@ -4300,6 +4320,9 @@ export class Database {
       analysis.confidence,
       analysis.symbolsAffected,
       analysis.summary,
+      analysis.sentiment || null,
+      analysis.sentimentScore || null,
+      analysis.readAt || null,
       analysis.analyzedAt
     );
     // Update news table with analyzed_at timestamp
@@ -4343,6 +4366,25 @@ export class Database {
     }));
   }
 
+  markNewsAsRead(newsId: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.prepare(`
+      UPDATE news_analysis
+      SET read_at = ?
+      WHERE news_id = ? AND read_at IS NULL
+    `).run(new Date().toISOString(), newsId);
+  }
+
+  markMultipleNewsAsRead(newsIds: string[]): void {
+    if (!this.db) throw new Error('Database not initialized');
+    const placeholders = newsIds.map(() => '?').join(',');
+    this.db.prepare(`
+      UPDATE news_analysis
+      SET read_at = ?
+      WHERE news_id IN (${placeholders}) AND read_at IS NULL
+    `).run([new Date().toISOString(), ...newsIds]);
+  }
+
   private mapRowToNewsAnalysis = (row: unknown): NewsAnalysis => {
     const r = row as Record<string, unknown>;
     return {
@@ -4355,6 +4397,9 @@ export class Database {
       confidence: r.confidence as number,
       symbolsAffected: r.symbols_affected as string | null,
       summary: r.summary as string | null,
+      sentiment: (r.sentiment as NewsSentiment) || null,
+      sentimentScore: (r.sentiment_score as number) || null,
+      readAt: (r.read_at as string) || null,
       analyzedAt: r.analyzed_at as string,
     };
   };

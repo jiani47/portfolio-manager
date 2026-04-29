@@ -312,4 +312,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   analyzeSymbolNews: (symbol: string, limit?: number) => ipcRenderer.invoke('news:analyze-symbol', symbol, limit),
   getAnalyzedNews: (opts?: { symbol?: string; limit?: number }) => ipcRenderer.invoke('news:get-analyzed', opts),
   getNewsStats: () => ipcRenderer.invoke('news:get-stats'),
+  markNewsAsRead: (newsId: string) => ipcRenderer.invoke('news:mark-as-read', newsId),
+  markMultipleNewsAsRead: (newsIds: string[]) => ipcRenderer.invoke('news:mark-multiple-as-read', newsIds),
+  getTodaysQueue: () => ipcRenderer.invoke('news:get-todays-queue'),
+  getNewsForPositions: (days?: number) => ipcRenderer.invoke('news:get-for-positions', days),
+  getNewsForWatchlist: (days?: number) => ipcRenderer.invoke('news:get-for-watchlist', days),
 });

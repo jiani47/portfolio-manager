@@ -13,6 +13,7 @@ import {
   NewsCategory,
   NewsMateriality,
   NewsUrgency,
+  NewsSentiment,
   SuggestionType,
   ThesisImpact,
 } from '../shared/types';
@@ -424,6 +425,8 @@ ${allocation.some(a => a.percentage > 50) ? '- Consider diversifying - one asset
     confidence: number;
     symbolsAffected: string[];
     summary: string;
+    sentiment: NewsSentiment;
+    sentimentScore: number;
   }> {
     if (this.provider === 'none' || (!this.anthropic && !this.openai)) {
       // Fallback: basic keyword matching
@@ -444,6 +447,13 @@ Classify on these dimensions:
 4. Confidence: 0-100 (how certain are you of this classification)
 5. Symbols affected: which ticker symbols are materially impacted (including ${article.symbol})
 6. Summary: 1 sentence summary of the key information
+7. Sentiment (from shareholder perspective):
+   - strong_bull: Major positive (e.g. earnings beat, new revenue stream, competitive win)
+   - bull: Positive news (incremental good news)
+   - neutral: Informational, no clear impact
+   - bear: Negative news (incremental bad news)
+   - strong_bear: Major negative (e.g. earnings miss, revenue decline, regulatory threat)
+8. Sentiment score: -1.0 (very bearish) to +1.0 (very bullish)
 
 Return ONLY a JSON object:
 {
@@ -452,7 +462,9 @@ Return ONLY a JSON object:
   "urgency": "...",
   "confidence": 0.85,
   "symbolsAffected": ["AAPL"],
-  "summary": "..."
+  "summary": "...",
+  "sentiment": "bull",
+  "sentimentScore": 0.6
 }`;
 
     try {
@@ -504,6 +516,8 @@ Return ONLY a JSON object:
         confidence: parsed.confidence || 0.5,
         symbolsAffected: parsed.symbolsAffected || [article.symbol],
         summary: parsed.summary || article.title,
+        sentiment: (parsed.sentiment as NewsSentiment) || NewsSentiment.NEUTRAL,
+        sentimentScore: parsed.sentimentScore || 0,
       };
     } catch (error) {
       console.error('News classification error:', error);
@@ -518,6 +532,8 @@ Return ONLY a JSON object:
     confidence: number;
     symbolsAffected: string[];
     summary: string;
+    sentiment: NewsSentiment;
+    sentimentScore: number;
   } {
     const text = `${article.title} ${article.snippet}`.toLowerCase();
 
@@ -532,6 +548,24 @@ Return ONLY a JSON object:
     if (category === NewsCategory.EARNINGS || category === NewsCategory.GUIDANCE) materiality = NewsMateriality.HIGH;
     else if (category === NewsCategory.REGULATORY || category === NewsCategory.PRODUCT) materiality = NewsMateriality.MEDIUM;
 
+    // Basic sentiment detection
+    let sentiment: NewsSentiment = NewsSentiment.NEUTRAL;
+    let sentimentScore = 0;
+
+    const bullishWords = ['beat', 'exceed', 'surge', 'gain', 'rise', 'growth', 'strong', 'positive', 'win', 'award'];
+    const bearishWords = ['miss', 'decline', 'fall', 'loss', 'weak', 'negative', 'cut', 'fine', 'lawsuit', 'layoff'];
+
+    const bullCount = bullishWords.filter(word => text.includes(word)).length;
+    const bearCount = bearishWords.filter(word => text.includes(word)).length;
+
+    if (bullCount > bearCount) {
+      sentiment = bullCount >= 2 ? NewsSentiment.STRONG_BULL : NewsSentiment.BULL;
+      sentimentScore = bullCount >= 2 ? 0.7 : 0.4;
+    } else if (bearCount > bullCount) {
+      sentiment = bearCount >= 2 ? NewsSentiment.STRONG_BEAR : NewsSentiment.BEAR;
+      sentimentScore = bearCount >= 2 ? -0.7 : -0.4;
+    }
+
     return {
       category,
       materiality,
@@ -539,6 +573,8 @@ Return ONLY a JSON object:
       confidence: 0.4, // Low confidence for basic classification
       symbolsAffected: [article.symbol],
       summary: article.title,
+      sentiment,
+      sentimentScore,
     };
   }
 

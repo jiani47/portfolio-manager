@@ -1068,6 +1068,14 @@ export enum NewsUrgency {
   LOW = 'low',
 }
 
+export enum NewsSentiment {
+  STRONG_BULL = 'strong_bull',
+  BULL = 'bull',
+  NEUTRAL = 'neutral',
+  BEAR = 'bear',
+  STRONG_BEAR = 'strong_bear',
+}
+
 export interface NewsAnalysis {
   id: string;
   newsId: string;
@@ -1078,6 +1086,9 @@ export interface NewsAnalysis {
   confidence: number;
   symbolsAffected: string | null;
   summary: string | null;
+  sentiment: NewsSentiment | null;
+  sentimentScore: number | null; // -1 to +1 scale
+  readAt: string | null; // "Mark as read" timestamp
   analyzedAt: string;
 }
 
