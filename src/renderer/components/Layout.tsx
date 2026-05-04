@@ -24,6 +24,7 @@ const navSections: NavSection[] = [
     items: [
       { path: '/', label: 'Dashboard', icon: DashboardIcon },
       { path: '/holdings', label: 'Holdings', icon: HoldingsIcon },
+      { path: '/allocations', label: 'Allocations', icon: AllocationsIcon },
       { path: '/watchlists', label: 'Watchlists', icon: WatchlistIcon },
       { path: '/monitors', label: 'Monitors', icon: MonitorIcon },
       { path: '/portfolio-history', label: 'History', icon: HistoryIcon },
@@ -287,6 +288,15 @@ function NewsAnalysisIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
+    </svg>
+  );
+}
+
+function AllocationsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" />
     </svg>
   );
 }

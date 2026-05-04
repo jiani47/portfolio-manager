@@ -4,6 +4,7 @@ import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import type { StreamingQuote, NewsArticle, EarningsEvent } from '../../shared/types';
 import { calculateAllocationDrift, type AllocationRow } from '../../shared/analytics/allocation';
 import { format, addDays } from 'date-fns';
+import ChartModal from '../components/ChartModal';
 
 const TIER_COLORS: Record<string, string> = {
   'Core': '#3b82f6',
@@ -43,6 +44,7 @@ export default function Dashboard() {
   const [newsTab, setNewsTab] = useState<'all' | 'positions' | 'watchlist'>('all');
   const [watchlistSymbols, setWatchlistSymbols] = useState<string[]>([]);
   const [earningsDays, setEarningsDays] = useState<number>(14);
+  const [chartSymbol, setChartSymbol] = useState<{ symbol: string; name?: string } | null>(null);
 
   useEffect(() => {
     fetchSummary();
@@ -735,7 +737,20 @@ export default function Dashboard() {
                           <td className="py-1.5">
                             <div className="flex items-center gap-2">
                               <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: tierColor }} title={a.tier} />
-                              <span className="font-medium text-gray-900">{a.symbol}</span>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const position = positions.find(p => {
+                                    const sec = securityMap.get(p.securityId);
+                                    return sec?.symbol === a.symbol;
+                                  });
+                                  const security = position ? securityMap.get(position.securityId) : null;
+                                  setChartSymbol({ symbol: a.symbol, name: security?.name });
+                                }}
+                                className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                              >
+                                {a.symbol}
+                              </button>
                               {hasTranches && (
                                 <span className="text-xs text-blue-500" title={`${totalScheduled} shares scheduled`}>
                                   {isExpanded ? '▾' : '▸'} {totalScheduled >= 0 ? '+' : ''}{totalScheduled}
@@ -941,6 +956,14 @@ export default function Dashboard() {
             </div>
           )}
         </>
+      )}
+
+      {chartSymbol && (
+        <ChartModal
+          symbol={chartSymbol.symbol}
+          name={chartSymbol.name}
+          onClose={() => setChartSymbol(null)}
+        />
       )}
     </div>
   );

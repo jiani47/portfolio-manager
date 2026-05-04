@@ -18,6 +18,7 @@ import EmsBaskets from './pages/EmsBaskets';
 import Transactions from './pages/Transactions';
 import ThesisReview from './pages/ThesisReview';
 import NewsAnalysis from './pages/NewsAnalysis';
+import Allocations from './pages/Allocations';
 
 function App() {
   return (
@@ -25,6 +26,7 @@ function App() {
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/holdings" element={<Holdings />} />
+        <Route path="/allocations" element={<Allocations />} />
         <Route path="/tax-lots" element={<TaxLots />} />
         <Route path="/daily-ritual" element={<DailyRitual />} />
         <Route path="/orders" element={<Orders />} />
