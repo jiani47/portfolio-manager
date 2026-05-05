@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
-import { usePositions, useSecurities, usePositionIntents, useAnalytics } from '../hooks/useApi';
+import { usePositions, useSecurities, usePositionIntents, useAnalytics, useAccounts } from '../hooks/useApi';
 import { useStreamingQuotes } from '../hooks/useStreamingQuotes';
 import type { PositionIntent } from '../../shared/types';
 
@@ -11,7 +11,8 @@ const TIER_COLORS: Record<string, string> = {
 };
 
 interface AllocationRow {
-  positionId: string;
+  positionId: string; // For single-account positions, or first position ID for aggregated
+  positionIds: string[]; // All position IDs that contribute to this row (for aggregated)
   symbol: string;
   name: string;
   currentPct: number;
@@ -22,6 +23,7 @@ interface AllocationRow {
   tier: string | null;
   sector: string | null;
   isCash: boolean;
+  quantity: number;
 }
 
 interface PendingChange {
@@ -31,6 +33,7 @@ interface PendingChange {
 
 export default function Allocations() {
   const { positions, loading: positionsLoading, fetchPositions } = usePositions();
+  const { accounts, fetchAccounts } = useAccounts();
   const { securities, fetchSecurities } = useSecurities();
   const { intents, fetchIntents } = usePositionIntents();
   const { positionBetas, analytics: portfolioAnalytics, fetchAnalytics } = useAnalytics();
@@ -41,10 +44,26 @@ export default function Allocations() {
 
   useEffect(() => {
     fetchPositions();
+    fetchAccounts();
     fetchSecurities();
     fetchIntents();
     fetchAnalytics(90);
-  }, [fetchPositions, fetchSecurities, fetchIntents, fetchAnalytics]);
+  }, [fetchPositions, fetchAccounts, fetchSecurities, fetchIntents, fetchAnalytics]);
+
+  // Build account map
+  const accountMap = useMemo(() => {
+    const map = new Map();
+    accounts.forEach(a => map.set(a.id, a));
+    return map;
+  }, [accounts]);
+
+  // Filter positions to only investing accounts
+  const investingPositions = useMemo(() => {
+    return positions.filter(p => {
+      const account = accountMap.get(p.accountId);
+      return account?.book === 'investing';
+    });
+  }, [positions, accountMap]);
 
   // Build security map
   const securityMap = useMemo(() => {
@@ -53,12 +72,12 @@ export default function Allocations() {
     return map;
   }, [securities]);
 
-  // Build symbol list for streaming quotes
+  // Build symbol list for streaming quotes (from investing positions only)
   const symbolList = useMemo(() => {
-    return positions
+    return investingPositions
       .map(p => securityMap.get(p.securityId)?.symbol)
       .filter((s): s is string => !!s);
-  }, [positions, securityMap]);
+  }, [investingPositions, securityMap]);
 
   const { quotes: streamingQuotes } = useStreamingQuotes(symbolList);
 
@@ -69,11 +88,12 @@ export default function Allocations() {
     return map;
   }, [positionBetas]);
 
-  // Build allocation rows
+  // Build allocation rows (aggregated by symbol across investing accounts)
   const allocationRows = useMemo((): AllocationRow[] => {
-    if (positions.length === 0) return [];
+    if (investingPositions.length === 0) return [];
 
-    const totalMV = positions.reduce((sum, pos) => {
+    // First, calculate total portfolio market value
+    const totalMV = investingPositions.reduce((sum, pos) => {
       const security = securityMap.get(pos.securityId);
       if (!security) return sum;
       const quote = streamingQuotes.get(security.symbol);
@@ -84,17 +104,50 @@ export default function Allocations() {
 
     if (totalMV === 0) return [];
 
-    return positions.map(pos => {
-      const security = securityMap.get(pos.securityId);
-      if (!security) return null;
+    // Aggregate positions by symbol
+    const symbolMap = new Map<string, {
+      positionIds: string[];
+      securityId: string;
+      totalQuantity: number;
+      totalMV: number;
+    }>();
 
-      const intent = intents.get(pos.id);
+    investingPositions.forEach(pos => {
+      const security = securityMap.get(pos.securityId);
+      if (!security) return;
+
       const quote = streamingQuotes.get(security.symbol);
       const price = quote?.last || (pos.marketValue && pos.quantity > 0 ? pos.marketValue / pos.quantity : 0);
       const mv = pos.quantity * price;
-      const currentPct = (mv / totalMV) * 100;
 
-      const pending = pendingChanges.get(pos.id);
+      const existing = symbolMap.get(security.symbol);
+      if (existing) {
+        existing.positionIds.push(pos.id);
+        existing.totalQuantity += pos.quantity;
+        existing.totalMV += mv;
+      } else {
+        symbolMap.set(security.symbol, {
+          positionIds: [pos.id],
+          securityId: pos.securityId,
+          totalQuantity: pos.quantity,
+          totalMV: mv,
+        });
+      }
+    });
+
+    // Build rows from aggregated data
+    return Array.from(symbolMap.entries()).map(([symbol, agg]) => {
+      const security = securityMap.get(agg.securityId);
+      if (!security) return null;
+
+      const currentPct = (agg.totalMV / totalMV) * 100;
+
+      // For aggregated positions, use intent from first position
+      // (Intent should be the same across accounts for same symbol)
+      const primaryPositionId = agg.positionIds[0];
+      const intent = intents.get(primaryPositionId);
+
+      const pending = pendingChanges.get(primaryPositionId);
       const targetPct = pending?.targetPct !== undefined ? pending.targetPct : intent?.targetAllocationPct ?? null;
       const tier = pending?.tier !== undefined ? pending.tier : intent?.tier ?? null;
 
@@ -103,20 +156,22 @@ export default function Allocations() {
       const isCash = security.type === 'cash';
 
       return {
-        positionId: pos.id,
+        positionId: primaryPositionId,
+        positionIds: agg.positionIds,
         symbol: security.symbol,
         name: security.name,
         currentPct,
         targetPct,
         drift,
         beta,
-        marketValue: mv,
+        marketValue: agg.totalMV,
         tier,
         sector: security.sector ?? null,
         isCash,
+        quantity: agg.totalQuantity,
       };
     }).filter((r): r is AllocationRow => r !== null);
-  }, [positions, securityMap, intents, streamingQuotes, betaMap, pendingChanges]);
+  }, [investingPositions, securityMap, intents, streamingQuotes, betaMap, pendingChanges]);
 
   // Split cash and equity
   const equityRows = useMemo(() => allocationRows.filter(r => !r.isCash).sort((a, b) => b.currentPct - a.currentPct), [allocationRows]);
@@ -202,16 +257,23 @@ export default function Allocations() {
 
     try {
       for (const [positionId, changes] of pendingChanges.entries()) {
-        const intent = intents.get(positionId);
-        const updates: Partial<PositionIntent> = {};
+        // Find the row to get all position IDs for this symbol
+        const row = allocationRows.find(r => r.positionId === positionId);
+        const positionIdsToUpdate = row?.positionIds || [positionId];
 
-        if (changes.tier !== undefined) updates.tier = changes.tier || undefined;
-        if (changes.targetPct !== undefined) updates.targetAllocationPct = changes.targetPct ?? undefined;
+        // Update all positions for this symbol (across accounts)
+        for (const pid of positionIdsToUpdate) {
+          const intent = intents.get(pid);
+          const updates: Partial<PositionIntent> = {};
 
-        await window.electronAPI.upsertPositionIntent(positionId, {
-          ...intent,
-          ...updates,
-        });
+          if (changes.tier !== undefined) updates.tier = changes.tier || undefined;
+          if (changes.targetPct !== undefined) updates.targetAllocationPct = changes.targetPct ?? undefined;
+
+          await window.electronAPI.upsertPositionIntent(pid, {
+            ...intent,
+            ...updates,
+          });
+        }
       }
 
       // Success - refresh data and clear pending
@@ -223,7 +285,7 @@ export default function Allocations() {
     } finally {
       setSaving(false);
     }
-  }, [pendingChanges, intents, totals.isValid, fetchIntents]);
+  }, [pendingChanges, intents, totals.isValid, fetchIntents, allocationRows]);
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 }).format(value);
@@ -242,7 +304,19 @@ export default function Allocations() {
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Portfolio Allocation</h1>
-        <p className="text-sm text-gray-500 mt-1">Manage position tiers and target allocations</p>
+        <p className="text-sm text-gray-500 mt-1">
+          Manage position tiers and target allocations
+          {(() => {
+            const investingAccounts = accounts.filter(a => a.book === 'investing');
+            const tradingAccounts = accounts.filter(a => a.book === 'trading');
+            return (
+              <span className="ml-2 text-xs text-gray-400">
+                ({investingAccounts.length} investing {investingAccounts.length === 1 ? 'account' : 'accounts'}
+                {tradingAccounts.length > 0 && `, ${tradingAccounts.length} trading excluded`})
+              </span>
+            );
+          })()}
+        </p>
       </div>
 
       {/* Summary Panel */}
@@ -399,6 +473,7 @@ export default function Allocations() {
               <th className="text-left py-2 font-medium">Tier</th>
               <th className="text-left py-2 font-medium">Symbol</th>
               <th className="text-left py-2 font-medium">Name</th>
+              <th className="text-right py-2 font-medium">Quantity</th>
               <th className="text-right py-2 font-medium">Current %</th>
               <th className="text-right py-2 font-medium">Target %</th>
               <th className="text-right py-2 font-medium">Drift</th>
@@ -432,9 +507,19 @@ export default function Allocations() {
                     </div>
                   </td>
                   <td className="py-2">
-                    <span className="font-medium text-gray-900">{row.symbol}</span>
+                    <div className="flex items-center gap-1">
+                      <span className="font-medium text-gray-900">{row.symbol}</span>
+                      {row.positionIds.length > 1 && (
+                        <span className="text-xs text-gray-400" title={`Aggregated across ${row.positionIds.length} accounts`}>
+                          [{row.positionIds.length}]
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="py-2 text-gray-600 text-xs">{row.name}</td>
+                  <td className="text-right py-2 tabular-nums text-gray-600">
+                    {row.isCash ? '—' : row.quantity.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                  </td>
                   <td className="text-right py-2 tabular-nums text-gray-900">{row.currentPct.toFixed(1)}%</td>
                   <td className="text-right py-2">
                     <input
@@ -471,9 +556,19 @@ export default function Allocations() {
                   </div>
                 </td>
                 <td className="py-2">
-                  <span className="font-medium text-gray-700">{row.symbol}</span>
+                  <div className="flex items-center gap-1">
+                    <span className="font-medium text-gray-700">{row.symbol}</span>
+                    {row.positionIds.length > 1 && (
+                      <span className="text-xs text-gray-400" title={`Aggregated across ${row.positionIds.length} accounts`}>
+                        [{row.positionIds.length}]
+                      </span>
+                    )}
+                  </div>
                 </td>
                 <td className="py-2 text-gray-500 text-xs">Cash Position</td>
+                <td className="text-right py-2 tabular-nums text-gray-600">
+                  {formatCurrency(row.quantity)}
+                </td>
                 <td className="text-right py-2 tabular-nums text-gray-900">{row.currentPct.toFixed(1)}%</td>
                 <td className="text-right py-2">
                   <span className={`text-xs tabular-nums ${totals.cashTarget < 0 ? 'text-red-600 font-medium' : 'text-gray-600'}`}>
